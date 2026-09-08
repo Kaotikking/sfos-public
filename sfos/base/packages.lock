@@ -1,0 +1,9 @@
+# SFOS Stage-1 Debian 13/trixie package lock.
+# Reference versions verified against packages.debian.org/trixie on 2026-09-08.
+# Installation/admission is governed by the signature-bound Debian indexes;
+# this file is descriptive evidence and never overrides those indexes.
+ca-certificates=20250419
+python3=3.13.5-1
+systemd=257.13-1~deb13u1
+python3-cryptography=43.0.0-3+deb13u1
+openssl=3.5.7-1~deb13u2

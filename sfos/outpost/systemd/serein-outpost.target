@@ -1,0 +1,4 @@
+[Unit]
+Description=Serein Outpost Host-gate target
+Requires=serein-outpost-host-witness.service serein-outpost-presentation.service
+After=serein-outpost-host-witness.service serein-outpost-presentation.service

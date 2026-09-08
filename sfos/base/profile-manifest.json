@@ -1,0 +1,10 @@
+{
+  "schema": "SFOSProfiles/v1",
+  "sfos_base_count": 1,
+  "active_profile": null,
+  "profiles": [
+    {"id": "surface-cosmic", "state": "NOT_ADMITTED"},
+    {"id": "professor-cli", "state": "NOT_ADMITTED"}
+  ],
+  "physical_frame_authority": false
+}

@@ -1,0 +1,31 @@
+[Unit]
+Description=Serein Outpost local read-only presentation API
+After=serein-outpost-host-witness.service
+Requires=serein-outpost-host-witness.service
+
+[Service]
+Type=simple
+User=serein-outpost
+Group=serein-outpost
+Environment=PYTHONPATH=/usr/share/serein/outpost
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m outpost.presentation_service
+RuntimeDirectory=serein/outpost-presentation
+RuntimeDirectoryMode=0750
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=serein-outpost.target

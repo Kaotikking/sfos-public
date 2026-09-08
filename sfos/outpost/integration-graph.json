@@ -1,0 +1,17 @@
+{
+  "schema": "SereinOutpostIntegrationGraph/v1",
+  "classification": "SOURCE_ONLY_SAFE_UNCOMMISSIONED",
+  "ordered_nodes": [
+    "HOST_SFOS",
+    "SEREIN_OUTPOST_HOST_WITNESS",
+    "SEREIN_OUTPOST_PRESENTATION"
+  ],
+  "required_edges": [
+    ["serein-outpost-host-witness.service", "Before", "serein-outpost-presentation.service"],
+    ["serein-outpost.target", "Requires", "serein-outpost-presentation.service"]
+  ],
+  "downstream_state": "NOT_INCLUDED_HOST_GATE_ONLY",
+  "activation": "DISABLED",
+  "boot_admission": "SOURCE_FIXTURE_MUST_EXIT_NONZERO",
+  "live_proof": "NOT_EXECUTED"
+}

@@ -1,0 +1,489 @@
+{
+  "schema": "SereinOutpostSourceRelease/v2",
+  "generation": "host-gate-public-v1",
+  "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
+  "payload": [
+    {
+      "path": ".gitattributes",
+      "bytes": 14,
+      "sha256": "a79691a93b46e49ce460c26ef22afcc03d6eca1e63bf2edbc20e96159510f6c9"
+    },
+    {
+      "path": "README.md",
+      "bytes": 2025,
+      "sha256": "ff7439f803e24a7fbc9de65138eb735c745cc823212d7e300931e4d42b34d268"
+    },
+    {
+      "path": "install-preflight.json",
+      "bytes": 1342,
+      "sha256": "4c63755eed058fa07b92b2a66d154260ca1c85746f2ea9a4366fd2a2482f89a9"
+    },
+    {
+      "path": "install/install-outpost.sh",
+      "bytes": 1133,
+      "sha256": "7272f7a6e7e864d443a3634eba6e92660c39f899e58b3d1cd528a2b2917366b0"
+    },
+    {
+      "path": "install/rollback-outpost.sh",
+      "bytes": 278,
+      "sha256": "e27cb99698af674c7e46696a5a9e0fbefc6c589a68b1fd9bb388dc7ad5ac025b"
+    },
+    {
+      "path": "install/transaction.py",
+      "bytes": 30609,
+      "sha256": "4240172021795c1ca99429e889d60a85f6705d7898c9703ce75c2abb3ddced26"
+    },
+    {
+      "path": "integration-graph.json",
+      "bytes": 589,
+      "sha256": "75ea8728eabc46c4f4a5c9a73882e6e7994f0349ade6299bb97aa8d6a1b2b797"
+    },
+    {
+      "path": "outpost/__init__.py",
+      "bytes": 79,
+      "sha256": "2a5d9296024067d5a7302bc83db7b16c03c0d5fd7b39caf008c07d601d9b8e41"
+    },
+    {
+      "path": "outpost/debian_host_collector.py",
+      "bytes": 16971,
+      "sha256": "1aa796b25c6cc2e5930e25f35eae5b9950c90d9215d3f637c4e3e8acaf5d0f48"
+    },
+    {
+      "path": "outpost/debian_host_sources.py",
+      "bytes": 2503,
+      "sha256": "481bb17b98614193f83431e8002db88b1b061644531ec17e88b6b84206e25dc8"
+    },
+    {
+      "path": "outpost/host_vitality.py",
+      "bytes": 9055,
+      "sha256": "5c21180cd273511a262e69e5bc67a1cd43b669fe81cad7ddf3cea4bc39f9d6dd"
+    },
+    {
+      "path": "outpost/host_witness_runner.py",
+      "bytes": 3506,
+      "sha256": "998815371d157246e7286848b7119b1774b92745912d67f4e2c9e99841f93f94"
+    },
+    {
+      "path": "outpost/http_readonly.py",
+      "bytes": 7353,
+      "sha256": "d5cd38ccf216c2932ffbb305be6c634b5171826639ff4d463488474c36df377d"
+    },
+    {
+      "path": "outpost/presentation_service.py",
+      "bytes": 3244,
+      "sha256": "0372039a4baf7204680f38ae62ceead83d25f6e2a5f7424b0cb5b34f1815cf95"
+    },
+    {
+      "path": "outpost/reboot_vitality.py",
+      "bytes": 8336,
+      "sha256": "77cc3d4a376371859962ef6611bc4e19f8baf2d8224aa348b9094232a022e7f6"
+    },
+    {
+      "path": "outpost/vitals_aggregation.py",
+      "bytes": 5238,
+      "sha256": "a2f8b4ba33f6f1fd5ef369c73d4d7a3c611928ae2f68af473320322674b4fa1c"
+    },
+    {
+      "path": "refresh_manifest.py",
+      "bytes": 4577,
+      "sha256": "c354540ae46e0f45cfa840edae79808b0222eadc09ff03aa90941acbac13fb05"
+    },
+    {
+      "path": "systemd/serein-outpost-host-witness.service",
+      "bytes": 654,
+      "sha256": "9727747c8e54acaaa9f96f83ae4d22e91f925e0c5d30fa3dcc8a4ef3e24b0340"
+    },
+    {
+      "path": "systemd/serein-outpost-presentation.service",
+      "bytes": 787,
+      "sha256": "edd876ddac49534e0daaf04395b6ac9484ad8a481156982669c5c72f7af340be"
+    },
+    {
+      "path": "systemd/serein-outpost.target",
+      "bytes": 210,
+      "sha256": "b57bb88f60d1f1db4c0702477590d8842d9aa327c3e989542a35750770b9d73b"
+    },
+    {
+      "path": "verify_install_preflight.py",
+      "bytes": 13432,
+      "sha256": "344ee5150151d64f225445c75b0d814fc0a5b96c34c532edeaa337df90d5e457"
+    }
+  ],
+  "source_only_files": [
+    {
+      "path": "tests/test_debian_host_collector.py",
+      "bytes": 10418,
+      "sha256": "e4b791a150d26cfaa463fb68158503fc21a812fef17f50e35e7d738e20cb697c"
+    },
+    {
+      "path": "tests/test_debian_host_sources.py",
+      "bytes": 1094,
+      "sha256": "8c417af9280601086df0e4a77b95cae2080b39cb7f5050a998016849026731a0"
+    },
+    {
+      "path": "tests/test_host_vitality.py",
+      "bytes": 3877,
+      "sha256": "dab7ad6fea6f60eb8e19a92274c5b1b97123023b786a977c6be059afd36e3f56"
+    },
+    {
+      "path": "tests/test_host_witness_runner.py",
+      "bytes": 1631,
+      "sha256": "799793d922aa5ca54bf5f1754e900e68dc54a5d8d910f0835752c1fe55427805"
+    },
+    {
+      "path": "tests/test_http_readonly.py",
+      "bytes": 4520,
+      "sha256": "f2449c7384ff46c19122a37afd80737338c66665d7c182246a4961ca28a683d0"
+    },
+    {
+      "path": "tests/test_presentation_service.py",
+      "bytes": 4225,
+      "sha256": "e225f2f22b2882a596ace7f69ad2bf32c5170e3a4c3452554be09f7e141e6450"
+    },
+    {
+      "path": "tests/test_reboot_vitality.py",
+      "bytes": 2736,
+      "sha256": "9af8c1fab3aaa9dc1a45ca16e41fe0011cb47836c5a14511165c0f677b0dcb2d"
+    },
+    {
+      "path": "tests/test_systemd_contract.py",
+      "bytes": 1378,
+      "sha256": "d0ddbd20641da37a6b47ad69c556eea244fddb0581b8e6242714dffb4308ff16"
+    },
+    {
+      "path": "tests/test_transaction.py",
+      "bytes": 20832,
+      "sha256": "0e3aa16bcd23b2fcc7590e3c926847d9f219dee3721bd9e53fe9fc7815e7bc05"
+    },
+    {
+      "path": "tests/test_vitals_aggregation.py",
+      "bytes": 2133,
+      "sha256": "c48cd346b50ecbe67d7954a260ad7c690ad3ff77e5ecdab7bbe952d362426789"
+    }
+  ],
+  "install_files": [
+    {
+      "source": "install/install-outpost.sh",
+      "target": "/usr/share/serein/outpost/install/install-outpost.sh",
+      "bytes": 1133,
+      "sha256": "7272f7a6e7e864d443a3634eba6e92660c39f899e58b3d1cd528a2b2917366b0",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "install/rollback-outpost.sh",
+      "target": "/usr/share/serein/outpost/install/rollback-outpost.sh",
+      "bytes": 278,
+      "sha256": "e27cb99698af674c7e46696a5a9e0fbefc6c589a68b1fd9bb388dc7ad5ac025b",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "install/transaction.py",
+      "target": "/usr/share/serein/outpost/install/transaction.py",
+      "bytes": 30609,
+      "sha256": "4240172021795c1ca99429e889d60a85f6705d7898c9703ce75c2abb3ddced26",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "integration-graph.json",
+      "target": "/usr/share/serein/outpost/integration-graph.json",
+      "bytes": 589,
+      "sha256": "75ea8728eabc46c4f4a5c9a73882e6e7994f0349ade6299bb97aa8d6a1b2b797",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "outpost/__init__.py",
+      "target": "/usr/share/serein/outpost/outpost/__init__.py",
+      "bytes": 79,
+      "sha256": "2a5d9296024067d5a7302bc83db7b16c03c0d5fd7b39caf008c07d601d9b8e41",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "outpost/debian_host_collector.py",
+      "target": "/usr/share/serein/outpost/outpost/debian_host_collector.py",
+      "bytes": 16971,
+      "sha256": "1aa796b25c6cc2e5930e25f35eae5b9950c90d9215d3f637c4e3e8acaf5d0f48",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "outpost/debian_host_sources.py",
+      "target": "/usr/share/serein/outpost/outpost/debian_host_sources.py",
+      "bytes": 2503,
+      "sha256": "481bb17b98614193f83431e8002db88b1b061644531ec17e88b6b84206e25dc8",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "outpost/host_vitality.py",
+      "target": "/usr/share/serein/outpost/outpost/host_vitality.py",
+      "bytes": 9055,
+      "sha256": "5c21180cd273511a262e69e5bc67a1cd43b669fe81cad7ddf3cea4bc39f9d6dd",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "outpost/host_witness_runner.py",
+      "target": "/usr/share/serein/outpost/outpost/host_witness_runner.py",
+      "bytes": 3506,
+      "sha256": "998815371d157246e7286848b7119b1774b92745912d67f4e2c9e99841f93f94",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "outpost/http_readonly.py",
+      "target": "/usr/share/serein/outpost/outpost/http_readonly.py",
+      "bytes": 7353,
+      "sha256": "d5cd38ccf216c2932ffbb305be6c634b5171826639ff4d463488474c36df377d",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "outpost/presentation_service.py",
+      "target": "/usr/share/serein/outpost/outpost/presentation_service.py",
+      "bytes": 3244,
+      "sha256": "0372039a4baf7204680f38ae62ceead83d25f6e2a5f7424b0cb5b34f1815cf95",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "outpost/reboot_vitality.py",
+      "target": "/usr/share/serein/outpost/outpost/reboot_vitality.py",
+      "bytes": 8336,
+      "sha256": "77cc3d4a376371859962ef6611bc4e19f8baf2d8224aa348b9094232a022e7f6",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "outpost/vitals_aggregation.py",
+      "target": "/usr/share/serein/outpost/outpost/vitals_aggregation.py",
+      "bytes": 5238,
+      "sha256": "a2f8b4ba33f6f1fd5ef369c73d4d7a3c611928ae2f68af473320322674b4fa1c",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "systemd/serein-outpost-host-witness.service",
+      "target": "/usr/share/serein/outpost/systemd/serein-outpost-host-witness.service",
+      "bytes": 654,
+      "sha256": "9727747c8e54acaaa9f96f83ae4d22e91f925e0c5d30fa3dcc8a4ef3e24b0340",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "systemd/serein-outpost-presentation.service",
+      "target": "/usr/share/serein/outpost/systemd/serein-outpost-presentation.service",
+      "bytes": 787,
+      "sha256": "edd876ddac49534e0daaf04395b6ac9484ad8a481156982669c5c72f7af340be",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "systemd/serein-outpost.target",
+      "target": "/usr/share/serein/outpost/systemd/serein-outpost.target",
+      "bytes": 210,
+      "sha256": "b57bb88f60d1f1db4c0702477590d8842d9aa327c3e989542a35750770b9d73b",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "verify_install_preflight.py",
+      "target": "/usr/share/serein/outpost/verify_install_preflight.py",
+      "bytes": 13432,
+      "sha256": "344ee5150151d64f225445c75b0d814fc0a5b96c34c532edeaa337df90d5e457",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "systemd/serein-outpost-host-witness.service",
+      "target": "/etc/systemd/system/serein-outpost-host-witness.service",
+      "bytes": 654,
+      "sha256": "9727747c8e54acaaa9f96f83ae4d22e91f925e0c5d30fa3dcc8a4ef3e24b0340",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "systemd/serein-outpost-presentation.service",
+      "target": "/etc/systemd/system/serein-outpost-presentation.service",
+      "bytes": 787,
+      "sha256": "edd876ddac49534e0daaf04395b6ac9484ad8a481156982669c5c72f7af340be",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "systemd/serein-outpost.target",
+      "target": "/etc/systemd/system/serein-outpost.target",
+      "bytes": 210,
+      "sha256": "b57bb88f60d1f1db4c0702477590d8842d9aa327c3e989542a35750770b9d73b",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    }
+  ],
+  "install_directories": [
+    {
+      "target": "/usr/share/serein",
+      "mode": "0755",
+      "uid": 0,
+      "gid": 0,
+      "collision_policy": "adopt_exact"
+    },
+    {
+      "target": "/usr/share/serein/outpost",
+      "mode": "0755",
+      "uid": 0,
+      "gid": 0,
+      "collision_policy": "adopt_exact"
+    },
+    {
+      "target": "/etc/serein-outpost",
+      "mode": "0750",
+      "uid": 0,
+      "gid_policy": "identity_gid",
+      "collision_policy": "adopt_exact"
+    },
+    {
+      "target": "/var/lib/serein-outpost",
+      "mode": "0750",
+      "uid_policy": "identity_uid",
+      "gid_policy": "identity_gid",
+      "collision_policy": "deny"
+    },
+    {
+      "target": "/run/serein/outpost",
+      "mode": "0750",
+      "uid_policy": "identity_uid",
+      "gid_policy": "identity_gid",
+      "collision_policy": "deny"
+    },
+    {
+      "target": "/usr/share/serein/outpost/install",
+      "mode": "0755",
+      "uid": 0,
+      "gid": 0,
+      "collision_policy": "deny"
+    },
+    {
+      "target": "/usr/share/serein/outpost/outpost",
+      "mode": "0755",
+      "uid": 0,
+      "gid": 0,
+      "collision_policy": "deny"
+    },
+    {
+      "target": "/usr/share/serein/outpost/systemd",
+      "mode": "0755",
+      "uid": 0,
+      "gid": 0,
+      "collision_policy": "deny"
+    }
+  ],
+  "generated_files": [
+    {
+      "target": "/etc/serein-outpost/rollback-root",
+      "mode": "0600",
+      "uid": 0,
+      "gid": 0
+    }
+  ],
+  "required_immutable_inputs": [
+    {
+      "target": "/etc/serein-outpost/readonly.token",
+      "classification": "REQUIRED_IMMUTABLE_INPUT",
+      "sha256_policy": "PLAN_BOUND_REQUIRED",
+      "mode": "0640",
+      "uid": 0,
+      "gid_policy": "identity_gid"
+    },
+    {
+      "target": "/etc/serein-outpost/admission.token",
+      "classification": "REQUIRED_IMMUTABLE_INPUT",
+      "sha256_policy": "PLAN_BOUND_REQUIRED",
+      "mode": "0640",
+      "uid": 0,
+      "gid_policy": "identity_gid"
+    },
+    {
+      "target": "/etc/serein-outpost/cognition-signing.pem",
+      "classification": "REQUIRED_IMMUTABLE_INPUT",
+      "sha256_policy": "PLAN_BOUND_REQUIRED",
+      "key_id": "outpost-cognition-v1",
+      "mode": "0640",
+      "uid": 0,
+      "gid_policy": "identity_gid"
+    },
+    {
+      "target": "/usr/share/serein/outpost/cognition-verification.pem",
+      "classification": "REQUIRED_IMMUTABLE_INPUT",
+      "sha256_policy": "PLAN_BOUND_REQUIRED",
+      "key_id": "outpost-cognition-v1",
+      "fingerprint_policy": "PLAN_BOUND_REQUIRED",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    }
+  ],
+  "runtime_socket_paths": [
+    "/run/serein/outpost/readonly.sock",
+    "/run/serein/outpost/admission.sock",
+    "/run/serein/outpost-presentation/status.sock"
+  ],
+  "protected_unit_state": {},
+  "identity_policy": {
+    "user": "serein-outpost",
+    "group": "serein-outpost",
+    "uid_lt": 1000,
+    "gid_lt": 1000,
+    "uid_equals_gid": true,
+    "home": "/nonexistent",
+    "shell": "/usr/sbin/nologin",
+    "supplementary_groups": []
+  },
+  "runtime_dependencies": [
+    {
+      "python_module": "cryptography",
+      "purpose": "Ed25519 witness signing",
+      "required_before_install": true
+    },
+    {
+      "executable": "gpgv",
+      "purpose": "Debian InRelease verification",
+      "required_before_install": true
+    },
+    {
+      "path": "/usr/share/keyrings/debian-archive-keyring.gpg",
+      "debian_package": "debian-archive-keyring",
+      "purpose": "Debian archive trust anchor",
+      "required_before_install": true
+    },
+    {
+      "executable": "nvidia-smi",
+      "purpose": "GPU driver evidence",
+      "required_before_install": true
+    }
+  ],
+  "self_digest": "sha256:2c9ddb4d6a5065944e97af41c5b5939a7d5555d6a44ed3cc5e232c59d3d6f766"
+}
