@@ -52,8 +52,8 @@
     },
     {
       "path": "install/public_installer_cli.py",
-      "bytes": 5092,
-      "sha256": "78d54a1af4e94ac68528fcc1a1d3cf1739d5953eec2fd5b97964e4aa097e05e0"
+      "bytes": 5297,
+      "sha256": "fa194d3466898225a1e37cfdac70da2532a241f7c4416e75027a6b40a0916e7a"
     },
     {
       "path": "install/rollback-outpost.sh",
@@ -184,8 +184,8 @@
     },
     {
       "path": "tests/test_public_installer_cli.py",
-      "bytes": 3602,
-      "sha256": "4057849ef2287c75490d4052ccd2aeb1463aee45c5aa50cbf34c658f0f46038f"
+      "bytes": 4019,
+      "sha256": "5fd94ed4d1bb2b8d839efecb13731d72c95e841fe75aaa2fc76a749ed06495c1"
     },
     {
       "path": "tests/test_reboot_vitality.py",
@@ -262,8 +262,8 @@
     {
       "source": "install/public_installer_cli.py",
       "target": "/usr/share/serein/outpost/install/public_installer_cli.py",
-      "bytes": 5092,
-      "sha256": "78d54a1af4e94ac68528fcc1a1d3cf1739d5953eec2fd5b97964e4aa097e05e0",
+      "bytes": 5297,
+      "sha256": "fa194d3466898225a1e37cfdac70da2532a241f7c4416e75027a6b40a0916e7a",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -630,5 +630,5 @@
       "required_before_install": true
     }
   ],
-  "self_digest": "sha256:04dbe40a92e562dbf03d7dbd6158169ef3968cc28a408758c0848a044a39f3ca"
+  "self_digest": "sha256:52fd9673f54fdfccc50ff26d573ba813332a82a572e566c7492cec13529824cf"
 }

@@ -33,11 +33,12 @@ def fetch_exact(url:str)->tuple[bytes,str]:
     try:
         with opener.open(request,timeout=TIMEOUT_SECONDS) as response:
             final=response.geturl(); length=response.headers.get("Content-Length")
-            if length is None or not length.isdigit(): raise TransactionError("PUBLIC_CONTENT_LENGTH_REQUIRED")
-            expected=int(length)
-            if expected<1 or expected>MAX_ARCHIVE_BYTES: raise TransactionError("PUBLIC_ARCHIVE_SIZE_DENIED")
-            data=response.read(expected+1)
-            if len(data)!=expected: raise TransactionError("PUBLIC_ARCHIVE_TRUNCATED")
+            if length is not None and not length.isdigit(): raise TransactionError("PUBLIC_CONTENT_LENGTH_DENIED")
+            expected=int(length) if length is not None else None
+            if expected is not None and (expected<1 or expected>MAX_ARCHIVE_BYTES): raise TransactionError("PUBLIC_ARCHIVE_SIZE_DENIED")
+            data=response.read(MAX_ARCHIVE_BYTES+1)
+            if not data or len(data)>MAX_ARCHIVE_BYTES: raise TransactionError("PUBLIC_ARCHIVE_SIZE_DENIED")
+            if expected is not None and len(data)!=expected: raise TransactionError("PUBLIC_ARCHIVE_TRUNCATED")
             return data,final
     except TransactionError: raise
     except (urllib.error.URLError,TimeoutError,socket.timeout,ssl.SSLError,OSError) as exc:

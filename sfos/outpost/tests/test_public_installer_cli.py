@@ -17,6 +17,11 @@ class Response:
     def read(self,size): return self.data[:size]
 
 
+class NoLengthResponse(Response):
+    def __init__(self,data,url="https://codeload.github.com/Kaotikking/sfos-public/tar.gz/"+("a"*40)):
+        super().__init__(data,url); self.headers={}
+
+
 def install_opener(monkeypatch,value):
     class Opener:
         def open(self,*args,**kwargs):
@@ -27,6 +32,11 @@ def install_opener(monkeypatch,value):
 
 def test_fetch_exact_binds_length_and_final_url(monkeypatch):
     response=Response(b"archive"); install_opener(monkeypatch,response)
+    assert fetch_exact(response.url)==(b"archive",response.url)
+
+
+def test_fetch_exact_accepts_codeload_chunked_body_under_hard_cap(monkeypatch):
+    response=NoLengthResponse(b"archive"); install_opener(monkeypatch,response)
     assert fetch_exact(response.url)==(b"archive",response.url)
 
 

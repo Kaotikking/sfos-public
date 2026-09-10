@@ -136,8 +136,8 @@
     },
     {
       "path": "outpost/install/public_installer_cli.py",
-      "bytes": 5092,
-      "sha256": "78d54a1af4e94ac68528fcc1a1d3cf1739d5953eec2fd5b97964e4aa097e05e0"
+      "bytes": 5297,
+      "sha256": "fa194d3466898225a1e37cfdac70da2532a241f7c4416e75027a6b40a0916e7a"
     },
     {
       "path": "outpost/install/rollback-outpost.sh",
@@ -212,7 +212,7 @@
     {
       "path": "outpost/release-manifest.json",
       "bytes": 19408,
-      "sha256": "18ce849c9ae1a52af578054af9f9707c1f58365f65ea570b415425425b55a821"
+      "sha256": "67404b4e6165e6463d2866839a0758559ee1154bc5557b7f70e8f2579926f448"
     },
     {
       "path": "outpost/systemd/serein-outpost-host-witness.service",
@@ -266,8 +266,8 @@
     },
     {
       "path": "outpost/tests/test_public_installer_cli.py",
-      "bytes": 3602,
-      "sha256": "4057849ef2287c75490d4052ccd2aeb1463aee45c5aa50cbf34c658f0f46038f"
+      "bytes": 4019,
+      "sha256": "5fd94ed4d1bb2b8d839efecb13731d72c95e841fe75aaa2fc76a749ed06495c1"
     },
     {
       "path": "outpost/tests/test_reboot_vitality.py",
@@ -300,5 +300,5 @@
       "sha256": "7da5241d65bf3221cc018be6e1cc437a2ebd8b18143e17a1609398c0b43ff782"
     }
   ],
-  "self_digest": "sha256:15ee85b537f3883a961a79715825119b644add6f269511eeb105cad1a60802ed"
+  "self_digest": "sha256:1732ca1deb0b0383d54ba9c5a5fb6c6cc4e4be5d02c80f20fc3d132dc697b750"
 }
