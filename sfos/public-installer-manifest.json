@@ -141,8 +141,8 @@
     },
     {
       "path": "outpost/install/public_generation_transaction.py",
-      "bytes": 50956,
-      "sha256": "17df56a1ba0053f38f7fd5ba2dfba2b4df2321c1f3966f27bc32ff9d8f212a0f"
+      "bytes": 50976,
+      "sha256": "c9058101841182fce9b9de21379bff73429fb47cb5cb19e2ad5a5851340ff2e7"
     },
     {
       "path": "outpost/install/public_installer_cli.py",
@@ -222,7 +222,7 @@
     {
       "path": "outpost/release-manifest.json",
       "bytes": 19408,
-      "sha256": "5c29ca746aaf402d5d7f68aeaae1cb80a002ba63c3d374b43f450042e714a4a1"
+      "sha256": "d6ab3c237de1875982d8a98a8e28e248c5c0e0a69489b294c317c430e86de599"
     },
     {
       "path": "outpost/systemd/serein-outpost-host-witness.service",
@@ -310,5 +310,6 @@
       "sha256": "7da5241d65bf3221cc018be6e1cc437a2ebd8b18143e17a1609398c0b43ff782"
     }
   ],
-  "self_digest": "sha256:55cf9bcbbf6b13b9519f3a6445d883ac38f58a1e29102560857f7b62646b2a62"
+  "self_digest": "sha256:447150193cc0c95d266d953c37689ad73bd28ead45a7224f5355e30b10570bfe"
 }
+

@@ -537,7 +537,7 @@ def install_public_generation(adapter, plan, authority_path, fetch, probe, accep
                 if directory.exists() and not any(directory.iterdir()): directory.rmdir()
             if rollback.exists() and not any(rollback.iterdir()): rollback.rmdir()
         if state_mode_changed:
-            info=state.lstat(); _deny(state.is_symlink() or not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o755,"PUBLIC_STATE_DIR_COMPENSATION_CAS_DENIED")
+            info=state.lstat(); _deny(state.is_symlink() or not stat.S_ISDIR(info.st_mode) or (os.name!="nt" and stat.S_IMODE(info.st_mode)!=0o755),"PUBLIC_STATE_DIR_COMPENSATION_CAS_DENIED")
             adapter.boundary(); os.chmod(state,int(state_pre_mode,8))
         if image_files:
             for item in reversed(image_files): _restore_file_state(adapter,under(adapter.root,item["target"]),item["pre"],item["post"])
@@ -554,3 +554,4 @@ def install_public_generation(adapter, plan, authority_path, fetch, probe, accep
         raise
     finally:
         os.close(descriptor); os.unlink(lock)
+
