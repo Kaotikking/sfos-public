@@ -326,7 +326,8 @@ def _migrate_flat_predecessor_locked(adapter, release, plan, selector, launcher_
     _, inventory, controlled = validate_replacement_plan(adapter, release, plan, plan["plan_digest"])
     unit_replacements=_planned_unit_replacements(adapter,inventory)
     legacy_release_path=under(adapter.root,"/usr/share/serein/outpost/release-manifest.json")
-    if os.path.lexists(legacy_release_path):
+    legacy_manifest_absent=not os.path.lexists(legacy_release_path)
+    if not legacy_manifest_absent:
         try: legacy_release=json.loads(legacy_release_path.read_text(encoding="utf-8"))
         except (OSError,ValueError) as error: raise TransactionError("LEGACY_RELEASE_MANIFEST_DENIED") from error
         legacy_release_digest=str(legacy_release.get("self_digest",""))
@@ -385,6 +386,11 @@ def _migrate_flat_predecessor_locked(adapter, release, plan, selector, launcher_
             source=under(adapter.root,target); exact_file(adapter,source,{k:row[k] for k in ("target","bytes","sha256","mode","uid","gid")})
             atomic_write(adapter,destination,source.read_bytes(),row["mode"],row["uid"],row["gid"])
             copied.append({"target":"/"+destination.relative_to(adapter.root).as_posix(),"bytes":row["bytes"],"sha256":row["sha256"],"mode":row["mode"],"uid":row["uid"],"gid":row["gid"]})
+        if legacy_manifest_absent:
+            descriptor=(json.dumps({"schema":"SereinOutpostLegacyGeneration/v1","self_digest":legacy_release_digest,"predecessor_receipt_sha256":plan["predecessor"]["sha256"]},sort_keys=True)+"\n").encode()
+            descriptor_target=generation/"release-manifest.json"
+            atomic_write(adapter,descriptor_target,descriptor,"0644",0,0)
+            copied.append({"target":"/"+descriptor_target.relative_to(adapter.root).as_posix(),"bytes":len(descriptor),"sha256":sha(descriptor),"mode":"0644","uid":0,"gid":0})
         launcher_path=Path(launcher_source)
         launcher_info=launcher_path.lstat()
         if launcher_path.is_symlink() or not stat.S_ISREG(launcher_info.st_mode) or (os.name!="nt" and (launcher_info.st_uid!=0 or launcher_info.st_gid!=0 or stat.S_IMODE(launcher_info.st_mode)!=0o755)):

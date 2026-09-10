@@ -314,6 +314,9 @@ def test_manifest_absent_flat_predecessor_uses_bound_inventory_digest(tmp_path):
     receipt=migrate_flat_predecessor(adapter,release,plan,selector,launcher)
     assert receipt["generation_id"]==plan["predecessor"]["inventory_digest"]
     assert (tmp_path/"usr/share/serein/outpost-generations"/receipt["generation_id"]).is_dir()
+    value,resolved=read_selector(tmp_path/"var/lib/serein-outpost/generation-state/current.json",tmp_path/"usr/share/serein/outpost-generations")
+    assert value["generation"]==receipt["generation_id"]
+    assert resolved.name==receipt["generation_id"]
 
 
 def test_flat_migration_rollback_removes_only_new_control_plane(tmp_path):
