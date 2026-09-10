@@ -222,17 +222,17 @@
     {
       "path": "outpost/release-manifest.json",
       "bytes": 19408,
-      "sha256": "2cef509104439d02a689f9e2973530f886b94abaae6533721bc018ed41caa2eb"
+      "sha256": "a1e5b31700cb3979cecb3bedf8aa7a93cbd4e6050c3d51515901fab52552b699"
     },
     {
       "path": "outpost/systemd/serein-outpost-host-witness.service",
-      "bytes": 654,
-      "sha256": "9727747c8e54acaaa9f96f83ae4d22e91f925e0c5d30fa3dcc8a4ef3e24b0340"
+      "bytes": 636,
+      "sha256": "02014ef45aebdf3b97b208b6f7ede16a054c216f09290bb927102ca287030e15"
     },
     {
       "path": "outpost/systemd/serein-outpost-presentation.service",
-      "bytes": 787,
-      "sha256": "edd876ddac49534e0daaf04395b6ac9484ad8a481156982669c5c72f7af340be"
+      "bytes": 769,
+      "sha256": "d1d016f972741338f6e4c1ad6d6af596e264a49cb131edbffc41fcca71b6709a"
     },
     {
       "path": "outpost/systemd/serein-outpost.target",
@@ -286,8 +286,8 @@
     },
     {
       "path": "outpost/tests/test_systemd_contract.py",
-      "bytes": 1454,
-      "sha256": "515677820edf583f51335ab120290534b731cdb0fe3d92b6659e57eac05b7feb"
+      "bytes": 1786,
+      "sha256": "bc0a89288213cf79411c889451b0d79b57c6e3d327f3983b5753ada84e72ee69"
     },
     {
       "path": "outpost/tests/test_transaction.py",
@@ -310,5 +310,5 @@
       "sha256": "7da5241d65bf3221cc018be6e1cc437a2ebd8b18143e17a1609398c0b43ff782"
     }
   ],
-  "self_digest": "sha256:d73bf40d5608cee6dc8d1fa89e87e9a04f1645d0092e22791731784182206c75"
+  "self_digest": "sha256:0c0d1a883f2fef94b41a721567ab452d8131179238cadce576d0daae07277b18"
 }

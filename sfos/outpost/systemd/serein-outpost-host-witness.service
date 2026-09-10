@@ -8,8 +8,7 @@ Before=serein-outpost-presentation.service
 Type=oneshot
 User=serein-outpost
 Group=serein-outpost
-ExecStart=/usr/bin/python3 -m outpost.host_witness_runner --state-root /var/lib/serein-outpost/host-vitality
-Environment=PYTHONPATH=/usr/share/serein/outpost
+ExecStart=/usr/libexec/serein/outpost-generation-launcher outpost/host_witness_runner.py --state-root /var/lib/serein-outpost/host-vitality
 Environment=PYTHONDONTWRITEBYTECODE=1
 StateDirectory=serein-outpost
 StateDirectoryMode=0750

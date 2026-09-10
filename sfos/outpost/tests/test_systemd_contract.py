@@ -14,11 +14,15 @@ def test_host_witness_precedes_local_presentation():
     expected="serein-outpost-host-witness.service serein-outpost-presentation.service"
     assert f"Requires={expected}" in target and f"After={expected}" in target
     assert "[Install]" in target and "WantedBy=multi-user.target" in target
+    launcher="/usr/libexec/serein/outpost-generation-launcher"
+    assert f"ExecStart={launcher} outpost/host_witness_runner.py" in witness
+    assert f"ExecStart={launcher} outpost/presentation_service.py" in presentation
+    assert "PYTHONPATH=/usr/share/serein/outpost" not in witness+presentation
 
 def test_presentation_is_read_only_local_unix_socket():
     unit=text("systemd/serein-outpost-presentation.service")
     assert "RestrictAddressFamilies=AF_UNIX" in unit
-    assert "ExecStart=/usr/bin/python3 -m outpost.presentation_service" in unit
+    assert "ExecStart=/usr/libexec/serein/outpost-generation-launcher outpost/presentation_service.py" in unit
     assert "AF_INET" not in unit and "LoadCredential=" not in unit
 
 def test_public_release_has_no_downstream_install_targets():

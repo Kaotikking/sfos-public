@@ -7,9 +7,8 @@ Requires=serein-outpost-host-witness.service
 Type=simple
 User=serein-outpost
 Group=serein-outpost
-Environment=PYTHONPATH=/usr/share/serein/outpost
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/usr/bin/python3 -m outpost.presentation_service
+ExecStart=/usr/libexec/serein/outpost-generation-launcher outpost/presentation_service.py
 RuntimeDirectory=serein/outpost-presentation
 RuntimeDirectoryMode=0750
 Restart=on-failure
