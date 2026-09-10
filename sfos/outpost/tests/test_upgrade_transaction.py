@@ -290,6 +290,32 @@ def test_flat_predecessor_migrates_without_changing_legacy_tree(tmp_path):
     assert value["generation"]=="d"*64 and resolved==generation
 
 
+def test_manifest_absent_flat_predecessor_uses_bound_inventory_digest(tmp_path):
+    adapter,release,plan,selector,launcher=migration_fixture(tmp_path)
+    manifest=tmp_path/"usr/share/serein/outpost/release-manifest.json"
+    manifest.unlink()
+    plan["active_inventory"]=[row for row in plan["active_inventory"] if row["target"]!="/usr/share/serein/outpost/release-manifest.json"]
+    predecessor_path=tmp_path/plan["predecessor"]["receipt"].lstrip("/")
+    predecessor=json.loads(predecessor_path.read_text())
+    predecessor["files"]=[row for row in predecessor["files"] if row["target"]!="/usr/share/serein/outpost/release-manifest.json"]
+    plan["predecessor"]["inventory_digest"]=sha(canonical(plan["active_inventory"]))
+    predecessor["receipt_digest"]=sha(canonical({k:v for k,v in predecessor.items() if k!="receipt_digest"}))
+    predecessor_bytes=(json.dumps(predecessor,indent=2)+"\n").encode()
+    predecessor_path.write_bytes(predecessor_bytes)
+    plan["predecessor"]["sha256"]=sha(predecessor_bytes)
+    plan["controlled_inventory"]=[row for row in plan["controlled_inventory"] if row["target"]!="/usr/share/serein/outpost/release-manifest.json"]
+    controlled_path=tmp_path/plan["controlled_inventory_receipt"]["receipt"].lstrip("/")
+    controlled={"schema":"SereinOutpostControlledInventoryReceipt/v1","controlled_inventory_digest":sha(canonical(plan["controlled_inventory"]))}
+    controlled["receipt_digest"]=sha(canonical({k:v for k,v in controlled.items() if k!="receipt_digest"}))
+    controlled_bytes=(json.dumps(controlled,indent=2)+"\n").encode()
+    controlled_path.write_bytes(controlled_bytes)
+    plan["controlled_inventory_receipt"].update(sha256=sha(controlled_bytes),inventory_digest=controlled["controlled_inventory_digest"])
+    plan["plan_digest"]=replacement_plan_digest(plan)
+    receipt=migrate_flat_predecessor(adapter,release,plan,selector,launcher)
+    assert receipt["generation_id"]==plan["predecessor"]["inventory_digest"]
+    assert (tmp_path/"usr/share/serein/outpost-generations"/receipt["generation_id"]).is_dir()
+
+
 def test_flat_migration_rollback_removes_only_new_control_plane(tmp_path):
     adapter,release,plan,selector,launcher=migration_fixture(tmp_path)
     legacy=(tmp_path/"usr/share/serein/outpost/release-manifest.json").read_bytes()

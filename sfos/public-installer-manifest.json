@@ -151,8 +151,8 @@
     },
     {
       "path": "outpost/install/upgrade_transaction.py",
-      "bytes": 54967,
-      "sha256": "5e70e77806ab584e0f9e1f111e939114daa64d05fbb9e664493bfad578692723"
+      "bytes": 55506,
+      "sha256": "23377c2ad80b49614a1dc641cc80cff61dc13320c525a58a5de5d0bba3888053"
     },
     {
       "path": "outpost/integration-graph.json",
@@ -212,7 +212,7 @@
     {
       "path": "outpost/release-manifest.json",
       "bytes": 19408,
-      "sha256": "67404b4e6165e6463d2866839a0758559ee1154bc5557b7f70e8f2579926f448"
+      "sha256": "a1fc227407603f9a5fc88d014f92c1408427a1dc9a84e92f07c36575c91117e4"
     },
     {
       "path": "outpost/systemd/serein-outpost-host-witness.service",
@@ -286,8 +286,8 @@
     },
     {
       "path": "outpost/tests/test_upgrade_transaction.py",
-      "bytes": 34660,
-      "sha256": "668f8f23c7e4608ef8a551d3308f534215f1afa4f79a40b730dbef73cea3307e"
+      "bytes": 36731,
+      "sha256": "094d5d57932caf95b1f3b516f76465e0826f25e543e8086ac82cf7a7b6c38d6c"
     },
     {
       "path": "outpost/tests/test_vitals_aggregation.py",
@@ -300,5 +300,5 @@
       "sha256": "7da5241d65bf3221cc018be6e1cc437a2ebd8b18143e17a1609398c0b43ff782"
     }
   ],
-  "self_digest": "sha256:1732ca1deb0b0383d54ba9c5a5fb6c6cc4e4be5d02c80f20fc3d132dc697b750"
+  "self_digest": "sha256:20022e61b079ad9ccab196b597491e6e690372856143280dc37c56e9c04bc3a9"
 }

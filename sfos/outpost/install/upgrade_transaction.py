@@ -326,9 +326,17 @@ def _migrate_flat_predecessor_locked(adapter, release, plan, selector, launcher_
     _, inventory, controlled = validate_replacement_plan(adapter, release, plan, plan["plan_digest"])
     unit_replacements=_planned_unit_replacements(adapter,inventory)
     legacy_release_path=under(adapter.root,"/usr/share/serein/outpost/release-manifest.json")
-    try: legacy_release=json.loads(legacy_release_path.read_text(encoding="utf-8"))
-    except (OSError,ValueError) as error: raise TransactionError("LEGACY_RELEASE_MANIFEST_DENIED") from error
-    legacy_release_digest=str(legacy_release.get("self_digest",""))
+    if os.path.lexists(legacy_release_path):
+        try: legacy_release=json.loads(legacy_release_path.read_text(encoding="utf-8"))
+        except (OSError,ValueError) as error: raise TransactionError("LEGACY_RELEASE_MANIFEST_DENIED") from error
+        legacy_release_digest=str(legacy_release.get("self_digest",""))
+    else:
+        # The first admitted flat installer generation predates release manifests.
+        # Its validated predecessor receipt and complete active inventory are the
+        # only permissible identity fallback; never synthesize an unbound ID.
+        if "/usr/share/serein/outpost/release-manifest.json" in inventory:
+            raise TransactionError("LEGACY_RELEASE_MANIFEST_DENIED")
+        legacy_release_digest="sha256:"+str(plan["predecessor"]["inventory_digest"])
     generation_id = legacy_release_digest[7:] if legacy_release_digest.startswith("sha256:") else legacy_release_digest
     if not re.fullmatch(r"[0-9a-f]{64}", generation_id):
         raise TransactionError("GENERATION_ID_DENIED")
