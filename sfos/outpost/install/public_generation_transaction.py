@@ -165,7 +165,7 @@ def rollback_public_generation(adapter, rollback):
     receipt_path=rollback/"transaction-receipt.json"; nofollow_ancestors(adapter.root,receipt_path,allow_missing=False)
     receipt_info=receipt_path.lstat(); _deny(receipt_path.is_symlink() or not stat.S_ISREG(receipt_info.st_mode) or (os.name!="nt" and (receipt_info.st_uid!=0 or receipt_info.st_gid!=0 or stat.S_IMODE(receipt_info.st_mode)!=0o600)),"PUBLIC_RECEIPT_CUSTODY_DENIED")
     value=json.loads(receipt_path.read_text(encoding="utf-8"))
-    required={"schema","source","boot_id","immutable_pre","immutable_post","generation_target","generation_inventory","selector_pre","selector_post","service_deltas","probe_evidence","api_vitals_evidence","terminal_evidence","rollback_selector","rollback_complete","receipt_key_fingerprint","receipt_signature","receipt_digest"}
+    required={"schema","source","boot_id","immutable_pre","immutable_post","generation_target","generation_inventory","state_dir_pre","state_dir_post","selector_pre","selector_post","service_deltas","probe_evidence","api_vitals_evidence","terminal_evidence","rollback_selector","rollback_complete","receipt_key_fingerprint","receipt_signature","receipt_digest"}
     _deny(set(value)!=required or value.get("schema")!="SereinPublicOutpostGenerationReceipt/v1" or value.get("receipt_digest")!=_receipt_digest(value) or value.get("rollback_complete") is not False or value.get("rollback_selector")!="/"+rollback.relative_to(adapter.root).as_posix(),"PUBLIC_RECEIPT_DENIED")
     anchor=under(adapter.root,"/usr/share/serein/outpost/cognition-verification.pem"); anchor_bytes=anchor.read_bytes()
     _deny(value["receipt_key_fingerprint"]!=sha(anchor_bytes),"PUBLIC_RECEIPT_AUTHORITY_DENIED")
@@ -189,10 +189,15 @@ def rollback_public_generation(adapter, rollback):
             if index<journal["step"]: continue
             before=value["selector_pre"][name]; after=post[name]
             if _row_matches(adapter,path,after):
-                if before["state"]=="PRESENT": atomic_write(adapter,path,base64.b64decode(before["content_b64"]),"0600",0,0)
+                if before["state"]=="PRESENT": atomic_write(adapter,path,base64.b64decode(before["content_b64"]),before["mode"],0,0)
                 elif os.path.lexists(path): adapter.boundary(); path.unlink()
             elif not _row_matches(adapter,path,before): raise TransactionError("PUBLIC_ROLLBACK_SELECTOR_CAS_DENIED")
             journal=_write_rollback_state(adapter,journal_path,{**{key:item for key,item in journal.items() if key not in {"state_digest","state_signature"}},"step":index+1},private)
+        if journal["step"]<3:
+            info=state.lstat(); current_row={"target":"/var/lib/serein-outpost/generation-state","state":"PRESENT","mode":f"{stat.S_IMODE(info.st_mode):04o}","uid":info.st_uid,"gid":info.st_gid}
+            if current_row==value["state_dir_post"]: adapter.boundary(); os.chmod(state,int(value["state_dir_pre"]["mode"],8))
+            elif current_row!=value["state_dir_pre"]: raise TransactionError("PUBLIC_ROLLBACK_STATE_DIR_CAS_DENIED")
+            journal=_write_rollback_state(adapter,journal_path,{**{key:item for key,item in journal.items() if key not in {"state_digest","state_signature"}},"step":3},private)
         journal=_write_rollback_state(adapter,journal_path,{**{key:item for key,item in journal.items() if key not in {"state_digest","state_signature"}},"phase":"GENERATION","step":0},private)
     candidate=rollback/"candidate.json"; generation=under(adapter.root,value["generation_target"])
     if journal["phase"]=="GENERATION":
@@ -235,7 +240,7 @@ def install_public_generation(adapter, plan, authority_path, fetch, probe, accep
     lock=under(adapter.root,"/var/lib/serein/rollback/.outpost-public-generation.lock")
     nofollow_ancestors(adapter.root,lock); _deny(os.path.lexists(lock),"PUBLIC_TRANSACTION_LOCKED")
     lock.parent.mkdir(parents=True,exist_ok=True); descriptor=os.open(lock,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)
-    generation=None; flipped=False; old_current=None; old_lkg=None; published_current=None; published_lkg=None; written=[]; written_expected={}; created_dirs=[]
+    generation=None; flipped=False; old_current=None; old_lkg=None; published_current=None; published_lkg=None; state_pre_mode=None; state_mode_changed=False; written=[]; written_expected={}; created_dirs=[]
     try:
         os.write(descriptor,b"locked\n"); os.fsync(descriptor)
         raw,final_url=fetch(plan["archive_url"])
@@ -270,10 +275,15 @@ def install_public_generation(adapter, plan, authority_path, fetch, probe, accep
         read_selector(candidate,generation.parent)
         probe_evidence=probe(generation,candidate,boot); _deny(not _acceptance_pass(probe_evidence,boot,plan["release_digest"]),"PUBLIC_CANDIDATE_PROBE_DENIED")
         api_evidence=accept(generation,candidate,boot); _deny(not _acceptance_pass(api_evidence,boot,plan["release_digest"]),"PUBLIC_CANDIDATE_ACCEPTANCE_DENIED")
-        current=state/"current.json"; lkg=state/"lkg.json"; state.mkdir(parents=True,exist_ok=True)
+        current=state/"current.json"; lkg=state/"lkg.json"
+        state_info=state.lstat(); _deny(state.is_symlink() or not stat.S_ISDIR(state_info.st_mode) or (os.name!="nt" and (state_info.st_uid!=0 or state_info.st_gid!=0 or stat.S_IMODE(state_info.st_mode) not in {0o700,0o755})),"PUBLIC_STATE_DIR_CUSTODY_DENIED")
+        state_pre_mode=f"{stat.S_IMODE(state_info.st_mode):04o}"
+        if state_pre_mode!="0755": adapter.boundary(); os.chmod(state,0o755); state_mode_changed=True
         old_current=current.read_bytes() if current.exists() and not current.is_symlink() else None
         observed_current=old_current
         old_lkg=lkg.read_bytes() if lkg.exists() and not lkg.is_symlink() else None
+        old_current_mode=f"{adapter.file_metadata(current)['mode']:04o}" if old_current is not None else None
+        old_lkg_mode=f"{adapter.file_metadata(lkg)['mode']:04o}" if old_lkg is not None else None
         if old_current is not None:
             try: read_selector(current,generation.parent)
             except Exception:
@@ -296,16 +306,17 @@ def install_public_generation(adapter, plan, authority_path, fetch, probe, accep
                 metadata=adapter.file_metadata(lkg); exact_file(adapter,lkg,{"target":"/"+lkg.relative_to(adapter.root).as_posix(),"bytes":len(old_lkg),"sha256":sha(old_lkg),"mode":f"{metadata['mode']:04o}","uid":metadata["uid"],"gid":metadata["gid"]})
             except Exception as exc: raise TransactionError("PUBLIC_LKG_SELECTOR_CAS_DENIED") from exc
         published_current=(json.dumps(selector,indent=2)+"\n").encode(); published_lkg=old_current
-        if published_lkg is not None: atomic_write(adapter,lkg,published_lkg,"0600",0,0)
-        atomic_write(adapter,current,published_current,"0600",0,0); flipped=True
+        if published_lkg is not None: atomic_write(adapter,lkg,published_lkg,"0644",0,0)
+        atomic_write(adapter,current,published_current,"0644",0,0); flipped=True
         terminal_evidence=accept(generation,current,boot); _deny(not _acceptance_pass(terminal_evidence,boot,plan["release_digest"]),"PUBLIC_POSTFLIP_ACCEPTANCE_DENIED")
         for row in plan["immutable_rows"]: exact_file(adapter,under(adapter.root,row["target"]),row)
         selector_bytes=(json.dumps(selector,indent=2)+"\n").encode()
-        def selector_state(path,data):
+        def selector_state(path,data,mode):
             if data is None: return {"target":"/"+path.relative_to(adapter.root).as_posix(),"state":"ABSENT"}
-            return {"target":"/"+path.relative_to(adapter.root).as_posix(),"state":"PRESENT","bytes":len(data),"sha256":sha(data),"mode":"0600","uid":0,"gid":0,"content_b64":base64.b64encode(data).decode()}
-        receipt={"schema":"SereinPublicOutpostGenerationReceipt/v1","source":{"repository":plan["repository"],"repo_url":plan["repo_url"],"ref":plan["ref"],"commit":plan["commit"],"tree":plan["tree"],"archive_url":plan["archive_url"],"archive_sha256":plan["archive_sha256"],"release_digest":plan["release_digest"],"authority_key_id":plan["authority_key_id"],"authority_sha256":plan["authority_sha256"],"signature":plan["signature"]},"boot_id":boot,"immutable_pre":plan["immutable_rows"],"immutable_post":plan["immutable_rows"],"generation_target":"/"+generation.relative_to(adapter.root).as_posix(),"generation_inventory":inventory,"selector_pre":{"current":selector_state(current,observed_current),"lkg":selector_state(lkg,old_lkg)},"selector_post":{"current":selector_state(current,selector_bytes),"lkg":selector_state(lkg,old_current)},"service_deltas":[],"probe_evidence":probe_evidence,"api_vitals_evidence":api_evidence,"terminal_evidence":terminal_evidence,"rollback_selector":plan["rollback_selector"],"rollback_complete":False}
-        if old_current is None: receipt["selector_post"]["lkg"]=selector_state(lkg,None)
+            return {"target":"/"+path.relative_to(adapter.root).as_posix(),"state":"PRESENT","bytes":len(data),"sha256":sha(data),"mode":mode,"uid":0,"gid":0,"content_b64":base64.b64encode(data).decode()}
+        state_dir_pre={"target":"/var/lib/serein-outpost/generation-state","state":"PRESENT","mode":state_pre_mode,"uid":0,"gid":0}; state_dir_post={**state_dir_pre,"mode":"0755"}
+        receipt={"schema":"SereinPublicOutpostGenerationReceipt/v1","source":{"repository":plan["repository"],"repo_url":plan["repo_url"],"ref":plan["ref"],"commit":plan["commit"],"tree":plan["tree"],"archive_url":plan["archive_url"],"archive_sha256":plan["archive_sha256"],"release_digest":plan["release_digest"],"authority_key_id":plan["authority_key_id"],"authority_sha256":plan["authority_sha256"],"signature":plan["signature"]},"boot_id":boot,"immutable_pre":plan["immutable_rows"],"immutable_post":plan["immutable_rows"],"generation_target":"/"+generation.relative_to(adapter.root).as_posix(),"generation_inventory":inventory,"state_dir_pre":state_dir_pre,"state_dir_post":state_dir_post,"selector_pre":{"current":selector_state(current,observed_current,old_current_mode),"lkg":selector_state(lkg,old_lkg,old_lkg_mode)},"selector_post":{"current":selector_state(current,selector_bytes,"0644"),"lkg":selector_state(lkg,old_current,"0644")},"service_deltas":[],"probe_evidence":probe_evidence,"api_vitals_evidence":api_evidence,"terminal_evidence":terminal_evidence,"rollback_selector":plan["rollback_selector"],"rollback_complete":False}
+        if old_current is None: receipt["selector_post"]["lkg"]=selector_state(lkg,None,"0644")
         verification=under(adapter.root,"/usr/share/serein/outpost/cognition-verification.pem").read_bytes(); signing=under(adapter.root,"/etc/serein-outpost/cognition-signing.pem").read_bytes(); private=load_pem_private_key(signing,password=None)
         derived=private.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo)
         _deny(derived!=verification,"PUBLIC_RECEIPT_KEYPAIR_DENIED")
@@ -315,13 +326,13 @@ def install_public_generation(adapter, plan, authority_path, fetch, probe, accep
         if flipped:
             current=state/"current.json"; lkg=state/"lkg.json"
             try:
-                exact_file(adapter,current,{"target":"/"+current.relative_to(adapter.root).as_posix(),"bytes":len(published_current),"sha256":sha(published_current),"mode":"0600","uid":0,"gid":0})
+                exact_file(adapter,current,{"target":"/"+current.relative_to(adapter.root).as_posix(),"bytes":len(published_current),"sha256":sha(published_current),"mode":"0644","uid":0,"gid":0})
                 if published_lkg is None: _deny(os.path.lexists(lkg),"PUBLIC_POSTFLIP_LKG_CAS_DENIED")
-                else: exact_file(adapter,lkg,{"target":"/"+lkg.relative_to(adapter.root).as_posix(),"bytes":len(published_lkg),"sha256":sha(published_lkg),"mode":"0600","uid":0,"gid":0})
+                else: exact_file(adapter,lkg,{"target":"/"+lkg.relative_to(adapter.root).as_posix(),"bytes":len(published_lkg),"sha256":sha(published_lkg),"mode":"0644","uid":0,"gid":0})
             except Exception as exc: raise TransactionError("PUBLIC_POSTFLIP_SELECTOR_CAS_DENIED") from exc
-            if old_current is not None: atomic_write(adapter,current,old_current,"0600",0,0)
+            if old_current is not None: atomic_write(adapter,current,old_current,old_current_mode,0,0)
             elif current.exists(): current.unlink()
-            if old_lkg is not None: atomic_write(adapter,lkg,old_lkg,"0600",0,0)
+            if old_lkg is not None: atomic_write(adapter,lkg,old_lkg,old_lkg_mode,0,0)
             elif lkg.exists(): lkg.unlink()
             candidate=rollback/"candidate.json"
             _remove_exact_generation(adapter,generation,inventory,candidate)
@@ -338,6 +349,9 @@ def install_public_generation(adapter, plan, authority_path, fetch, probe, accep
             for directory in sorted(created_dirs,key=lambda path:len(path.parts),reverse=True):
                 if directory.exists() and not any(directory.iterdir()): directory.rmdir()
             if rollback.exists() and not any(rollback.iterdir()): rollback.rmdir()
+        if state_mode_changed:
+            info=state.lstat(); _deny(state.is_symlink() or not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o755,"PUBLIC_STATE_DIR_COMPENSATION_CAS_DENIED")
+            adapter.boundary(); os.chmod(state,int(state_pre_mode,8))
         raise
     finally:
         os.close(descriptor); os.unlink(lock)

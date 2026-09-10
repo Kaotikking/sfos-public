@@ -1,4 +1,4 @@
-import base64,copy,hashlib,io,json,os,tarfile
+import base64,copy,hashlib,io,json,os,shutil,stat,subprocess,tarfile,tempfile
 from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -59,6 +59,47 @@ def test_exact_public_generation_installs_and_flips(tmp_path):
     result=install_public_generation(adapter,plan,authority,fetch,ok,ok)
     assert result["status"]=="COMMITTED"
     assert (tmp_path/"usr/share/serein/outpost-generations"/plan["release_digest"][7:]).is_dir()
+
+@pytest.mark.skipif(os.name=="nt" or not hasattr(os,"geteuid") or os.geteuid()!=0 or shutil.which("runuser") is None,reason="requires root Linux service-user proof")
+def test_installed_selector_is_readable_by_unprivileged_service_user():
+    root=Path(tempfile.mkdtemp(prefix="serein-outpost-service-user-",dir="/tmp"));os.chmod(root,0o755)
+    try:
+        adapter,plan,authority,fetch,ok,launcher=fixture(root);install_public_generation(adapter,plan,authority,fetch,ok,ok)
+        state=root/"var/lib/serein-outpost/generation-state";assert stat.S_IMODE(state.stat().st_mode)==0o755
+        assert all(stat.S_IMODE((state/name).stat().st_mode)==0o644 for name in ("current.json","lkg.json"))
+        script="from pathlib import Path;from install.generation_launcher import read_selector;read_selector(Path(r'%s'),Path(r'%s'))"%(state/"current.json",root/"usr/share/serein/outpost-generations")
+        source_root=Path(__file__).resolve().parents[1]
+        result=subprocess.run(["runuser","-u","nobody","--","env",f"PYTHONPATH={source_root}","PYTHONDONTWRITEBYTECODE=1","python3","-B","-c",script],text=True,capture_output=True)
+        assert result.returncode==0,result.stderr
+    finally: shutil.rmtree(root)
+
+def test_next_generation_records_and_restores_readable_selector_mode(tmp_path):
+    adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path)
+    state=adapter.root/"var/lib/serein-outpost/generation-state"
+    os.chmod(state/"current.json",0o644);os.chmod(state/"lkg.json",0o644)
+    install_public_generation(adapter,plan,authority,fetch,ok,ok)
+    assert stat.S_IMODE((state/"current.json").stat().st_mode)==0o644
+    rollback=adapter.root/plan["rollback_selector"].lstrip("/")
+    assert rollback_public_generation(adapter,rollback)["rollback_complete"] is True
+    assert stat.S_IMODE((state/"current.json").stat().st_mode)==0o644
+
+def test_state_directory_mode_is_receipt_bound_and_rollback_restored(tmp_path):
+    adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path);state=adapter.root/"var/lib/serein-outpost/generation-state";os.chmod(state,0o700)
+    install_public_generation(adapter,plan,authority,fetch,ok,ok)
+    assert stat.S_IMODE(state.stat().st_mode)==0o755
+    rollback=adapter.root/plan["rollback_selector"].lstrip("/");receipt=json.loads((rollback/"transaction-receipt.json").read_text())
+    assert receipt["state_dir_pre"]["mode"]=="0700" and receipt["state_dir_post"]["mode"]=="0755"
+    rollback_public_generation(adapter,rollback)
+    assert stat.S_IMODE(state.stat().st_mode)==0o700
+
+def test_failed_postflip_acceptance_restores_state_directory_and_selector_modes(tmp_path):
+    adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path);state=adapter.root/"var/lib/serein-outpost/generation-state";os.chmod(state,0o700);calls={"n":0}
+    def reject_terminal(*args):
+        calls["n"]+=1
+        return ok(*args) if calls["n"]==1 else {**ok(*args),"api":"FAIL"}
+    with pytest.raises(TransactionError,match="PUBLIC_POSTFLIP_ACCEPTANCE_DENIED"): install_public_generation(adapter,plan,authority,fetch,ok,reject_terminal)
+    assert stat.S_IMODE(state.stat().st_mode)==0o700
+    assert all(stat.S_IMODE((state/name).stat().st_mode)==0o600 for name in ("current.json","lkg.json"))
 
 def test_exact_public_generation_accepts_canonical_root_owned_archive_parent(tmp_path):
     adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path)

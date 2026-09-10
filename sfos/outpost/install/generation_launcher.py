@@ -30,11 +30,12 @@ def _digest(value):
     return hashlib.sha256(_canonical({k: v for k, v in value.items() if k != "selector_digest"})).hexdigest()
 
 
-def _read_regular(path: Path, mode: int | None = None) -> tuple[bytes, os.stat_result]:
+def _read_regular(path: Path, mode: int | set[int] | None = None) -> tuple[bytes, os.stat_result]:
     info=path.lstat()
     if path.is_symlink() or not stat.S_ISREG(info.st_mode):
         raise LaunchDenied("GENERATION_FILE_TYPE_DENIED:"+str(path))
-    if os.name != "nt" and (info.st_uid != 0 or info.st_gid != 0 or (mode is not None and stat.S_IMODE(info.st_mode) != mode)):
+    allowed={mode} if isinstance(mode,int) else mode
+    if os.name != "nt" and (info.st_uid != 0 or info.st_gid != 0 or (allowed is not None and stat.S_IMODE(info.st_mode) not in allowed)):
         raise LaunchDenied("GENERATION_FILE_POLICY_DENIED:"+str(path))
     flags=os.O_RDONLY|getattr(os,"O_NOFOLLOW",0)
     descriptor=os.open(path,flags)
@@ -54,7 +55,7 @@ def _read_regular(path: Path, mode: int | None = None) -> tuple[bytes, os.stat_r
 def read_selector(path: Path, generation_root: Path) -> tuple[dict, Path]:
     if path.is_symlink(): raise LaunchDenied("GENERATION_SELECTOR_TYPE_DENIED")
     _reject_symlink_ancestors(path, path.parent.parent)
-    try: selector_bytes,info=_read_regular(path,0o600)
+    try: selector_bytes,info=_read_regular(path,{0o600,0o644})
     except LaunchDenied as exc: raise LaunchDenied("GENERATION_SELECTOR_TYPE_DENIED") from exc
     value = json.loads(selector_bytes.decode("utf-8"))
     required = {"schema", "generation", "release_digest", "predecessor_receipt_sha256", "inventory_digest", "selector_digest"}

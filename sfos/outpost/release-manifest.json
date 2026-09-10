@@ -27,8 +27,8 @@
     },
     {
       "path": "install/generation_launcher.py",
-      "bytes": 7470,
-      "sha256": "2e7045235a085523393150ba352d54d6a1fc139b80e4ae319f7e371103f00f40"
+      "bytes": 7552,
+      "sha256": "e80c8f8303c171ea89538fc1981598c54e0967ca54f877ec49c6abb021475b86"
     },
     {
       "path": "install/install-outpost.sh",
@@ -47,8 +47,8 @@
     },
     {
       "path": "install/public_generation_transaction.py",
-      "bytes": 31563,
-      "sha256": "9db9f4d4e0c7d0c6c6bee50eb9649373dccbf5f759b995641320174058fa25e2"
+      "bytes": 33477,
+      "sha256": "39393f7a05d7de30cc7bc88b575164685e9ffd4e196a7695627df2c8ae8bfae3"
     },
     {
       "path": "install/public_installer_cli.py",
@@ -179,8 +179,8 @@
     },
     {
       "path": "tests/test_public_generation_transaction.py",
-      "bytes": 19617,
-      "sha256": "efef9674734dc87fd7719d5919de739c6f9307d85d8bd63d6ff39f9f4160f00e"
+      "bytes": 22881,
+      "sha256": "4153acb1718d1defe7a4b8b6850e8dfad61c8769cf3d24df5902f6b4da1c8477"
     },
     {
       "path": "tests/test_public_installer_cli.py",
@@ -217,8 +217,8 @@
     {
       "source": "install/generation_launcher.py",
       "target": "/usr/share/serein/outpost/install/generation_launcher.py",
-      "bytes": 7470,
-      "sha256": "2e7045235a085523393150ba352d54d6a1fc139b80e4ae319f7e371103f00f40",
+      "bytes": 7552,
+      "sha256": "e80c8f8303c171ea89538fc1981598c54e0967ca54f877ec49c6abb021475b86",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -253,8 +253,8 @@
     {
       "source": "install/public_generation_transaction.py",
       "target": "/usr/share/serein/outpost/install/public_generation_transaction.py",
-      "bytes": 31563,
-      "sha256": "9db9f4d4e0c7d0c6c6bee50eb9649373dccbf5f759b995641320174058fa25e2",
+      "bytes": 33477,
+      "sha256": "39393f7a05d7de30cc7bc88b575164685e9ffd4e196a7695627df2c8ae8bfae3",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -451,8 +451,8 @@
     {
       "source": "install/generation_launcher.py",
       "target": "/usr/libexec/serein/outpost-generation-launcher",
-      "bytes": 7470,
-      "sha256": "2e7045235a085523393150ba352d54d6a1fc139b80e4ae319f7e371103f00f40",
+      "bytes": 7552,
+      "sha256": "e80c8f8303c171ea89538fc1981598c54e0967ca54f877ec49c6abb021475b86",
       "mode": "0755",
       "uid": 0,
       "gid": 0
@@ -630,5 +630,5 @@
       "required_before_install": true
     }
   ],
-  "self_digest": "sha256:81ff5bbe0c1f64e6fe94f1d645a6a2cbd64bd625b7df8a059a67e5bfba41c0d7"
+  "self_digest": "sha256:597f39fa562fe73b60523ea47bd2ebaf0fedee411b99b34435e70e2047beaeda"
 }
