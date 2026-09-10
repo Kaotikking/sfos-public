@@ -176,8 +176,8 @@
     },
     {
       "path": "outpost/outpost/host_vitality.py",
-      "bytes": 9055,
-      "sha256": "5c21180cd273511a262e69e5bc67a1cd43b669fe81cad7ddf3cea4bc39f9d6dd"
+      "bytes": 9072,
+      "sha256": "12b9483daefe284d250342d3711a12cae37c340ff2b9626fe6b6479eb3df87f4"
     },
     {
       "path": "outpost/outpost/host_witness_runner.py",
@@ -212,7 +212,7 @@
     {
       "path": "outpost/release-manifest.json",
       "bytes": 19408,
-      "sha256": "15c5b8b608428e8dc801bcfc53f1d595c03df74bc3763225c6a07ec23f49497b"
+      "sha256": "eb974d7847eeb97446835a233e1e025189a9bf2c1fe6c982f45393ccbd5d6920"
     },
     {
       "path": "outpost/systemd/serein-outpost-host-witness.service",
@@ -241,8 +241,8 @@
     },
     {
       "path": "outpost/tests/test_host_vitality.py",
-      "bytes": 3877,
-      "sha256": "dab7ad6fea6f60eb8e19a92274c5b1b97123023b786a977c6be059afd36e3f56"
+      "bytes": 4260,
+      "sha256": "eb9af44fe17acd43b837bd7cf711fa11bf92518342b6874985599abb66c43d88"
     },
     {
       "path": "outpost/tests/test_host_witness_runner.py",
@@ -300,5 +300,6 @@
       "sha256": "7da5241d65bf3221cc018be6e1cc437a2ebd8b18143e17a1609398c0b43ff782"
     }
   ],
-  "self_digest": "sha256:a589c99e1b50e3d35423adc646fb3f0d014e2f42121bb0e93ca1c852b7587f04"
+  "self_digest": "sha256:f763f11c6baa02aaab5128f7e300c4215a1ceeaf798fc0175bbf49e6ad41afa9"
 }
+

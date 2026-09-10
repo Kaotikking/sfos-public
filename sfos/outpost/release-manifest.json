@@ -92,8 +92,8 @@
     },
     {
       "path": "outpost/host_vitality.py",
-      "bytes": 9055,
-      "sha256": "5c21180cd273511a262e69e5bc67a1cd43b669fe81cad7ddf3cea4bc39f9d6dd"
+      "bytes": 9072,
+      "sha256": "12b9483daefe284d250342d3711a12cae37c340ff2b9626fe6b6479eb3df87f4"
     },
     {
       "path": "outpost/host_witness_runner.py",
@@ -159,8 +159,8 @@
     },
     {
       "path": "tests/test_host_vitality.py",
-      "bytes": 3877,
-      "sha256": "dab7ad6fea6f60eb8e19a92274c5b1b97123023b786a977c6be059afd36e3f56"
+      "bytes": 4260,
+      "sha256": "eb9af44fe17acd43b837bd7cf711fa11bf92518342b6874985599abb66c43d88"
     },
     {
       "path": "tests/test_host_witness_runner.py",
@@ -334,8 +334,8 @@
     {
       "source": "outpost/host_vitality.py",
       "target": "/usr/share/serein/outpost/outpost/host_vitality.py",
-      "bytes": 9055,
-      "sha256": "5c21180cd273511a262e69e5bc67a1cd43b669fe81cad7ddf3cea4bc39f9d6dd",
+      "bytes": 9072,
+      "sha256": "12b9483daefe284d250342d3711a12cae37c340ff2b9626fe6b6479eb3df87f4",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -630,5 +630,6 @@
       "required_before_install": true
     }
   ],
-  "self_digest": "sha256:e0e52e49300b49bfdf6a76a5d613b8a355c17df5c69bde82959647302030efad"
+  "self_digest": "sha256:81ff5bbe0c1f64e6fe94f1d645a6a2cbd64bd625b7df8a059a67e5bfba41c0d7"
 }
+

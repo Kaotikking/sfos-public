@@ -15,7 +15,7 @@ def digest(value):return hashlib.sha256(canonical(value)).hexdigest()
 
 def validate(observation:Mapping[str,Any])->dict:
  required={"schema","target","boot_id","observed_at","host","gpu","debian","evidence_digest"}
- if not isinstance(observation,Mapping) or set(observation)!=required or observation.get("schema")!=SCHEMA or observation.get("target")!="SEREIN_HOST":raise HostVitalityError("HOST_VITALITY_SHAPE_DENIED")
+ if not isinstance(observation,Mapping) or set(observation)!=required or observation.get("schema")!=SCHEMA or observation.get("target") not in {"SEREIN_HOST","VM4010"}:raise HostVitalityError("HOST_VITALITY_SHAPE_DENIED")
  if not BOOT.fullmatch(str(observation.get("boot_id"))) or not isinstance(observation.get("observed_at"),(int,float)):raise HostVitalityError("HOST_VITALITY_IDENTITY_DENIED")
  host=observation.get("host");gpu=observation.get("gpu")
  if (not isinstance(host,Mapping) or set(host)!={"hostname","os_id","os_version_id","machine_id","status"}
@@ -93,3 +93,4 @@ def apply_debian_plan(plan:Mapping[str,Any],current:Mapping[str,Any],adapter)->d
  except Exception:
   adapter.rollback(rollback)
   raise
+

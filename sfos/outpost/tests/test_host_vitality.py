@@ -10,6 +10,10 @@ def test_persists_current_previous_boot_and_ecg(tmp_path):
  same=store.record(observation());assert same["classification"]=="CURRENT_BOOT_STABLE"
  changed=store.record(observation("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"));assert changed["classification"]=="RECOVERED_AFTER_BOOT_CHANGE" and changed["previous_boot_id"]==first["current_boot_id"]
  assert len((tmp_path/"ecg.jsonl").read_text().splitlines())==3 and store.snapshot()==changed
+def test_admits_existing_vm4010_host_witness_without_rewriting_identity(tmp_path):
+ value=observation();value["target"]="VM4010";body={key:item for key,item in value.items() if key!="evidence_digest"};value["evidence_digest"]=digest(body)
+ saved=HostVitalityStore(tmp_path).record(value)
+ assert saved["latest"]["target"]=="VM4010" and saved["classification"]=="FIRST_BOOT_OBSERVED"
 def test_drift_and_malformed_state_fail_closed(tmp_path):
  store=HostVitalityStore(tmp_path);assert store.record(observation(gpu=False))["classification"]=="DRIFT_DETECTED"
  (tmp_path/"state.json").write_text("{}");
@@ -42,3 +46,4 @@ def test_debian_postchange_drift_rolls_back():
  adapter=Adapter()
  with pytest.raises(HostVitalityError,match="POSTCHANGE"):apply_debian_plan(plan,current,adapter)
  assert adapter.rolled
+
