@@ -466,15 +466,13 @@ def rollback_flat_migration(adapter, selector, allow_missing_receipt=False):
         for selector_row in (receipt["current_selector"],receipt["lkg_selector"]):
             exact_file(adapter,under(adapter.root,selector_row["target"]),selector_row)
         exact_file(adapter,under(adapter.root,receipt["launcher"]["target"]),receipt["launcher"])
-        try:
-            from .generation_launcher import read_selector
-        except ImportError:
-            from generation_launcher import read_selector
         generation_root=under(adapter.root,"/usr/share/serein/outpost-generations")
         for selector_row in (receipt["current_selector"],receipt["lkg_selector"]):
-            try: value,resolved=read_selector(under(adapter.root,selector_row["target"]),generation_root)
+            try: value=json.loads(under(adapter.root,selector_row["target"]).read_text(encoding="utf-8"))
             except Exception as exc: raise TransactionError("GENERATION_ROLLBACK_INVENTORY_DENIED") from exc
-            if value["generation"]!=receipt["generation_id"] or resolved!=under(adapter.root,receipt["generation_target"]): raise TransactionError("GENERATION_ROLLBACK_SELECTOR_DENIED")
+            required={"schema","generation","release_digest","predecessor_receipt_sha256","inventory_digest","selector_digest"}
+            if set(value)!=required or value["schema"]!="SereinOutpostGenerationSelector/v1" or value["selector_digest"]!=generation_selector_digest(value) or value["generation"]!=receipt["generation_id"] or generation_root/value["generation"]!=under(adapter.root,receipt["generation_target"]):
+                raise TransactionError("GENERATION_ROLLBACK_SELECTOR_DENIED")
         for replacement in reversed(receipt["unit_replacements"]):
             target=under(adapter.root,replacement["target"]); backup=selector/replacement["backup"]
             current=sha(target.read_bytes()) if target.is_file() and not target.is_symlink() else None
@@ -492,14 +490,19 @@ def rollback_flat_migration(adapter, selector, allow_missing_receipt=False):
             # The earlier read protects the pre-effect decision.  Re-read the
             # complete no-follow inventory after unit restoration and its
             # daemon-reload boundary so cleanup can never consume late drift.
-            try:
-                _,resolved=read_selector(under(adapter.root,receipt["current_selector"]["target"]),generation_root)
-            except Exception as exc:
-                raise TransactionError("GENERATION_ROLLBACK_FINAL_INVENTORY_DENIED") from exc
-            if resolved!=generation:
+            try: final_value=json.loads(under(adapter.root,receipt["current_selector"]["target"]).read_text(encoding="utf-8"))
+            except Exception as exc: raise TransactionError("GENERATION_ROLLBACK_FINAL_INVENTORY_DENIED") from exc
+            if final_value.get("generation")!=receipt["generation_id"] or generation_root/final_value["generation"]!=generation:
                 raise TransactionError("GENERATION_ROLLBACK_FINAL_INVENTORY_DENIED")
             inventory_path=generation/"generation-inventory.json"
             inventory=json.loads(inventory_path.read_text(encoding="utf-8"))
+            declared={row["path"] for row in inventory}
+            actual=set()
+            for item in generation.rglob("*"):
+                relative=item.relative_to(generation).as_posix()
+                if item.is_symlink(): raise TransactionError("GENERATION_ROLLBACK_FINAL_INVENTORY_DENIED")
+                if relative!="generation-inventory.json": actual.add(relative)
+            if actual!=declared: raise TransactionError("GENERATION_ROLLBACK_FINAL_INVENTORY_DENIED")
             file_rows=[row for row in inventory if row.get("kind")=="file"]
             directory_rows=[row for row in inventory if row.get("kind")=="directory"]
             # Remove only receipt/inventory-bound members.  A foreign entry is
