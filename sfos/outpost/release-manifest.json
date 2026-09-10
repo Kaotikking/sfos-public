@@ -47,8 +47,8 @@
     },
     {
       "path": "install/public_generation_transaction.py",
-      "bytes": 31548,
-      "sha256": "51f1599f8169c1d0eb1b2fc71e4cfb4d827dee8883c7cb0f4cb2c9a39bd8a022"
+      "bytes": 31549,
+      "sha256": "67657d6ff73e95e48a982692b77e1fa10a9d2673e78eaf19d0d74a72e519b16a"
     },
     {
       "path": "install/public_installer_cli.py",
@@ -179,13 +179,13 @@
     },
     {
       "path": "tests/test_public_generation_transaction.py",
-      "bytes": 19314,
-      "sha256": "1ec76133fe16dc85bf7bc0ce5d2941cd0a6818fd39ec0e313db748d15266f179"
+      "bytes": 19315,
+      "sha256": "0fbafc3cf9cc4356486f0d802ba919cc03c408ceb7ce1c83d4fa39a67c33dcf5"
     },
     {
       "path": "tests/test_public_installer_cli.py",
-      "bytes": 3606,
-      "sha256": "575e5defb99dab64e6534d664b96ee2e0627a3f0bdacfb60d3e9d1378904d5c6"
+      "bytes": 3602,
+      "sha256": "4057849ef2287c75490d4052ccd2aeb1463aee45c5aa50cbf34c658f0f46038f"
     },
     {
       "path": "tests/test_reboot_vitality.py",
@@ -253,8 +253,8 @@
     {
       "source": "install/public_generation_transaction.py",
       "target": "/usr/share/serein/outpost/install/public_generation_transaction.py",
-      "bytes": 31548,
-      "sha256": "51f1599f8169c1d0eb1b2fc71e4cfb4d827dee8883c7cb0f4cb2c9a39bd8a022",
+      "bytes": 31549,
+      "sha256": "67657d6ff73e95e48a982692b77e1fa10a9d2673e78eaf19d0d74a72e519b16a",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -630,5 +630,5 @@
       "required_before_install": true
     }
   ],
-  "self_digest": "sha256:ee0a22e4b9305ae20a1b8d9e04d6772e525c1d315cef0fbd29c8c1ca758e5b1d"
+  "self_digest": "sha256:04dbe40a92e562dbf03d7dbd6158169ef3968cc28a408758c0848a044a39f3ca"
 }

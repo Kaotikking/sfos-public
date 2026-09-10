@@ -22,7 +22,7 @@ from .upgrade_transaction import atomic_write, exact_file, generation_selector_d
 
 REPOSITORY="Kaotikking/sfos-public"
 REF="refs/heads/main"
-ARCHIVE_RE=re.compile(r"https://github\.com/Kaotikking/sfos-public/archive/([0-9a-f]{40})\.tar\.gz")
+ARCHIVE_RE=re.compile(r"https://codeload\.github\.com/Kaotikking/sfos-public/tar\.gz/([0-9a-f]{40})")
 ROLLBACK_RE=re.compile(r"outpost-public-generation-\d{8}T\d{6}Z-[0-9a-f]{12}")
 IMMUTABLE_POLICY={
     "/etc/serein-outpost/readonly.token":"0640",

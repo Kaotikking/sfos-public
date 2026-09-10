@@ -9,7 +9,7 @@ from install.public_installer_cli import MAX_ARCHIVE_BYTES, TransactionError, fe
 
 
 class Response:
-    def __init__(self,data,url="https://github.com/Kaotikking/sfos-public/archive/"+("a"*40)+".tar.gz",length=None):
+    def __init__(self,data,url="https://codeload.github.com/Kaotikking/sfos-public/tar.gz/"+("a"*40),length=None):
         self.data=data; self.url=url; self.headers={"Content-Length":str(len(data) if length is None else length)}
     def __enter__(self): return self
     def __exit__(self,*args): return False
@@ -42,7 +42,7 @@ def test_fetch_exact_denies_truncation_and_oversize(monkeypatch,response,code):
 @pytest.mark.parametrize("failure",[urllib.error.URLError("secret host detail"),socket.timeout("secret timeout detail")])
 def test_fetch_errors_are_sanitized(monkeypatch,failure):
     install_opener(monkeypatch,failure)
-    with pytest.raises(TransactionError) as caught: fetch_exact("https://github.com/Kaotikking/sfos-public/archive/"+("a"*40)+".tar.gz")
+    with pytest.raises(TransactionError) as caught: fetch_exact("https://codeload.github.com/Kaotikking/sfos-public/tar.gz/"+("a"*40))
     assert "secret" not in str(caught.value)
 
 
