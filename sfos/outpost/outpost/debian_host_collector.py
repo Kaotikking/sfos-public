@@ -246,6 +246,7 @@ def collect_host_observation(
     package_exceptions: Iterable[str] = (),
     runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] = _run,
     observed_at: float | None = None,
+    now: float | None = None,
 ) -> dict:
     if target != "SEREIN_HOST":
         raise DebianHostEvidenceError("HOST_TARGET_DENIED")
@@ -254,7 +255,9 @@ def collect_host_observation(
         deb822=root / "etc/apt/sources.list.d/debian.sources"
         sources_path=deb822 if deb822.is_file() else root / "etc/apt/sources.list"
     sources = verify_sources(sources_path, keyring)
-    current_time = time.time() if observed_at is None else observed_at
+    if observed_at is not None and now is not None:
+        raise DebianHostEvidenceError("OBSERVATION_TIME_AMBIGUOUS")
+    current_time = time.time() if observed_at is None and now is None else (observed_at if observed_at is not None else now)
     if set(inrelease_files) != set(EXPECTED_RELEASES):
         raise DebianHostEvidenceError("DEBIAN_RELEASE_SET_DENIED")
     releases = {name: verify_inrelease(path, keyring=keyring, runner=runner, now=current_time) for name, path in sorted(inrelease_files.items())}

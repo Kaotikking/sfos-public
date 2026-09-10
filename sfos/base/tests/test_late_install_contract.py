@@ -8,7 +8,8 @@ def test_late_install_verifies_and_stays_inactive():
  assert 'sfos-outpost-source.$$' not in s
  assert 'openssl genpkey' not in s and 'openssl rand' not in s
  assert 'groupadd' not in s and 'useradd' not in s
- assert 'transaction.py" bootstrap' in s
+ assert 'transaction.py" install' in s and 'immutable-input-plan.json' in s
+ assert 'IMMUTABLE_INPUT_PLAN_CUSTODY_DENIED' in s and '600:0:0' in s
  assert 'base-road-complete.json' in s and 'rollback_selector' in s
  assert 'NEW_OUTPOST_REQUIRED' in s and 'OUTPOST_INSTALLED_INACTIVE' in s
  assert not any(x in s for x in ('systemctl enable','systemctl start','reboot','shutdown','poweroff'))

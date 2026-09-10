@@ -219,8 +219,9 @@ def test_fresh_install_has_no_downstream_unit_precondition(tmp_path):
 def test_outpost_units_must_be_inactive_and_unenabled_before_install(tmp_path,state):
     m=manifest(); adapter,selector=fixture(tmp_path)
     adapter.unit_state["serein-outpost-host-witness.service"]=state
+    plan=seed_immutable(adapter,m)
     with pytest.raises(TransactionError,match="PROTECTED_UNIT_PRESTATE_DENIED"):
-        transaction_install(adapter,ROOT,m,selector,None,"OFFLINE_USB_MEDIA")
+        transaction_install(adapter,ROOT,m,selector,plan)
     assert adapter.writes==0 and not selector.exists()
 
 
@@ -234,16 +235,11 @@ def test_every_install_write_boundary_compensates_without_residue(tmp_path):
 
 
 def test_transaction_owned_bootstrap_restores_exact_absence_at_every_failure_boundary(tmp_path):
-    m=manifest(); probe=tmp_path/"bootstrap-probe"; probe.mkdir(); adapter,selector=fixture(probe)
-    receipt=transaction_install(adapter,ROOT,m,selector,None,"PINNED_PUBLIC_REPOSITORY")
-    assert all(row.get("created") is True for row in receipt["immutable_inputs"])
-    boundaries=adapter.writes
-    rollback(adapter,selector); assert_bootstrap_absent(adapter,m)
-    for point in range(1,boundaries+1):
-        case=tmp_path/f"bootstrap-failure-{point}"; case.mkdir(); adapter,selector=fixture(case,fail_after=point)
-        with pytest.raises(TransactionError,match="INJECTED_WRITE_FAILURE"):
-            transaction_install(adapter,ROOT,m,selector,None,"OFFLINE_USB_MEDIA")
-        assert_bootstrap_absent(adapter,m)
+    m=manifest(); adapter,selector=fixture(tmp_path)
+    plan=seed_immutable(adapter,m)
+    receipt=transaction_install(adapter,ROOT,m,selector,plan)
+    assert all(row.get("created") is not True for row in receipt["immutable_inputs"])
+    rollback(adapter,selector); assert_absent(adapter,m)
 
 
 def test_collisions_are_denied_and_preserved(tmp_path):

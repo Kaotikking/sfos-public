@@ -14,7 +14,14 @@ Rescue/Resume guidance, and expected/unexpected reboot plus recovery lifecycle.
 Missing producers remain `UNKNOWN`; the presentation, aggregators, and chronology
 grant no authority and perform no recovery or domain activation.
 
-The installer is first-install-only, inactive by default, and creates a complete rollback receipt before writing payload files. It does not enable services, start services, reboot, commission Kernel, or advance any downstream gate.
+First installation is inactive by default and creates a complete rollback
+receipt before writing payload files. Existing flat installations migrate to an
+immutable content-addressed predecessor generation. Later public updates stage
+an exact signed generation, probe its boot preflight and Vitals acceptance while
+current remains unchanged, then atomically advance LKG and current selectors.
+Executable rollback is receipt-bound, resumable, and fail-closed; it never scans
+for a newest generation. Neither road enables downstream domains, reboots, or
+advances Kernel.
 
 ## Verification
 

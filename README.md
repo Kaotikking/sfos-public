@@ -14,7 +14,17 @@ identity, network topology, models, or downstream domain payloads.
 Start with [`sfos/base/installer/MEDIA_BUILD.md`](sfos/base/installer/MEDIA_BUILD.md)
 for bare-machine media. On an existing compatible Debian 13 amd64 installation,
 use `sfos/base/installer/converge-existing.sh` only after its Host/GPU/Debian
-witness prerequisites pass.
+witness prerequisites pass. Both roads require an externally supplied,
+root-owned mode `0600` immutable-input plan; the public installer never creates,
+embeds, or exports private keys or tokens.
+
+Public updates are pinned to `https://github.com/Kaotikking/sfos-public` on
+`refs/heads/main` and require the exact full commit, tree, archive SHA-256,
+release self-digest, admitted signature, and authority. A candidate is installed
+as a content-addressed generation and probed through the immutable launcher
+before the current selector is changed. The last-known-good selector remains an
+independent rescue generation. Rollback consumes only its signed canonical
+receipt and fails closed on selector, inventory, custody, or service drift.
 
 Installation order is recovery order:
 

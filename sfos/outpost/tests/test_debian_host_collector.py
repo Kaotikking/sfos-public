@@ -29,8 +29,8 @@ def test_canonical_debian_keyring_relative_symlink_is_accepted(tmp_path: Path):
         keyring.symlink_to("debian-archive-keyring.pgp")
     except OSError:
         pytest.skip("symlink creation unavailable")
-    result = collect_host_observation(root=root, inrelease_files=releases, index_files=indexes, runner=_runner, now=1789862400)
-    assert result["debian"]["sources"]
+    result = collect_host_observation(root=root, inrelease_files=releases, index_files=indexes, runner=_runner, now=1788912000)
+    assert result["debian"]["pins"][0]["sources"]
 
 
 def test_noncanonical_debian_keyring_symlink_fails_closed(tmp_path: Path):
@@ -44,7 +44,7 @@ def test_noncanonical_debian_keyring_symlink_fails_closed(tmp_path: Path):
     except OSError:
         pytest.skip("symlink creation unavailable")
     with pytest.raises(DebianHostEvidenceError, match="CANONICAL_KEYRING_LINK_REQUIRED"):
-        collect_host_observation(root=root, inrelease_files=releases, index_files=indexes, runner=_runner, now=1789862400)
+        collect_host_observation(root=root, inrelease_files=releases, index_files=indexes, runner=_runner, now=1788912000)
 
 
 def test_canonical_keyring_link_contract_without_platform_symlink_support():

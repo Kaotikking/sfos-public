@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 export PYTHONDONTWRITEBYTECODE=1
-[ "$#" -eq 4 ] || { echo "usage: converge-existing.sh POLICY PUBLIC_TREE SOURCE_KIND SOURCE_RECEIPT" >&2; exit 64; }
-POLICY=$1 PUBLIC_TREE=$2 SOURCE_KIND=$3 SOURCE_RECEIPT=$4
+[ "$#" -eq 5 ] || { echo "usage: converge-existing.sh POLICY PUBLIC_TREE SOURCE_KIND SOURCE_RECEIPT IMMUTABLE_INPUT_PLAN" >&2; exit 64; }
+POLICY=$1 PUBLIC_TREE=$2 SOURCE_KIND=$3 SOURCE_RECEIPT=$4 IMMUTABLE_INPUT_PLAN=$5
 SOURCE=$PUBLIC_TREE/sfos/outpost
 [ "$SOURCE_KIND" = OFFLINE_USB_MEDIA ] || [ "$SOURCE_KIND" = PINNED_PUBLIC_REPOSITORY ] || exit 1
 [ "$(id -u)" -eq 0 ] && [ "$(dpkg --print-architecture)" = amd64 ] || exit 1
@@ -17,6 +17,8 @@ if p.get('activation')!={'enable':False,'start':False,'reboot':False,'commission
 PY
 python3 -B "$SOURCE/verify_install_preflight.py" --source "$SOURCE" --mode source
 python3 -B "$PUBLIC_TREE/sfos/base/installer/verify-source-road.py" "$PUBLIC_TREE" "$SOURCE_KIND" "$SOURCE_RECEIPT"
+[ -f "$IMMUTABLE_INPUT_PLAN" ] && [ ! -L "$IMMUTABLE_INPUT_PLAN" ] || { echo IMMUTABLE_INPUT_PLAN_REQUIRED >&2; exit 1; }
+[ "$(stat -c '%a:%u:%g' "$IMMUTABLE_INPUT_PLAN")" = 600:0:0 ] || { echo IMMUTABLE_INPUT_PLAN_CUSTODY_DENIED >&2; exit 1; }
 for path in /usr/share/serein/outpost /etc/serein-outpost /var/lib/serein-outpost /run/serein/outpost; do
   [ ! -e "$path" ] || { echo NEW_OUTPOST_REQUIRED >&2; exit 1; }
 done
@@ -38,5 +40,5 @@ PY
 # The existing transaction captures and fsyncs exact prestate plus an executable
 # rollback selector before its first payload/identity write, and verifies the
 # resulting Outpost remains disabled, stopped, and uncommissioned.
-python3 -B "$SOURCE/install/transaction.py" bootstrap "$SOURCE" "$SOURCE_KIND"
+python3 -B "$SOURCE/install/transaction.py" install "$SOURCE" "$IMMUTABLE_INPUT_PLAN"
 echo OUTPOST_INSTALLED_INACTIVE

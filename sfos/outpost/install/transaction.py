@@ -10,7 +10,6 @@ import subprocess
 import sys
 import time
 import copy
-import secrets
 from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
@@ -153,36 +152,19 @@ def exact_file(adapter,path,row):
     if isinstance(adapter,RealAdapter) and (info.st_uid!=row["uid"] or info.st_gid!=row["gid"]): raise TransactionError("INSTALLED_OWNER_DENIED:"+str(path))
 
 
+def write_file(adapter,source,target,row):
+    nofollow_ancestors(adapter.root,target)
+    if not target.parent.is_dir(): raise TransactionError("TARGET_PARENT_DENIED:"+str(target.parent))
+    adapter.boundary()
+    data=source.read_bytes(); target.write_bytes(data); os.chmod(target,int(row["mode"],8))
+    if isinstance(adapter,RealAdapter): os.chown(target,row["uid"],row["gid"])
+
+
 def write_generated(adapter,target,row,data):
     nofollow_ancestors(adapter.root,target)
     if not target.parent.is_dir(): raise TransactionError("TARGET_PARENT_DENIED:"+str(target.parent))
-    temporary=target.parent/("."+target.name+".serein-tmp-"+secrets.token_hex(6))
-    try:
-        flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_BINARY",0)
-        adapter.boundary(); descriptor=os.open(temporary,flags,0o600)
-        try:
-            adapter.boundary(); view=memoryview(data)
-            while view:
-                written=os.write(descriptor,view)
-                if written<=0: raise TransactionError("ATOMIC_WRITE_SHORT")
-                view=view[written:]
-            os.fsync(descriptor)
-        finally: os.close(descriptor)
-        adapter.boundary(); os.chmod(temporary,int(row["mode"],8))
-        if isinstance(adapter,RealAdapter): os.chown(temporary,row["uid"],row["gid"])
-        else: adapter.file_metadata_overrides[row["target"]]={"mode":int(row["mode"],8),"uid":row["uid"],"gid":row["gid"]}
-        adapter.boundary(); os.replace(temporary,target)
-        if hasattr(os,"O_DIRECTORY"):
-            directory=os.open(target.parent,os.O_RDONLY|os.O_DIRECTORY)
-            try: os.fsync(directory)
-            finally: os.close(directory)
-    except Exception:
-        if os.path.lexists(temporary) and not temporary.is_symlink(): temporary.unlink()
-        raise
-
-
-def write_file(adapter,source,target,row):
-    write_generated(adapter,target,row,source.read_bytes())
+    adapter.boundary(); target.write_bytes(data); os.chmod(target,int(row["mode"],8))
+    if isinstance(adapter,RealAdapter): os.chown(target,row["uid"],row["gid"])
 
 
 def immutable_inputs(adapter,manifest,plan,identity):
@@ -219,30 +201,6 @@ def immutable_inputs(adapter,manifest,plan,identity):
     return observed,fingerprint
 
 
-def fresh_immutable_inputs(manifest,identity,source_kind):
-    """Plan fresh per-host inputs in memory; no target mutation occurs here."""
-    if source_kind not in {"OFFLINE_USB_MEDIA","PINNED_PUBLIC_REPOSITORY"}: raise TransactionError("BOOTSTRAP_SOURCE_DENIED")
-    private=Ed25519PrivateKey.generate()
-    private_pem=private.private_bytes(serialization.Encoding.PEM,serialization.PrivateFormat.PKCS8,serialization.NoEncryption())
-    public=private.public_key()
-    public_pem=public.public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo)
-    material={
-        "/etc/serein-outpost/readonly.token":(secrets.token_hex(32)+"\n").encode(),
-        "/etc/serein-outpost/admission.token":(secrets.token_hex(32)+"\n").encode(),
-        "/etc/serein-outpost/cognition-signing.pem":private_pem,
-        "/usr/share/serein/outpost/cognition-verification.pem":public_pem,
-    }
-    rows=[]
-    for declared in manifest.get("required_immutable_inputs",[]):
-        row=resolve_directory_row(declared,identity); data=material.get(row["target"])
-        if data is None: raise TransactionError("BOOTSTRAP_INPUT_DENOMINATOR_DENIED")
-        rows.append({**row,"bytes":len(data),"sha256":sha(data),"created":True})
-    if set(material)!={row["target"] for row in rows}: raise TransactionError("BOOTSTRAP_INPUT_DENOMINATOR_DENIED")
-    fingerprint=sha(public.public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo))
-    plan={"schema":"SereinOutpostImmutableInputPlan/v1","source":source_kind,"target":"SEREIN_HOST","method":"VERIFIED_PUBLIC_INSTALLER","release_digest":manifest["self_digest"],"key_id":IMMUTABLE_KEY_ID,"public_key_fingerprint_sha256":fingerprint,"files":[{"target":row["target"],"sha256":row["sha256"]} for row in rows]}
-    return rows,fingerprint,material,plan
-
-
 def validate_receipt(adapter,selector):
     if selector.parent!=under(adapter.root,"/var/lib/serein/rollback") or not re.fullmatch(r"outpost-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}",selector.name): raise TransactionError("ROLLBACK_SELECTOR_DENIED")
     nofollow_ancestors(adapter.root,selector,allow_missing=False)
@@ -263,15 +221,12 @@ def validate_receipt(adapter,selector):
     return receipt
 
 
-def write_receipt(selector,receipt,adapter=None):
+def write_receipt(selector,receipt):
     receipt["receipt_digest"]=receipt_digest(receipt)
     path=selector/"receipt.json"
-    data=(json.dumps(receipt,indent=2)+"\n").encode()
-    if adapter is None:
-        with path.open("wb") as handle: handle.write(data); handle.flush(); os.fsync(handle.fileno())
-        os.chmod(path,0o600)
-    else:
-        write_generated(adapter,path,{"target":"/receipt.json","mode":"0600","uid":0,"gid":0},data)
+    with path.open("w",encoding="utf-8",newline="\n") as handle:
+        json.dump(receipt,handle,indent=2); handle.write("\n"); handle.flush(); os.fsync(handle.fileno())
+    os.chmod(path,0o600)
     if hasattr(os,"O_DIRECTORY"):
         descriptor=os.open(selector,os.O_RDONLY|os.O_DIRECTORY)
         try: os.fsync(descriptor)
@@ -295,38 +250,24 @@ def installed_parity(adapter,manifest,receipt):
     if actual!={x for x in expected if x.startswith("/usr/share/serein/outpost/")}: raise TransactionError("INSTALLED_RESIDUE_DENIED")
     for unit,state in receipt["unit_prestate"].items():
         if adapter.read_unit(unit)!=state: raise TransactionError("PROTECTED_UNIT_STATE_CHANGED:"+unit)
-    for unit in OUTPOST_UNITS:
-        state=adapter.read_unit(unit)
-        if state.get("active") not in {"inactive","dead"} or state.get("enabled") not in {"disabled","not-found"}: raise TransactionError("OUTPOST_UNIT_ACTIVATED_DENIED:"+unit)
+    for unit in ("serein-outpost-validation.service","serein-outpost.service","serein-outpost.target"):
+        if adapter.read_unit(unit).get("active")=="active" or adapter.read_unit(unit).get("enabled")=="enabled": raise TransactionError("OUTPOST_UNIT_ACTIVATED_DENIED")
     for absolute in manifest["runtime_socket_paths"]:
         if os.path.lexists(under(adapter.root,absolute)): raise TransactionError("INACTIVE_SOCKET_RESIDUE_DENIED")
 
 
-def rollback(adapter,selector,allow_partial=False):
+def rollback(adapter,selector):
     receipt=validate_receipt(adapter,selector)
     for row in receipt["introduced_files"]:
         path=under(adapter.root,row["target"]); nofollow_ancestors(adapter.root,path)
-        if os.path.lexists(path):
-            if path.is_symlink() or not path.is_file(): raise TransactionError("ROLLBACK_INTRODUCED_TYPE_DENIED:"+row["target"])
-            if not allow_partial: exact_file(adapter,path,row)
-            adapter.boundary(); path.unlink()
+        if os.path.lexists(path): exact_file(adapter,path,row); adapter.boundary(); path.unlink()
     for row in receipt["generated_files"]:
         path=under(adapter.root,row["target"]); nofollow_ancestors(adapter.root,path)
-        if os.path.lexists(path):
-            if path.is_symlink() or not path.is_file(): raise TransactionError("ROLLBACK_INTRODUCED_TYPE_DENIED:"+row["target"])
-            if not allow_partial: exact_file(adapter,path,row)
-            adapter.boundary(); path.unlink()
-    for row in receipt["immutable_inputs"]:
-        path=under(adapter.root,row["target"])
-        if row.get("created"):
-            if os.path.lexists(path):
-                if path.is_symlink() or not path.is_file(): raise TransactionError("ROLLBACK_INTRODUCED_TYPE_DENIED:"+row["target"])
-                if not allow_partial: exact_file(adapter,path,row)
-                adapter.boundary(); path.unlink()
-        else: exact_file(adapter,path,row)
+        if os.path.lexists(path): exact_file(adapter,path,row); adapter.boundary(); path.unlink()
+    for row in receipt["immutable_inputs"]: exact_file(adapter,under(adapter.root,row["target"]),row)
     share=under(adapter.root,"/usr/share/serein/outpost")
     if share.exists():
-        allowed={under(adapter.root,row["target"]) for row in receipt["immutable_inputs"] if not row.get("created") and row["target"].startswith("/usr/share/serein/outpost/")}
+        allowed={under(adapter.root,row["target"]) for row in receipt["immutable_inputs"] if row["target"].startswith("/usr/share/serein/outpost/")}
         residue={path for path in share.rglob("*") if path.is_file() or path.is_symlink()}-allowed
         if residue: raise TransactionError("ROLLBACK_UNEXPECTED_RESIDUE_DENIED:"+str(sorted(map(str,residue))))
     for row in sorted(receipt["introduced_directories"],key=lambda value:len(value["target"]),reverse=True):
@@ -346,25 +287,20 @@ def rollback(adapter,selector,allow_partial=False):
     return receipt
 
 
-def install(adapter,source,manifest,selector,immutable_plan=None,bootstrap_source_kind=None):
+def install(adapter,source,manifest,selector,immutable_plan=None):
     manifest=copy.deepcopy(manifest)
     release_bytes=(source/"release-manifest.json").read_bytes()
     manifest["install_files"].append({"source":"release-manifest.json","target":"/usr/share/serein/outpost/release-manifest.json","bytes":len(release_bytes),"sha256":sha(release_bytes),"mode":"0644","uid":0,"gid":0})
     protected=manifest["protected_unit_state"]
-    unit_prestate={unit:adapter.read_unit(unit) for unit in OUTPOST_UNITS}
     if protected: raise TransactionError("STALE_UNIT_MAP_DENIED")
+    unit_prestate={unit:adapter.read_unit(unit) for unit in OUTPOST_UNITS}
     for unit,state in unit_prestate.items():
         if state.get("active") not in {"inactive","dead"} or state.get("enabled") not in {"disabled","not-found"}: raise TransactionError("PROTECTED_UNIT_PRESTATE_DENIED:"+unit)
     policy=manifest["identity_policy"]; identity_state=verify_identity(adapter.identity(policy["user"]),policy)
     actual_identity=adapter.identity(policy["user"])
     planned_identity=actual_identity or adapter.planned_identity(policy)
     verify_identity(planned_identity,policy)
-    bootstrap_material={}
-    if bootstrap_source_kind is None:
-        immutable_rows,immutable_fingerprint=immutable_inputs(adapter,manifest,immutable_plan,planned_identity)
-    else:
-        if immutable_plan is not None: raise TransactionError("BOOTSTRAP_PLAN_SUBSTITUTION_DENIED")
-        immutable_rows,immutable_fingerprint,bootstrap_material,immutable_plan=fresh_immutable_inputs(manifest,planned_identity,bootstrap_source_kind)
+    immutable_rows,immutable_fingerprint=immutable_inputs(adapter,manifest,immutable_plan,planned_identity)
     directory_rows=[]
     for declared in manifest["install_directories"]:
         row=resolve_directory_row(declared,planned_identity); target=under(adapter.root,row["target"]); nofollow_ancestors(adapter.root,target)
@@ -377,8 +313,6 @@ def install(adapter,source,manifest,selector,immutable_plan=None,bootstrap_sourc
         else: directory_rows.append(row)
     for row in manifest["install_files"]:
         if os.path.lexists(under(adapter.root,row["target"])): raise TransactionError("TARGET_COLLISION_DENIED:"+row["target"])
-    for row in immutable_rows:
-        if row.get("created") and os.path.lexists(under(adapter.root,row["target"])): raise TransactionError("TARGET_COLLISION_DENIED:"+row["target"])
     generated_by_target={
         "/etc/serein-outpost/rollback-root":(str(selector)+"\n").encode(),
     }
@@ -389,16 +323,9 @@ def install(adapter,source,manifest,selector,immutable_plan=None,bootstrap_sourc
         row={**declared,"gid":gid,"bytes":len(data),"sha256":sha(data)}; row.pop("gid_policy",None)
         if os.path.lexists(under(adapter.root,row["target"])): raise TransactionError("TARGET_COLLISION_DENIED:"+row["target"])
         generated_rows.append(row)
+    selector.mkdir(parents=False,mode=0o700); os.chmod(selector,0o700)
     receipt={"schema":"SereinOutpostRollback/v2","selector":str(selector),"release_digest":manifest["self_digest"],"identity":policy,"identity_actual":planned_identity,"identity_state":"CREATED" if identity_state=="ABSENT" else identity_state,"introduced_directories":directory_rows,"introduced_files":manifest["install_files"],"generated_files":generated_rows,"immutable_inputs":immutable_rows,"immutable_key_id":IMMUTABLE_KEY_ID,"immutable_public_key_fingerprint_sha256":immutable_fingerprint,"unit_prestate":unit_prestate,"rollback_complete":False}
-    try:
-        adapter.boundary(); selector.mkdir(parents=False,mode=0o700)
-        adapter.boundary(); os.chmod(selector,0o700)
-        write_receipt(selector,receipt,adapter)
-    except Exception:
-        receipt_path=selector/"receipt.json"
-        if os.path.lexists(receipt_path) and not receipt_path.is_symlink(): receipt_path.unlink()
-        if selector.exists() and not any(selector.iterdir()): selector.rmdir()
-        raise
+    write_receipt(selector,receipt)
     try:
         if identity_state=="ABSENT": adapter.create_identity(policy,planned_identity)
         actual_identity=adapter.identity(policy["user"])
@@ -409,8 +336,6 @@ def install(adapter,source,manifest,selector,immutable_plan=None,bootstrap_sourc
             adapter.boundary(); target.mkdir(mode=int(row["mode"],8)); os.chmod(target,int(row["mode"],8))
             if isinstance(adapter,RealAdapter): os.chown(target,row["uid"],row["gid"])
             else: adapter.directory_metadata_overrides[row["target"]]={"mode":int(row["mode"],8),"uid":row["uid"],"gid":row["gid"]}
-        for row in immutable_rows:
-            if row.get("created"): write_generated(adapter,under(adapter.root,row["target"]),row,bootstrap_material[row["target"]])
         for row in manifest["install_files"]:
             write_file(adapter,source/row["source"],under(adapter.root,row["target"]),row)
         for row,data in zip(generated_rows,generated_data): write_generated(adapter,under(adapter.root,row["target"]),row,data)
@@ -418,32 +343,27 @@ def install(adapter,source,manifest,selector,immutable_plan=None,bootstrap_sourc
         validate_receipt(adapter,selector); installed_parity(adapter,manifest,receipt)
         return receipt
     except Exception:
-        rollback(adapter,selector,allow_partial=True)
+        rollback(adapter,selector)
         raise
 
 
 def main():
     if os.name=="nt" or not hasattr(os,"geteuid") or os.geteuid()!=0: raise SystemExit("ROOT_LINUX_REQUIRED")
-    if len(sys.argv)<3 or sys.argv[1] not in {"install","bootstrap","rollback"}: raise SystemExit("usage: transaction.py install SOURCE IMMUTABLE_INPUT_PLAN | bootstrap SOURCE SOURCE_KIND | rollback SELECTOR")
+    if len(sys.argv)<3 or sys.argv[1] not in {"install","rollback"}: raise SystemExit("usage: transaction.py install SOURCE IMMUTABLE_INPUT_PLAN | rollback SELECTOR")
     if sys.argv[1]=="rollback":
         adapter=RealAdapter()
         rollback(adapter,Path(sys.argv[2]).resolve()); print("ROLLBACK_RESTORED_EXACT_OUTPOST_ABSENCE"); return
-    if len(sys.argv)!=4: raise SystemExit("INSTALL_ARGUMENTS_REQUIRED")
-    source=Path(sys.argv[2]).resolve(); sys.path.insert(0,str(source)); from verify_install_preflight import verify_source,verify_target
+    if len(sys.argv)!=4: raise SystemExit("IMMUTABLE_INPUT_PLAN_REQUIRED")
+    source=Path(sys.argv[2]).resolve(); plan_path=Path(os.path.abspath(sys.argv[3])); sys.path.insert(0,str(source)); from verify_install_preflight import verify_source,verify_target
+    nofollow_ancestors(Path(plan_path.anchor),plan_path,allow_missing=False); plan_info=plan_path.lstat()
+    if plan_path.is_symlink() or not stat.S_ISREG(plan_info.st_mode) or stat.S_IMODE(plan_info.st_mode)&0o022 or plan_info.st_uid!=0 or plan_info.st_gid!=0: raise SystemExit("IMMUTABLE_INPUT_PLAN_CUSTODY_DENIED")
     manifest=json.loads((source/"release-manifest.json").read_text(encoding="utf-8")); verify_source(source,manifest)
-    preflight=json.loads((source/"install-preflight.json").read_text(encoding="utf-8"))
-    plan=None; bootstrap_kind=None; allowed=set()
-    if sys.argv[1]=="install":
-        plan_path=Path(os.path.abspath(sys.argv[3])); nofollow_ancestors(Path(plan_path.anchor),plan_path,allow_missing=False); plan_info=plan_path.lstat()
-        if plan_path.is_symlink() or not stat.S_ISREG(plan_info.st_mode) or stat.S_IMODE(plan_info.st_mode)&0o022 or plan_info.st_uid!=0 or plan_info.st_gid!=0: raise SystemExit("IMMUTABLE_INPUT_PLAN_CUSTODY_DENIED")
-        plan=json.loads(plan_path.read_text(encoding="utf-8")); allowed={row.get("target") for row in plan.get("files",[]) if isinstance(row,dict)}
-    else: bootstrap_kind=sys.argv[3]
-    verify_target(Path("/"),preflight,check_units=True,allowed_immutable_targets=allowed)
-    adapter=RealAdapter(OUTPOST_UNITS)
+    preflight=json.loads((source/"install-preflight.json").read_text(encoding="utf-8")); plan=json.loads(plan_path.read_text(encoding="utf-8")); allowed={row.get("target") for row in plan.get("files",[]) if isinstance(row,dict)}; verify_target(Path("/"),preflight,check_units=True,allowed_immutable_targets=allowed)
+    adapter=RealAdapter(manifest["protected_unit_state"])
     base=Path("/var/lib/serein/rollback"); nofollow_ancestors(Path("/"),base,allow_missing=False); info=base.lstat()
     if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode)&0o022 or info.st_uid!=0 or info.st_gid!=0: raise SystemExit("ROLLBACK_BASE_POLICY_DENIED")
     selector=base/("outpost-first-install-"+time.strftime("%Y%m%dT%H%M%SZ",time.gmtime())+"-"+os.urandom(6).hex())
-    install(adapter,source,manifest,selector,plan,bootstrap_kind); print("INSTALLED_INACTIVE rollback="+str(selector))
+    install(adapter,source,manifest,selector,plan); print("INSTALLED_INACTIVE rollback="+str(selector))
 
 
 if __name__=="__main__": main()

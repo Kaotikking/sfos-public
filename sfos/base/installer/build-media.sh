@@ -2,11 +2,11 @@
 set -eu
 
 usage() {
-  echo "usage: $0 LOCK ISO SUMS SIGNATURE KEYRING PUBLIC_TREE PUBLIC_SOURCE_RECEIPT OUTPUT_ISO RECEIPT" >&2
+  echo "usage: $0 LOCK ISO SUMS SIGNATURE KEYRING PUBLIC_TREE PUBLIC_SOURCE_RECEIPT IMMUTABLE_INPUT_PLAN OUTPUT_ISO RECEIPT" >&2
   exit 64
 }
 
-[ "$#" -eq 9 ] || usage
+[ "$#" -eq 10 ] || usage
 LOCK=$1
 SOURCE_ISO=$2
 SUMS=$3
@@ -14,8 +14,9 @@ SIGNATURE=$4
 KEYRING=$5
 PUBLIC_TREE=$6
 PUBLIC_SOURCE_RECEIPT=$7
-OUTPUT_ISO=$8
-RECEIPT=$9
+IMMUTABLE_INPUT_PLAN=$8
+OUTPUT_ISO=$9
+RECEIPT=${10}
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 
 for tool in python3 gpgv sha256sum xorriso; do
@@ -29,6 +30,8 @@ done
 [ -f "$PUBLIC_TREE/sfos/base/installer/preseed.cfg" ] || { echo "PUBLIC_TREE_PRESEED_MISSING" >&2; exit 66; }
 [ ! -e "$OUTPUT_ISO" ] || { echo "OUTPUT_ALREADY_EXISTS" >&2; exit 73; }
 [ ! -e "$RECEIPT" ] || { echo "RECEIPT_ALREADY_EXISTS" >&2; exit 73; }
+[ -f "$IMMUTABLE_INPUT_PLAN" ] && [ ! -L "$IMMUTABLE_INPUT_PLAN" ] || { echo "IMMUTABLE_INPUT_PLAN_REQUIRED" >&2; exit 66; }
+[ "$(stat -c '%a:%u:%g' "$IMMUTABLE_INPUT_PLAN")" = 600:0:0 ] || { echo "IMMUTABLE_INPUT_PLAN_CUSTODY_DENIED" >&2; exit 77; }
 
 python3 -B "$PUBLIC_TREE/sfos/base/installer/verify-source-road.py" "$PUBLIC_TREE" PINNED_PUBLIC_REPOSITORY "$PUBLIC_SOURCE_RECEIPT"
 
@@ -96,6 +99,7 @@ xorriso \
   -outdev "$STAGED_ISO" \
   -map "$PUBLIC_TREE/sfos" /sfos \
   -map "$SOURCE_ROAD_RECEIPT" /sfos/source-road-receipt.json \
+  -map "$IMMUTABLE_INPUT_PLAN" /sfos/immutable-input-plan.json \
   -map "$PUBLIC_TREE/sfos/base/installer/preseed.cfg" /preseed.cfg \
   -boot_image any replay \
   -volid SFOS_PUBLIC_13_6 \
