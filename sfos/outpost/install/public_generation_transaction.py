@@ -446,7 +446,6 @@ def install_public_generation(adapter, plan, authority_path, fetch, probe, accep
             else: target.parent.mkdir(parents=True,exist_ok=True)
             image_files.append({"target":absolute,"pre":before,"post":post})
         image_units={unit:{"pre":_unit_state(adapter,unit)} for unit in IMAGE_UNITS}
-        _deny(any(image_units[u]["pre"]["active"]=="active" for u in IMAGE_UNITS),"PUBLIC_UNIT_PRESTATE_ACTIVE_DENIED")
         verification=under(adapter.root,"/usr/share/serein/outpost/cognition-verification.pem").read_bytes(); signing=under(adapter.root,"/etc/serein-outpost/cognition-signing.pem").read_bytes(); private=load_pem_private_key(signing,password=None)
         derived=private.public_key().public_bytes(serialization.Encoding.PEM,serialization.PublicFormat.SubjectPublicKeyInfo)
         _deny(derived!=verification,"PUBLIC_RECEIPT_KEYPAIR_DENIED")
@@ -455,6 +454,13 @@ def install_public_generation(adapter, plan, authority_path, fetch, probe, accep
         prestate=_write_prestate_receipt(adapter,rollback/"prestate-receipt.json",prestate,private)
         forward={"schema":"SereinPublicOutpostForwardState/v1","source_plan_sha256":prestate["source_plan_sha256"],"prestate_receipt_digest":prestate["receipt_digest"],"boot_id":boot,"generation_target":prestate["generation_target"],"selector_pre":prestate["selector_pre"],"image_files":image_files,"unit_prestate":prestate["unit_prestate"],"phase":"PREPARED","step":0}
         forward=_write_forward_state(adapter,forward_path,forward,private)
+        # A public installer must be able to replace a healthy running Outpost.
+        # Stop only the captured Outpost image units after the signed prestate
+        # and forward journal exist.  Compensation/re-entry restores the exact
+        # captured active/enabled state if any later boundary fails.
+        for unit in reversed(IMAGE_UNITS):
+            if image_units[unit]["pre"]["active"]=="active": _unit_action(adapter,"stop",unit)
+        forward=_write_forward_state(adapter,forward_path,{key:item for key,item in forward.items() if key not in {"state_digest","state_signature"}}|{"phase":"PREPARED","step":1},private)
         for index,(source,(absolute,mode)) in enumerate(IMAGE_FILES.items()):
             target=under(adapter.root,absolute); atomic_write(adapter,target,files[source],mode,0,0)
             forward=_write_forward_state(adapter,forward_path,{key:item for key,item in forward.items() if key not in {"state_digest","state_signature"}}|{"phase":"IMAGE","step":index+1},private)

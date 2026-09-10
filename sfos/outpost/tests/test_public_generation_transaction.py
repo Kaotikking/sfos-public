@@ -77,6 +77,29 @@ def test_exact_public_generation_installs_and_flips(tmp_path):
     assert journal["schema"]=="SereinPublicOutpostForwardState/v1" and journal["phase"]=="COMPLETE"
     assert journal["state_digest"]==sha(canonical({key:value for key,value in journal.items() if key!="state_digest"}))
 
+def test_running_outpost_is_replaced_transactionally(tmp_path):
+    adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path)
+    adapter.unit_state["serein-outpost.target"]={"enabled":"enabled","active":"active"}
+    adapter.unit_state["serein-outpost-presentation.service"]={"enabled":"disabled","active":"active"}
+    result=install_public_generation(adapter,plan,authority,fetch,ok,ok)
+    assert result["status"]=="COMMITTED"
+    assert adapter.read_unit("serein-outpost.target")=={"enabled":"enabled","active":"active"}
+    receipt=json.loads((adapter.root/plan["rollback_selector"].lstrip("/")/"transaction-receipt.json").read_text())
+    assert receipt["service_deltas"]["units"]["serein-outpost.target"]["pre"]["active"]=="active"
+
+def test_running_outpost_failure_restores_exact_unit_prestate(tmp_path):
+    adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path)
+    adapter.unit_state["serein-outpost.target"]={"enabled":"enabled","active":"active"}
+    adapter.unit_state["serein-outpost-presentation.service"]={"enabled":"disabled","active":"active"}
+    before=copy.deepcopy(adapter.unit_state)
+    calls={"n":0}
+    def reject_terminal(*args):
+        calls["n"]+=1
+        return ok(*args) if calls["n"]==1 else {**ok(*args),"api":"FAIL"}
+    with pytest.raises(TransactionError,match="PUBLIC_POSTFLIP_ACCEPTANCE_DENIED"):
+        install_public_generation(adapter,plan,authority,fetch,ok,reject_terminal)
+    assert adapter.unit_state==before
+
 
 def test_stale_preexisting_vitals_cannot_satisfy_terminal_acceptance(tmp_path):
     adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path)
