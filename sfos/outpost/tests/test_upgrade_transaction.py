@@ -273,7 +273,7 @@ def migration_fixture(tmp_path):
     rebind_controlled(plan,tmp_path,target,data)
     plan["plan_digest"]=replacement_plan_digest(plan)
     launcher=tmp_path/"launcher"; launcher.write_bytes(b"#!/usr/bin/python3\n"); launcher.chmod(0o755)
-    release["install_files"].append({"path":"install/generation_launcher.py","source":"install/generation_launcher.py","target":"/usr/libexec/serein/outpost-generation-launcher","bytes":len(launcher.read_bytes()),"sha256":sha(launcher.read_bytes()),"mode":"0755","uid":0,"gid":0})
+    release["install_files"].append({"source":"install/generation_launcher.py","target":"/usr/libexec/serein/outpost-generation-launcher","bytes":len(launcher.read_bytes()),"sha256":sha(launcher.read_bytes()),"mode":"0755","uid":0,"gid":0})
     return adapter,release,plan,selector,launcher
 
 

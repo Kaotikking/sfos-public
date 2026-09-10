@@ -67,8 +67,8 @@
     },
     {
       "path": "install/upgrade_transaction.py",
-      "bytes": 55506,
-      "sha256": "23377c2ad80b49614a1dc641cc80cff61dc13320c525a58a5de5d0bba3888053"
+      "bytes": 55499,
+      "sha256": "702f76c74b62d868f99f32ea7af47ae2c5f50770df8e5c718a85f284fc4f0894"
     },
     {
       "path": "integration-graph.json",
@@ -204,8 +204,8 @@
     },
     {
       "path": "tests/test_upgrade_transaction.py",
-      "bytes": 36731,
-      "sha256": "094d5d57932caf95b1f3b516f76465e0826f25e543e8086ac82cf7a7b6c38d6c"
+      "bytes": 36691,
+      "sha256": "e4e4dd9ed878bbcb31bdb1bf6a1386b4f2456266352222720045e91da4acb7b5"
     },
     {
       "path": "tests/test_vitals_aggregation.py",
@@ -289,8 +289,8 @@
     {
       "source": "install/upgrade_transaction.py",
       "target": "/usr/share/serein/outpost/install/upgrade_transaction.py",
-      "bytes": 55506,
-      "sha256": "23377c2ad80b49614a1dc641cc80cff61dc13320c525a58a5de5d0bba3888053",
+      "bytes": 55499,
+      "sha256": "702f76c74b62d868f99f32ea7af47ae2c5f50770df8e5c718a85f284fc4f0894",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -630,5 +630,5 @@
       "required_before_install": true
     }
   ],
-  "self_digest": "sha256:15e6128f50f0e4222e269c0b978167acd467b1befbb6e4c4fcdf46a1547a5e0b"
+  "self_digest": "sha256:5bbfee56598225956c023c2015468723561dfd5a21be7a649eabbd52e87311bd"
 }

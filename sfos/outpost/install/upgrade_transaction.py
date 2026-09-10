@@ -394,7 +394,7 @@ def _migrate_flat_predecessor_locked(adapter, release, plan, selector, launcher_
         if len(launcher_declarations)!=1:
             raise TransactionError("GENERATION_LAUNCHER_DECLARATION_DENIED")
         declaration=launcher_declarations[0]
-        if set(declaration)!={"path","source","target","bytes","sha256","mode","uid","gid"} or declaration["source"]!="install/generation_launcher.py" or declaration["bytes"]!=len(launcher_data) or declaration["sha256"]!=sha(launcher_data) or declaration["mode"]!="0755" or declaration["uid"]!=0 or declaration["gid"]!=0:
+        if set(declaration)!={"source","target","bytes","sha256","mode","uid","gid"} or declaration["source"]!="install/generation_launcher.py" or declaration["bytes"]!=len(launcher_data) or declaration["sha256"]!=sha(launcher_data) or declaration["mode"]!="0755" or declaration["uid"]!=0 or declaration["gid"]!=0:
             raise TransactionError("GENERATION_LAUNCHER_BINDING_DENIED")
         if os.path.lexists(launcher_target): raise TransactionError("GENERATION_LAUNCHER_COLLISION_DENIED")
         launcher_row={"target":"/usr/libexec/serein/outpost-generation-launcher","bytes":len(launcher_data),"sha256":sha(launcher_data),"mode":"0755","uid":0,"gid":0}
