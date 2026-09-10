@@ -231,7 +231,7 @@ def install_public_generation(adapter, plan, authority_path, fetch, probe, accep
     _deny(not predecessor_ok,"PUBLIC_UPDATE_PREDECESSOR_REQUIRED")
     rollback=under(adapter.root,plan["rollback_selector"]); nofollow_ancestors(adapter.root,rollback)
     _deny(rollback.parent!=under(adapter.root,"/var/lib/serein/rollback") or not ROLLBACK_RE.fullmatch(rollback.name),"PUBLIC_ROLLBACK_SELECTOR_DENIED")
-    parent_info=rollback.parent.lstat(); _deny(rollback.parent.is_symlink() or not stat.S_ISDIR(parent_info.st_mode) or (os.name!="nt" and (parent_info.st_uid!=0 or parent_info.st_gid!=0 or stat.S_IMODE(parent_info.st_mode)!=0o700)),"PUBLIC_ROLLBACK_PARENT_DENIED")
+    parent_info=rollback.parent.lstat(); _deny(rollback.parent.is_symlink() or not stat.S_ISDIR(parent_info.st_mode) or (os.name!="nt" and (parent_info.st_uid!=0 or parent_info.st_gid!=0 or stat.S_IMODE(parent_info.st_mode) not in {0o700,0o755})),"PUBLIC_ROLLBACK_PARENT_DENIED")
     lock=under(adapter.root,"/var/lib/serein/rollback/.outpost-public-generation.lock")
     nofollow_ancestors(adapter.root,lock); _deny(os.path.lexists(lock),"PUBLIC_TRANSACTION_LOCKED")
     lock.parent.mkdir(parents=True,exist_ok=True); descriptor=os.open(lock,os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,"O_NOFOLLOW",0),0o600)

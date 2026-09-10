@@ -60,6 +60,11 @@ def test_exact_public_generation_installs_and_flips(tmp_path):
     assert result["status"]=="COMMITTED"
     assert (tmp_path/"usr/share/serein/outpost-generations"/plan["release_digest"][7:]).is_dir()
 
+def test_exact_public_generation_accepts_canonical_root_owned_archive_parent(tmp_path):
+    adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path)
+    (tmp_path/"var/lib/serein/rollback").chmod(0o755)
+    assert install_public_generation(adapter,plan,authority,fetch,ok,ok)["status"]=="COMMITTED"
+
 @pytest.mark.parametrize("field,value,code",[("repo_url","https://evil.invalid/x","SOURCE"),("ref","main","SOURCE"),("commit","c"*40,"ARCHIVE_URL"),("tree","x"*40,"LINEAGE"),("archive_sha256","0"*64,"SIGNATURE")])
 def test_source_identity_and_signed_fields_deny(tmp_path,field,value,code):
     adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path); plan[field]=value

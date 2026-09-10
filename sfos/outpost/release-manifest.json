@@ -47,8 +47,8 @@
     },
     {
       "path": "install/public_generation_transaction.py",
-      "bytes": 31549,
-      "sha256": "67657d6ff73e95e48a982692b77e1fa10a9d2673e78eaf19d0d74a72e519b16a"
+      "bytes": 31563,
+      "sha256": "9db9f4d4e0c7d0c6c6bee50eb9649373dccbf5f759b995641320174058fa25e2"
     },
     {
       "path": "install/public_installer_cli.py",
@@ -179,8 +179,8 @@
     },
     {
       "path": "tests/test_public_generation_transaction.py",
-      "bytes": 19315,
-      "sha256": "0fbafc3cf9cc4356486f0d802ba919cc03c408ceb7ce1c83d4fa39a67c33dcf5"
+      "bytes": 19617,
+      "sha256": "efef9674734dc87fd7719d5919de739c6f9307d85d8bd63d6ff39f9f4160f00e"
     },
     {
       "path": "tests/test_public_installer_cli.py",
@@ -253,8 +253,8 @@
     {
       "source": "install/public_generation_transaction.py",
       "target": "/usr/share/serein/outpost/install/public_generation_transaction.py",
-      "bytes": 31549,
-      "sha256": "67657d6ff73e95e48a982692b77e1fa10a9d2673e78eaf19d0d74a72e519b16a",
+      "bytes": 31563,
+      "sha256": "9db9f4d4e0c7d0c6c6bee50eb9649373dccbf5f759b995641320174058fa25e2",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -630,5 +630,5 @@
       "required_before_install": true
     }
   ],
-  "self_digest": "sha256:c356e055924ac3539692044657a83222ec580b619de62f35b21cee04e6c3bd8a"
+  "self_digest": "sha256:e0e52e49300b49bfdf6a76a5d613b8a355c17df5c69bde82959647302030efad"
 }
