@@ -554,4 +554,3 @@ def install_public_generation(adapter, plan, authority_path, fetch, probe, accep
         raise
     finally:
         os.close(descriptor); os.unlink(lock)
-
