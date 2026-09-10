@@ -93,4 +93,3 @@ def apply_debian_plan(plan:Mapping[str,Any],current:Mapping[str,Any],adapter)->d
  except Exception:
   adapter.rollback(rollback)
   raise
-

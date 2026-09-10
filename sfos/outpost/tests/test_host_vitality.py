@@ -46,4 +46,3 @@ def test_debian_postchange_drift_rolls_back():
  adapter=Adapter()
  with pytest.raises(HostVitalityError,match="POSTCHANGE"):apply_debian_plan(plan,current,adapter)
  assert adapter.rolled
-
