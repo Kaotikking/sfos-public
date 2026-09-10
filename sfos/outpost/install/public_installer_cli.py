@@ -56,9 +56,12 @@ sys.path.insert(0,str(generation))
 from outpost.host_vitality import HostVitalityStore
 from outpost.http_readonly import present
 store=HostVitalityStore(Path('/var/lib/serein-outpost/host-vitality'))
+snapshot=store.snapshot()
 j=present(store,'GET','/v1/runtime/status','application/json',str(boot)); h=present(store,'GET','/v1/runtime/status','text/html',str(boot))
-ok=j.status==200 and h.status==200 and j.content_type=='application/json' and h.content_type.startswith('text/html') and b'Serein Vitals' in h.body
-print(json.dumps({'schema':'SereinOutpostCandidateAcceptance/v1','installed_boot_preflight':'PASS','api':'PASS' if ok else 'FAIL','vitals':'PASS' if ok else 'FAIL','boot_id':str(boot),'release_digest':release['self_digest']},sort_keys=True))
+latest=snapshot.get('latest',{}); host=latest.get('host',{}); gpu=latest.get('gpu',{}); debian=latest.get('debian',{})
+witness_ok=(snapshot.get('current_boot_id')==str(boot) and snapshot.get('classification') in {'CURRENT_BOOT_STABLE','FIRST_BOOT_OBSERVED','RECOVERED_AFTER_BOOT_CHANGE'} and host.get('status')=='PASS' and gpu.get('status')=='PASS' and debian.get('status')=='PASS')
+ok=j.status==200 and h.status==200 and j.content_type=='application/json' and h.content_type.startswith('text/html') and b'Serein Vitals' in h.body and snapshot.get('projection_digest','').encode() in h.body
+print(json.dumps({'schema':'SereinOutpostCandidateAcceptance/v2','installed_boot_preflight':'PASS','api':'PASS' if ok else 'FAIL','vitals':'PASS' if ok else 'FAIL','boot_id':str(boot),'release_digest':release['self_digest'],'host_witness_result':'PASS' if witness_ok else 'FAIL','host_witness_generation':snapshot.get('sample_count'),'host_witness_projection_digest':snapshot.get('projection_digest'),'host_witness_observed_at':latest.get('observed_at')},sort_keys=True))
 """
     environment={**os.environ,"PYTHONPATH":str(generation),"PYTHONDONTWRITEBYTECODE":"1"}
     result=subprocess.run([sys.executable,"-B","-c",program,str(selector),str(generation),boot_id],text=True,capture_output=True,timeout=TIMEOUT_SECONDS,env=environment)

@@ -13,6 +13,7 @@ def test_host_witness_precedes_local_presentation():
     assert "After=serein-outpost-host-witness.service" in presentation
     expected="serein-outpost-host-witness.service serein-outpost-presentation.service"
     assert f"Requires={expected}" in target and f"After={expected}" in target
+    assert "[Install]" in target and "WantedBy=multi-user.target" in target
 
 def test_presentation_is_read_only_local_unix_socket():
     unit=text("systemd/serein-outpost-presentation.service")

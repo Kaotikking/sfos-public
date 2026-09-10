@@ -18,11 +18,8 @@ cleanup() { [ -n "${STAGE:-}" ] && [ ! -L "$STAGE" ] && rm -rf -- "$STAGE"; }
 trap cleanup EXIT HUP INT TERM
 cp -a "$SOURCE/." "$STAGE/"
 cp "$IMMUTABLE_INPUT_PLAN" "$STAGE/immutable-input-plan.json"
+cp "$SOURCE_ROOT/sfos/base/installer/base-road-transaction.py" "$STAGE/base-road-transaction.py"
 chmod 600 "$STAGE/immutable-input-plan.json"
 GUEST_STAGE=${STAGE#"$TARGET"}
 chroot "$TARGET" /usr/bin/python3 -B "$GUEST_STAGE/verify_install_preflight.py" --source "$GUEST_STAGE" --mode source
-RESULT=$(chroot "$TARGET" /usr/bin/python3 -B "$GUEST_STAGE/install/transaction.py" install "$GUEST_STAGE" "$GUEST_STAGE/immutable-input-plan.json")
-SELECTOR=${RESULT#INSTALLED_INACTIVE rollback=}
-case "$SELECTOR" in /var/lib/serein/rollback/outpost-first-install-*) ;; *) echo ROLLBACK_SELECTOR_READBACK_DENIED >&2; exit 1;; esac
-printf '{"schema":"SFOSBaseRoadReceipt/v1","mode":"BARE_INSTALL","source_kind":"%s","state":"OUTPOST_INSTALLED_INACTIVE","authority_effect":"NONE","rollback_selector":"%s"}\n' "$SOURCE_KIND" "$SELECTOR" >"$TARGET$SELECTOR/base-road-complete.json"
-echo OUTPOST_INSTALLED_INACTIVE
+chroot "$TARGET" /usr/bin/python3 -B "$GUEST_STAGE/base-road-transaction.py" install "$GUEST_STAGE" "$GUEST_STAGE/immutable-input-plan.json" BARE_INSTALL "$SOURCE_KIND"

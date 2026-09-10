@@ -13,7 +13,7 @@ from pathlib import Path
 p=json.loads(Path(sys.argv[1]).read_text())
 if p.get('schema')!='SFOSDebianBasePolicy/v1' or sys.argv[2] not in p.get('source_kinds',[]) or p.get('unknown_policy')!='FAIL_CLOSED': raise SystemExit('BASE_POLICY_DENIED')
 if p.get('converge_existing')!={'partitioning':False,'formatting':False,'bootloader_replacement':False,'identity_replacement':False}: raise SystemExit('CONVERGENCE_POLICY_DENIED')
-if p.get('activation')!={'enable':False,'start':False,'reboot':False,'commission':False}: raise SystemExit('ACTIVATION_POLICY_DENIED')
+if p.get('activation',{}).get('converge_existing')!={'enable':True,'start':True,'reboot':False,'commission':False}: raise SystemExit('ACTIVATION_POLICY_DENIED')
 PY
 python3 -B "$SOURCE/verify_install_preflight.py" --source "$SOURCE" --mode source
 python3 -B "$PUBLIC_TREE/sfos/base/installer/verify-source-road.py" "$PUBLIC_TREE" "$SOURCE_KIND" "$SOURCE_RECEIPT"
@@ -37,8 +37,7 @@ if o.get('target')!='SEREIN_HOST' or o.get('host',{}).get('status')!='PASS' or o
 d=o.get('debian',{})
 if d.get('status')!='PASS' or d.get('exact_diff') or d.get('unknowns') or d.get('correction_result')!='NOT_REQUIRED': raise SystemExit('DEBIAN_HOST_GATE_DENIED')
 PY
-# The existing transaction captures and fsyncs exact prestate plus an executable
-# rollback selector before its first payload/identity write, and verifies the
-# resulting Outpost remains disabled, stopped, and uncommissioned.
-python3 -B "$SOURCE/install/transaction.py" install "$SOURCE" "$IMMUTABLE_INPUT_PLAN"
-echo OUTPOST_INSTALLED_INACTIVE
+# The transaction captures and fsyncs exact prestate plus an executable rollback
+# selector before its first payload/identity write. This existing-host road then
+# enables, starts, and verifies only the complete Outpost target.
+python3 -B "$PUBLIC_TREE/sfos/base/installer/base-road-transaction.py" install "$SOURCE" "$IMMUTABLE_INPUT_PLAN" CONVERGE_EXISTING "$SOURCE_KIND"

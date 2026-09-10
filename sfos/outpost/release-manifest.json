@@ -47,13 +47,13 @@
     },
     {
       "path": "install/public_generation_transaction.py",
-      "bytes": 33477,
-      "sha256": "39393f7a05d7de30cc7bc88b575164685e9ffd4e196a7695627df2c8ae8bfae3"
+      "bytes": 50442,
+      "sha256": "9e4035b9d3bba0de93f62961d0df8e6b8f56e2b17de308d923d2e852c14eea55"
     },
     {
       "path": "install/public_installer_cli.py",
-      "bytes": 5297,
-      "sha256": "fa194d3466898225a1e37cfdac70da2532a241f7c4416e75027a6b40a0916e7a"
+      "bytes": 5996,
+      "sha256": "b9ead84c27e70c9edb1716aa485daf0788a898cfd5db839d85cc2863634ab748"
     },
     {
       "path": "install/rollback-outpost.sh",
@@ -62,8 +62,8 @@
     },
     {
       "path": "install/transaction.py",
-      "bytes": 25915,
-      "sha256": "3d4d22f6f5d307e56e5c1842fe6ebde3a2cac475d45c06d7c3d321bb08807b02"
+      "bytes": 27596,
+      "sha256": "052e0d6c3671bdfdb62d77e5770f90b7237b7473cbdf13abdc3a9559e82c35bd"
     },
     {
       "path": "install/upgrade_transaction.py",
@@ -137,8 +137,8 @@
     },
     {
       "path": "systemd/serein-outpost.target",
-      "bytes": 210,
-      "sha256": "b57bb88f60d1f1db4c0702477590d8842d9aa327c3e989542a35750770b9d73b"
+      "bytes": 248,
+      "sha256": "77bdd95951d96a414c7cd04c29acbcc7b35c6a4d505493a28c21d9848f050bda"
     },
     {
       "path": "verify_install_preflight.py",
@@ -179,8 +179,8 @@
     },
     {
       "path": "tests/test_public_generation_transaction.py",
-      "bytes": 22881,
-      "sha256": "4153acb1718d1defe7a4b8b6850e8dfad61c8769cf3d24df5902f6b4da1c8477"
+      "bytes": 29232,
+      "sha256": "11d475eff358d0dc676e8661625e0153938d651eb3fcfd89359b7bb51404fd99"
     },
     {
       "path": "tests/test_public_installer_cli.py",
@@ -194,8 +194,8 @@
     },
     {
       "path": "tests/test_systemd_contract.py",
-      "bytes": 1378,
-      "sha256": "d0ddbd20641da37a6b47ad69c556eea244fddb0581b8e6242714dffb4308ff16"
+      "bytes": 1454,
+      "sha256": "515677820edf583f51335ab120290534b731cdb0fe3d92b6659e57eac05b7feb"
     },
     {
       "path": "tests/test_transaction.py",
@@ -253,8 +253,8 @@
     {
       "source": "install/public_generation_transaction.py",
       "target": "/usr/share/serein/outpost/install/public_generation_transaction.py",
-      "bytes": 33477,
-      "sha256": "39393f7a05d7de30cc7bc88b575164685e9ffd4e196a7695627df2c8ae8bfae3",
+      "bytes": 50442,
+      "sha256": "9e4035b9d3bba0de93f62961d0df8e6b8f56e2b17de308d923d2e852c14eea55",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -262,8 +262,8 @@
     {
       "source": "install/public_installer_cli.py",
       "target": "/usr/share/serein/outpost/install/public_installer_cli.py",
-      "bytes": 5297,
-      "sha256": "fa194d3466898225a1e37cfdac70da2532a241f7c4416e75027a6b40a0916e7a",
+      "bytes": 5996,
+      "sha256": "b9ead84c27e70c9edb1716aa485daf0788a898cfd5db839d85cc2863634ab748",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -280,8 +280,8 @@
     {
       "source": "install/transaction.py",
       "target": "/usr/share/serein/outpost/install/transaction.py",
-      "bytes": 25915,
-      "sha256": "3d4d22f6f5d307e56e5c1842fe6ebde3a2cac475d45c06d7c3d321bb08807b02",
+      "bytes": 27596,
+      "sha256": "052e0d6c3671bdfdb62d77e5770f90b7237b7473cbdf13abdc3a9559e82c35bd",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -406,8 +406,8 @@
     {
       "source": "systemd/serein-outpost.target",
       "target": "/usr/share/serein/outpost/systemd/serein-outpost.target",
-      "bytes": 210,
-      "sha256": "b57bb88f60d1f1db4c0702477590d8842d9aa327c3e989542a35750770b9d73b",
+      "bytes": 248,
+      "sha256": "77bdd95951d96a414c7cd04c29acbcc7b35c6a4d505493a28c21d9848f050bda",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -442,8 +442,8 @@
     {
       "source": "systemd/serein-outpost.target",
       "target": "/etc/systemd/system/serein-outpost.target",
-      "bytes": 210,
-      "sha256": "b57bb88f60d1f1db4c0702477590d8842d9aa327c3e989542a35750770b9d73b",
+      "bytes": 248,
+      "sha256": "77bdd95951d96a414c7cd04c29acbcc7b35c6a4d505493a28c21d9848f050bda",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -630,5 +630,5 @@
       "required_before_install": true
     }
   ],
-  "self_digest": "sha256:597f39fa562fe73b60523ea47bd2ebaf0fedee411b99b34435e70e2047beaeda"
+  "self_digest": "sha256:dc2a6e30228de0c2908346e16ffe74d1112dd57beaff960fb4d73943a6e5e581"
 }

@@ -35,8 +35,10 @@ auto=true priority=critical preseed/file=/cdrom/preseed.cfg
 ```
 
 Disk choice and both destructive confirmations remain interactive. The preseed's
-late command invokes only the embedded Outpost bootstrap. It does not reboot or
-activate a downstream Serein domain.
+late command invokes only the embedded Outpost bootstrap and enables Outpost for
+the first host boot. It does not reboot or activate a downstream Serein domain.
+On that first boot, Outpost must verify the Debian Base and GPU host gate before
+any Kernel material can be requested or installed.
 
 The JSON receipt binds the upstream ISO and media lock, every embedded payload
 file, the embedded source-road receipt, the resulting ISO hash, the replayed-boot declaration, and the interactive

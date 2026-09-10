@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import os
@@ -46,6 +47,7 @@ def nofollow_ancestors(root,path,allow_missing=True):
 
 
 def receipt_digest(receipt): return sha(canonical({k:v for k,v in receipt.items() if k!="receipt_digest"}))
+def receipt_signed(receipt): return canonical({k:v for k,v in receipt.items() if k not in {"receipt_digest","receipt_signature"}})
 
 
 class Adapter:
@@ -212,8 +214,22 @@ def validate_receipt(adapter,selector):
     if not stat.S_ISREG(info.st_mode) or (os.name!="nt" and stat.S_IMODE(info.st_mode)!=0o600): raise TransactionError("ROLLBACK_RECEIPT_POLICY_DENIED")
     if isinstance(adapter,RealAdapter) and (info.st_uid!=0 or info.st_gid!=0): raise TransactionError("ROLLBACK_RECEIPT_OWNER_DENIED")
     receipt=json.loads(path.read_text(encoding="utf-8"))
-    required={"schema","selector","release_digest","identity","identity_actual","identity_state","introduced_directories","introduced_files","generated_files","immutable_inputs","immutable_key_id","immutable_public_key_fingerprint_sha256","unit_prestate","rollback_complete","receipt_digest"}
-    if set(receipt)!=required or receipt.get("schema")!="SereinOutpostRollback/v2" or receipt.get("selector")!=str(selector) or receipt.get("receipt_digest")!=receipt_digest(receipt): raise TransactionError("ROLLBACK_RECEIPT_INTEGRITY_DENIED")
+    common={"schema","selector","release_digest","identity","identity_actual","identity_state","introduced_directories","introduced_files","generated_files","immutable_inputs","immutable_key_id","immutable_public_key_fingerprint_sha256","unit_prestate","rollback_complete","receipt_digest"}
+    if receipt.get("schema")=="SereinOutpostRollback/v3":
+        required=common|{"receipt_signature"}
+    elif receipt.get("schema")=="SereinOutpostRollback/v2":
+        required=common
+    else: raise TransactionError("ROLLBACK_RECEIPT_SCHEMA_DENIED")
+    if set(receipt)!=required or receipt.get("selector")!=str(selector) or receipt.get("receipt_digest")!=receipt_digest(receipt): raise TransactionError("ROLLBACK_RECEIPT_INTEGRITY_DENIED")
+    if receipt["schema"]=="SereinOutpostRollback/v3":
+        public_path=under(adapter.root,"/usr/share/serein/outpost/cognition-verification.pem")
+        try:
+            public=serialization.load_pem_public_key(public_path.read_bytes())
+            signature=base64.urlsafe_b64decode(receipt["receipt_signature"]+"="*(-len(receipt["receipt_signature"])%4))
+            public.verify(signature,receipt_signed(receipt))
+        except Exception as exc: raise TransactionError("ROLLBACK_RECEIPT_SIGNATURE_DENIED") from exc
+        fingerprint=sha(public.public_bytes(serialization.Encoding.DER,serialization.PublicFormat.SubjectPublicKeyInfo))
+        if fingerprint!=receipt["immutable_public_key_fingerprint_sha256"]: raise TransactionError("ROLLBACK_RECEIPT_AUTHORITY_DENIED")
     release=under(adapter.root,"/usr/share/serein/outpost/release-manifest.json")
     if release.is_file():
         current=json.loads(release.read_text(encoding="utf-8"))
@@ -221,7 +237,13 @@ def validate_receipt(adapter,selector):
     return receipt
 
 
-def write_receipt(selector,receipt):
+def write_receipt(adapter,selector,receipt):
+    if receipt.get("schema")=="SereinOutpostRollback/v3":
+        try:
+            private=serialization.load_pem_private_key(under(adapter.root,"/etc/serein-outpost/cognition-signing.pem").read_bytes(),password=None)
+            if not isinstance(private,Ed25519PrivateKey): raise TypeError("wrong key")
+            receipt["receipt_signature"]=base64.urlsafe_b64encode(private.sign(receipt_signed(receipt))).decode().rstrip("=")
+        except Exception as exc: raise TransactionError("ROLLBACK_RECEIPT_SIGNING_DENIED") from exc
     receipt["receipt_digest"]=receipt_digest(receipt)
     path=selector/"receipt.json"
     with path.open("w",encoding="utf-8",newline="\n") as handle:
@@ -283,7 +305,7 @@ def rollback(adapter,selector):
         if os.path.lexists(under(adapter.root,row["target"])): raise TransactionError("ROLLBACK_RESIDUE_DENIED")
     for unit,state in receipt["unit_prestate"].items():
         if adapter.read_unit(unit)!=state: raise TransactionError("ROLLBACK_PROTECTED_UNIT_STATE_CHANGED:"+unit)
-    receipt["rollback_complete"]=True; write_receipt(selector,receipt)
+    receipt["rollback_complete"]=True; write_receipt(adapter,selector,receipt)
     return receipt
 
 
@@ -324,8 +346,8 @@ def install(adapter,source,manifest,selector,immutable_plan=None):
         if os.path.lexists(under(adapter.root,row["target"])): raise TransactionError("TARGET_COLLISION_DENIED:"+row["target"])
         generated_rows.append(row)
     selector.mkdir(parents=False,mode=0o700); os.chmod(selector,0o700)
-    receipt={"schema":"SereinOutpostRollback/v2","selector":str(selector),"release_digest":manifest["self_digest"],"identity":policy,"identity_actual":planned_identity,"identity_state":"CREATED" if identity_state=="ABSENT" else identity_state,"introduced_directories":directory_rows,"introduced_files":manifest["install_files"],"generated_files":generated_rows,"immutable_inputs":immutable_rows,"immutable_key_id":IMMUTABLE_KEY_ID,"immutable_public_key_fingerprint_sha256":immutable_fingerprint,"unit_prestate":unit_prestate,"rollback_complete":False}
-    write_receipt(selector,receipt)
+    receipt={"schema":"SereinOutpostRollback/v3","selector":str(selector),"release_digest":manifest["self_digest"],"identity":policy,"identity_actual":planned_identity,"identity_state":"CREATED" if identity_state=="ABSENT" else identity_state,"introduced_directories":directory_rows,"introduced_files":manifest["install_files"],"generated_files":generated_rows,"immutable_inputs":immutable_rows,"immutable_key_id":IMMUTABLE_KEY_ID,"immutable_public_key_fingerprint_sha256":immutable_fingerprint,"unit_prestate":unit_prestate,"rollback_complete":False}
+    write_receipt(adapter,selector,receipt)
     try:
         if identity_state=="ABSENT": adapter.create_identity(policy,planned_identity)
         actual_identity=adapter.identity(policy["user"])

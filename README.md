@@ -6,7 +6,10 @@ signature-verified Debian image.
 
 The first Serein component installed is **Outpost**. Outpost initially verifies
 only Debian Base and GPU continuity, exposes the read-only **Serein Vitals**
-surface, and remains inactive until its separately admitted activation step.
+surface, and is enabled as the Base OS installer completes. On bare hardware it
+starts on the first host boot; on an already-running compatible Debian host it
+starts after convergence. No downstream Serein domain is activated by either
+road.
 Kernel and every later API domain are installed and witnessed by Outpost in the
 canonical order; this public tree does not embed private credentials, machine
 identity, network topology, models, or downstream domain payloads.

@@ -6,13 +6,18 @@
   "files": [
     {
       "path": "base/installer/MEDIA_BUILD.md",
-      "bytes": 2093,
-      "sha256": "ba48829753b285ff17112e8b413ae1c6603b8f366d6e523fce344bce0ec425b3"
+      "bytes": 2266,
+      "sha256": "297133c8d0fc9a8f5c1bd87cb514dbf233c5ae10af6e09e5392cb500b4e216cb"
     },
     {
       "path": "base/installer/base-policy.json",
-      "bytes": 766,
-      "sha256": "061427d9518d46276c24ed84a80ebd4e1241ba295b7cfa2b3fa10ca4e7de4102"
+      "bytes": 876,
+      "sha256": "ded18d6261640c590d6fa7de3516b985545dd3aa50a48fca84544a7602349cbf"
+    },
+    {
+      "path": "base/installer/base-road-transaction.py",
+      "bytes": 9497,
+      "sha256": "f9cbec941d674ee6907b896d444af74952d92cc594847db170aa1a137cb0a908"
     },
     {
       "path": "base/installer/build-media.sh",
@@ -21,13 +26,13 @@
     },
     {
       "path": "base/installer/converge-existing.sh",
-      "bytes": 3268,
-      "sha256": "1db149da97cbed9c1f1d686e4ebaa62e765d1b320e1ab368c312984869330a4e"
+      "bytes": 3287,
+      "sha256": "438a1403d1d265eb187c665d4168ad4b3e92f5d46762a8e2ea6d74948f24f4e7"
     },
     {
       "path": "base/installer/late-install.sh",
-      "bytes": 2336,
-      "sha256": "ab9eb4b9e86f3217cded1b5aae4c98c27b3e02c3ec1ac2082efe42de880fde04"
+      "bytes": 1975,
+      "sha256": "a6843d6e62a1ab268de21d8ce8cbd3d262b8eecbc44f0477e475eafa73dc718f"
     },
     {
       "path": "base/installer/media-lock.json",
@@ -65,19 +70,24 @@
       "sha256": "e906fee3546104de2efa3d48407d3e434004702515fc917a481c074d907cdb66"
     },
     {
+      "path": "base/tests/test_base_road_transaction.py",
+      "bytes": 5499,
+      "sha256": "ad60fa406c94cec7499b8fae8dfb9cebdca0606ae6a6be960f0d7d9cf47b1176"
+    },
+    {
       "path": "base/tests/test_build_media_contract.py",
       "bytes": 2069,
       "sha256": "28e8598bb76c728b2b81a7f5c774a4e44bf7faaa6f03356ef0cceebf77994496"
     },
     {
       "path": "base/tests/test_converge_existing.py",
-      "bytes": 1376,
-      "sha256": "5293ed300220eaf2e2a072c72b685c38ea77eee5b4d1028de377b5b47d4ba6a0"
+      "bytes": 1463,
+      "sha256": "16e1952bb3a2b95b9bc002e929f31d22a93062085b19d7830320f872c8afc16b"
     },
     {
       "path": "base/tests/test_late_install_contract.py",
-      "bytes": 1040,
-      "sha256": "e7a2c8c76986463cfaa2cfc90a4ff1fdc3163f3f56664ad1e9c8df9859e5bfae"
+      "bytes": 1076,
+      "sha256": "95f36ccf3f6bd3199da2927ad2426e017ac232272d40ffaeb677ad5c95831c7c"
     },
     {
       "path": "base/tests/test_media_lock.py",
@@ -131,13 +141,13 @@
     },
     {
       "path": "outpost/install/public_generation_transaction.py",
-      "bytes": 33477,
-      "sha256": "39393f7a05d7de30cc7bc88b575164685e9ffd4e196a7695627df2c8ae8bfae3"
+      "bytes": 50442,
+      "sha256": "9e4035b9d3bba0de93f62961d0df8e6b8f56e2b17de308d923d2e852c14eea55"
     },
     {
       "path": "outpost/install/public_installer_cli.py",
-      "bytes": 5297,
-      "sha256": "fa194d3466898225a1e37cfdac70da2532a241f7c4416e75027a6b40a0916e7a"
+      "bytes": 5996,
+      "sha256": "b9ead84c27e70c9edb1716aa485daf0788a898cfd5db839d85cc2863634ab748"
     },
     {
       "path": "outpost/install/rollback-outpost.sh",
@@ -146,8 +156,8 @@
     },
     {
       "path": "outpost/install/transaction.py",
-      "bytes": 25915,
-      "sha256": "3d4d22f6f5d307e56e5c1842fe6ebde3a2cac475d45c06d7c3d321bb08807b02"
+      "bytes": 27596,
+      "sha256": "052e0d6c3671bdfdb62d77e5770f90b7237b7473cbdf13abdc3a9559e82c35bd"
     },
     {
       "path": "outpost/install/upgrade_transaction.py",
@@ -212,7 +222,7 @@
     {
       "path": "outpost/release-manifest.json",
       "bytes": 19408,
-      "sha256": "28e065cd94d0fad82ac5e3370946d157f962d4e05ac2e5ba37331ed442576599"
+      "sha256": "2cef509104439d02a689f9e2973530f886b94abaae6533721bc018ed41caa2eb"
     },
     {
       "path": "outpost/systemd/serein-outpost-host-witness.service",
@@ -226,8 +236,8 @@
     },
     {
       "path": "outpost/systemd/serein-outpost.target",
-      "bytes": 210,
-      "sha256": "b57bb88f60d1f1db4c0702477590d8842d9aa327c3e989542a35750770b9d73b"
+      "bytes": 248,
+      "sha256": "77bdd95951d96a414c7cd04c29acbcc7b35c6a4d505493a28c21d9848f050bda"
     },
     {
       "path": "outpost/tests/test_debian_host_collector.py",
@@ -261,8 +271,8 @@
     },
     {
       "path": "outpost/tests/test_public_generation_transaction.py",
-      "bytes": 22881,
-      "sha256": "4153acb1718d1defe7a4b8b6850e8dfad61c8769cf3d24df5902f6b4da1c8477"
+      "bytes": 29232,
+      "sha256": "11d475eff358d0dc676e8661625e0153938d651eb3fcfd89359b7bb51404fd99"
     },
     {
       "path": "outpost/tests/test_public_installer_cli.py",
@@ -276,8 +286,8 @@
     },
     {
       "path": "outpost/tests/test_systemd_contract.py",
-      "bytes": 1378,
-      "sha256": "d0ddbd20641da37a6b47ad69c556eea244fddb0581b8e6242714dffb4308ff16"
+      "bytes": 1454,
+      "sha256": "515677820edf583f51335ab120290534b731cdb0fe3d92b6659e57eac05b7feb"
     },
     {
       "path": "outpost/tests/test_transaction.py",
@@ -300,5 +310,5 @@
       "sha256": "7da5241d65bf3221cc018be6e1cc437a2ebd8b18143e17a1609398c0b43ff782"
     }
   ],
-  "self_digest": "sha256:c50f8f8981105f626fe23336cfa81770965b0be6c0f3edea64b04386ef3e3748"
+  "self_digest": "sha256:d73bf40d5608cee6dc8d1fa89e87e9a04f1645d0092e22791731784182206c75"
 }

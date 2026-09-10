@@ -8,7 +8,12 @@ from install.public_generation_transaction import _receipt_digest,install_public
 
 def archive(tmp_path,commit,tree,hostile=None):
     tmp_path.mkdir(parents=True,exist_ok=True)
-    payload={"outpost/__init__.py":b"", "outpost/service.py":b"pass\n"}
+    payload={"outpost/__init__.py":b"", "outpost/service.py":b"pass\n",
+        "install/generation_launcher.py":b"#!/usr/bin/python3\n",
+        "systemd/serein-outpost-host-witness.service":b"[Unit]\n[Service]\nExecStart=/usr/bin/python3 -m outpost.host_witness_runner\n",
+        "systemd/serein-outpost-presentation.service":b"[Unit]\nRequires=serein-outpost-host-witness.service\nAfter=serein-outpost-host-witness.service\n[Service]\nExecStart=/usr/bin/python3 -m outpost.presentation_service\n",
+        "systemd/serein-outpost.target":b"[Unit]\nRequires=serein-outpost-host-witness.service serein-outpost-presentation.service\nAfter=serein-outpost-host-witness.service serein-outpost-presentation.service\n[Install]\nWantedBy=multi-user.target\n"}
+    if hostile=="missing-image": payload.pop("systemd/serein-outpost.target"); hostile=None
     release={"schema":"SereinOutpostSourceRelease/v2","classification":"PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED","replacement_unit_allowlist":["serein-outpost-host-witness.service","serein-outpost-presentation.service"],"generated_files":[{"target":"/etc/serein-outpost/rollback-root","mode":"0600","uid":0,"gid":0}],"required_immutable_inputs":[{"target":target} for target in sorted(("/etc/serein-outpost/readonly.token","/etc/serein-outpost/admission.token","/etc/serein-outpost/cognition-signing.pem","/usr/share/serein/outpost/cognition-verification.pem","/etc/serein/tls/serein-backend-cert.pem","/etc/serein/tls/serein-backend-key.pem"))],"payload":[{"path":p,"bytes":len(d),"sha256":sha(d)} for p,d in payload.items()]}
     release["self_digest"]="sha256:"+sha(canonical(release)); payload["release-manifest.json"]=(json.dumps(release,indent=2)+"\n").encode(); release["payload"].append({"path":"release-manifest.json","bytes":len(payload["release-manifest.json"]),"sha256":sha(payload["release-manifest.json"])})
     # Release cannot include its own serialized bytes in payload; regenerate with the canonical public denominator excluding itself.
@@ -51,7 +56,12 @@ def fixture(tmp_path,hostile=None,first=False):
     plan["signature"]=base64.urlsafe_b64encode(cognition.sign(canonical(plan))).decode().rstrip("=")
     authority=tmp_path/"usr/share/serein/outpost/cognition-verification.pem"
     adapter=Adapter(tmp_path); launcher=tmp_path/"launcher"; launcher.write_bytes(b"#!/usr/bin/python3\n"); launcher.chmod(0o755)
-    fetch=lambda url:(bundle.read_bytes(),url); ok=lambda *args:{"schema":"SereinOutpostCandidateAcceptance/v1","installed_boot_preflight":"PASS","api":"PASS","vitals":"PASS","boot_id":boot,"release_digest":plan["release_digest"]}
+    fetch=lambda url:(bundle.read_bytes(),url)
+    evidence_generation={"value":0}
+    def ok(*args):
+        evidence_generation["value"]+=1
+        value=evidence_generation["value"]
+        return {"schema":"SereinOutpostCandidateAcceptance/v2","installed_boot_preflight":"PASS","api":"PASS","vitals":"PASS","boot_id":boot,"release_digest":plan["release_digest"],"host_witness_result":"PASS","host_witness_generation":value,"host_witness_projection_digest":f"{value:064x}","host_witness_observed_at":float(value)}
     return adapter,plan,authority,fetch,ok,launcher
 
 def test_exact_public_generation_installs_and_flips(tmp_path):
@@ -59,6 +69,79 @@ def test_exact_public_generation_installs_and_flips(tmp_path):
     result=install_public_generation(adapter,plan,authority,fetch,ok,ok)
     assert result["status"]=="COMMITTED"
     assert (tmp_path/"usr/share/serein/outpost-generations"/plan["release_digest"][7:]).is_dir()
+    assert adapter.read_unit("serein-outpost.target")["active"]=="active"
+    assert adapter.read_unit("serein-outpost.target")["enabled"]=="enabled"
+    assert adapter.read_unit("serein-outpost-host-witness.service")["active"]!="active"
+    assert set(json.loads((adapter.root/plan["rollback_selector"].lstrip("/")/"transaction-receipt.json").read_text())["service_deltas"]["units"])=={"serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost.target"}
+    journal=json.loads((adapter.root/plan["rollback_selector"].lstrip("/")/"forward-state.json").read_text())
+    assert journal["schema"]=="SereinPublicOutpostForwardState/v1" and journal["phase"]=="COMPLETE"
+    assert journal["state_digest"]==sha(canonical({key:value for key,value in journal.items() if key!="state_digest"}))
+
+
+def test_stale_preexisting_vitals_cannot_satisfy_terminal_acceptance(tmp_path):
+    adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path)
+    stale=ok()
+    with pytest.raises(TransactionError,match="PUBLIC_STALE_VITALITY_DENIED"):
+        install_public_generation(adapter,plan,authority,fetch,lambda *args:stale,lambda *args:stale)
+    assert adapter.read_unit("serein-outpost.target")["active"]!="active"
+    assert not (tmp_path/"usr/libexec/serein/outpost-generation-launcher").exists()
+
+
+@pytest.mark.parametrize("crash_prefix",range(1,56))
+def test_signed_forward_journal_recovers_process_crash_and_reenters(tmp_path,crash_prefix):
+    original,plan,authority,fetch,ok,launcher=fixture(tmp_path)
+    class CrashAdapter(Adapter):
+        def __init__(self,root):
+            super().__init__(root); self.after_journal=0; self.crash_at=crash_prefix
+        def boundary(self):
+            super().boundary()
+            journal=self.root/plan["rollback_selector"].lstrip("/")/"forward-state.json"
+            if journal.exists() and self.crash_at is not None:
+                self.after_journal+=1
+                if self.after_journal==self.crash_at: raise SystemExit("SIMULATED_PROCESS_CRASH")
+    adapter=CrashAdapter(tmp_path); adapter.unit_state=copy.deepcopy(original.unit_state)
+    try:
+        install_public_generation(adapter,plan,authority,fetch,ok,ok)
+    except SystemExit:
+        pass
+    else:
+        pytest.skip("prefix exceeds current forward mutation boundary")
+    adapter.crash_at=None
+    result=install_public_generation(adapter,plan,authority,fetch,ok,ok)
+    assert result["status"] in {"COMMITTED","ALREADY_COMMITTED"}
+    assert adapter.read_unit("serein-outpost.target")["active"]=="active"
+    recovered=list((tmp_path/"var/lib/serein/rollback").glob(Path(plan["rollback_selector"]).name+".recovered-*"))
+    if result["status"]=="COMMITTED": assert len(recovered)==1 and (recovered[0]/"forward-state.json").exists()
+
+
+def test_image_payload_missing_is_denied_and_prestate_preserved(tmp_path):
+    adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path)
+    raw,release=archive(tmp_path/"broken","a"*40,"b"*40,"missing-image")
+    plan["archive_sha256"]=sha(raw.read_bytes()); plan["release_digest"]=release["self_digest"]
+    cognition=serialization.load_pem_private_key((tmp_path/"etc/serein-outpost/cognition-signing.pem").read_bytes(),password=None)
+    plan["signature"]=base64.urlsafe_b64encode(cognition.sign(canonical({k:v for k,v in plan.items() if k!="signature"}))).decode().rstrip("=")
+    with pytest.raises(TransactionError,match="PUBLIC_IMAGE_PAYLOAD_MISSING"): install_public_generation(adapter,plan,authority,lambda url:(raw.read_bytes(),url),ok,ok)
+
+
+def test_image_rollback_restores_exact_files_and_unit_prestate(tmp_path):
+    adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path)
+    before={unit:copy.deepcopy(adapter.read_unit(unit)) for unit in ("serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost.target")}
+    install_public_generation(adapter,plan,authority,fetch,ok,ok)
+    rollback_public_generation(adapter,adapter.root/plan["rollback_selector"].lstrip("/"))
+    assert {unit:adapter.read_unit(unit) for unit in before}==before
+    assert not (tmp_path/"usr/libexec/serein/outpost-generation-launcher").exists()
+
+
+def test_complete_image_every_failure_boundary_restores_prestate(tmp_path):
+    probe=tmp_path/"probe"; adapter,plan,authority,fetch,ok,launcher=fixture(probe)
+    install_public_generation(adapter,plan,authority,fetch,ok,ok); boundaries=adapter.writes
+    image=("usr/libexec/serein/outpost-generation-launcher","etc/systemd/system/serein-outpost-host-witness.service","etc/systemd/system/serein-outpost-presentation.service","etc/systemd/system/serein-outpost.target")
+    units=("serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost.target")
+    for point in range(1,boundaries+1):
+        root=tmp_path/f"failure-{point}"; adapter,plan,authority,fetch,ok,launcher=fixture(root); before={u:copy.deepcopy(adapter.read_unit(u)) for u in units}; adapter.fail_after=point
+        with pytest.raises(TransactionError,match="INJECTED_WRITE_FAILURE"): install_public_generation(adapter,plan,authority,fetch,ok,ok)
+        assert {u:adapter.read_unit(u) for u in units}==before,point
+        assert all(not (root/name).exists() for name in image),(point,[name for name in image if (root/name).exists()])
 
 @pytest.mark.skipif(os.name=="nt" or not hasattr(os,"geteuid") or os.geteuid()!=0 or shutil.which("runuser") is None,reason="requires root Linux service-user proof")
 def test_installed_selector_is_readable_by_unprivileged_service_user():
