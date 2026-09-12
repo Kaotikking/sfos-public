@@ -4,7 +4,8 @@
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "replacement_unit_allowlist": [
     "serein-outpost-host-witness.service",
-    "serein-outpost-presentation.service"
+    "serein-outpost-presentation.service",
+    "serein-outpost-kernel-install.service"
   ],
   "replacement_controlled_roots": [
     "/usr/share/serein/outpost"
@@ -36,6 +37,11 @@
       "sha256": "7272f7a6e7e864d443a3634eba6e92660c39f899e58b3d1cd528a2b2917366b0"
     },
     {
+      "path": "install/kernel_first_install_runner.py",
+      "bytes": 14542,
+      "sha256": "0788f6bd33bf87e67282dd1ba94d48650cd997c3c7e22055d5dabd97b586b564"
+    },
+    {
       "path": "install/public-rollback.sh",
       "bytes": 211,
       "sha256": "4a4e9bada94a3ab505ae70ec082c23d6d84c9872df7c87c30ac9a95a800316c7"
@@ -47,8 +53,8 @@
     },
     {
       "path": "install/public_generation_transaction.py",
-      "bytes": 50976,
-      "sha256": "c9058101841182fce9b9de21379bff73429fb47cb5cb19e2ad5a5851340ff2e7"
+      "bytes": 51178,
+      "sha256": "40a29066553072e036727c5da5762f2e6fbc8aface8bbfc7e60fbc362840af08"
     },
     {
       "path": "install/public_installer_cli.py",
@@ -122,13 +128,18 @@
     },
     {
       "path": "refresh_manifest.py",
-      "bytes": 6415,
-      "sha256": "4ce3070ad7bd66a0a916d33f2c972b496a108faed97014002d6dc1efc9e804e9"
+      "bytes": 6542,
+      "sha256": "cd3398a2e8817ed8aba924cc7a80db3c4a8d610a94564c9b765fda8dee42f6ce"
     },
     {
       "path": "systemd/serein-outpost-host-witness.service",
       "bytes": 636,
       "sha256": "02014ef45aebdf3b97b208b6f7ede16a054c216f09290bb927102ca287030e15"
+    },
+    {
+      "path": "systemd/serein-outpost-kernel-install.service",
+      "bytes": 939,
+      "sha256": "be2742e2d2e3a4f702791d65381f50b3bed35ef6f7169b529c363520eb25daf1"
     },
     {
       "path": "systemd/serein-outpost-presentation.service",
@@ -173,14 +184,19 @@
       "sha256": "f2449c7384ff46c19122a37afd80737338c66665d7c182246a4961ca28a683d0"
     },
     {
+      "path": "tests/test_kernel_first_install_runner.py",
+      "bytes": 4504,
+      "sha256": "f55cba62accd082c08fc8149e5de3b62af8f44a9e8dc13939ae11853d564d623"
+    },
+    {
       "path": "tests/test_presentation_service.py",
       "bytes": 4225,
       "sha256": "e225f2f22b2882a596ace7f69ad2bf32c5170e3a4c3452554be09f7e141e6450"
     },
     {
       "path": "tests/test_public_generation_transaction.py",
-      "bytes": 30698,
-      "sha256": "0f2679bfcb9ee70356e0360d979cd70956f8d4737ffd5ceec9b965ad83a04fa6"
+      "bytes": 31198,
+      "sha256": "559d66b1f8fe7c250d9f5eed6dc14a1dbb6cfa29c1d25988ef92972ce873a22e"
     },
     {
       "path": "tests/test_public_installer_cli.py",
@@ -194,8 +210,8 @@
     },
     {
       "path": "tests/test_systemd_contract.py",
-      "bytes": 1786,
-      "sha256": "bc0a89288213cf79411c889451b0d79b57c6e3d327f3983b5753ada84e72ee69"
+      "bytes": 2479,
+      "sha256": "ecaa5426642339746fe59ebe77a6eadb5c5e77afd70c7b6d80971eee581281ab"
     },
     {
       "path": "tests/test_transaction.py",
@@ -233,6 +249,15 @@
       "gid": 0
     },
     {
+      "source": "install/kernel_first_install_runner.py",
+      "target": "/usr/share/serein/outpost/install/kernel_first_install_runner.py",
+      "bytes": 14542,
+      "sha256": "0788f6bd33bf87e67282dd1ba94d48650cd997c3c7e22055d5dabd97b586b564",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
       "source": "install/public-rollback.sh",
       "target": "/usr/share/serein/outpost/install/public-rollback.sh",
       "bytes": 211,
@@ -253,8 +278,8 @@
     {
       "source": "install/public_generation_transaction.py",
       "target": "/usr/share/serein/outpost/install/public_generation_transaction.py",
-      "bytes": 50976,
-      "sha256": "c9058101841182fce9b9de21379bff73429fb47cb5cb19e2ad5a5851340ff2e7",
+      "bytes": 51178,
+      "sha256": "40a29066553072e036727c5da5762f2e6fbc8aface8bbfc7e60fbc362840af08",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -395,6 +420,15 @@
       "gid": 0
     },
     {
+      "source": "systemd/serein-outpost-kernel-install.service",
+      "target": "/usr/share/serein/outpost/systemd/serein-outpost-kernel-install.service",
+      "bytes": 939,
+      "sha256": "be2742e2d2e3a4f702791d65381f50b3bed35ef6f7169b529c363520eb25daf1",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
       "source": "systemd/serein-outpost-presentation.service",
       "target": "/usr/share/serein/outpost/systemd/serein-outpost-presentation.service",
       "bytes": 769,
@@ -435,6 +469,15 @@
       "target": "/etc/systemd/system/serein-outpost-presentation.service",
       "bytes": 769,
       "sha256": "d1d016f972741338f6e4c1ad6d6af596e264a49cb131edbffc41fcca71b6709a",
+      "mode": "0644",
+      "uid": 0,
+      "gid": 0
+    },
+    {
+      "source": "systemd/serein-outpost-kernel-install.service",
+      "target": "/etc/systemd/system/serein-outpost-kernel-install.service",
+      "bytes": 939,
+      "sha256": "be2742e2d2e3a4f702791d65381f50b3bed35ef6f7169b529c363520eb25daf1",
       "mode": "0644",
       "uid": 0,
       "gid": 0
@@ -630,5 +673,5 @@
       "required_before_install": true
     }
   ],
-  "self_digest": "sha256:b947812daba1aac32bb45b39dfd0afb959873c07ce70da03df97bfc854b1a4d0"
+  "self_digest": "sha256:c89d6a5c324a3e4da8bb33533ca217ed139b2178ad25d6d6f12777a413594686"
 }

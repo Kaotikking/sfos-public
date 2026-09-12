@@ -1,0 +1,5 @@
+#!/usr/bin/python3
+import json,sys
+from serein_stage1.stage1_witness import read_current
+try:print(json.dumps(read_current(),sort_keys=True,separators=(",",":")))
+except Exception as error:print(json.dumps({"schema":"SEREIN/KernelDomain1Read/v1","status":"DENIED","reason":str(error),"authority_effect":"NONE"},sort_keys=True,separators=(",",":")));sys.exit(1)

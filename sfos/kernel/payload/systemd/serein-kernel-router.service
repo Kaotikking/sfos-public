@@ -1,0 +1,15 @@
+[Unit]
+Description=Serein Kernel Authority router
+[Service]
+Type=notify
+User=serein-stage1
+Group=serein-stage1
+EnvironmentFile=/etc/serein/kernel/replay-peer.env
+LoadCredential=independent-route-audit.pem:/etc/serein/credentials/independent-route-audit.pem
+ExecStart=/usr/libexec/serein/serein-kernel-router
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/serein/kernel/operations /run/serein/kernel
+RestrictAddressFamilies=AF_UNIX

@@ -1,0 +1,15 @@
+[Unit]
+Description=Outpost-owned Serein Kernel Domain 1 commission
+After=serein-kernel-authority-api.socket serein-kernel-operations-api.socket serein-kernel-interface-api.socket serein-kernel-operations-heartbeat.service serein-kernel-router.socket serein-conversation-runtime.socket
+Requires=serein-kernel-authority-api.socket serein-kernel-operations-api.socket serein-kernel-interface-api.socket serein-kernel-operations-heartbeat.service serein-kernel-router.socket serein-conversation-runtime.socket
+[Service]
+Type=oneshot
+User=serein-outpost
+Group=serein-outpost
+ExecStart=/usr/libexec/serein/serein-kernel-domain1-commission
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/serein/kernel
+RestrictAddressFamilies=AF_UNIX

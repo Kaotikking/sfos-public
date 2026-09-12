@@ -1,0 +1,3 @@
+#!/usr/bin/python3
+from serein_stage1.haos_https_adapter import serve
+serve()

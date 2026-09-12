@@ -1,0 +1,5 @@
+[Socket]
+ListenStream=/run/serein/kernel/gateway-haos.sock
+Service=serein-kernel-client-gateway@haos.service
+SocketMode=0660
+SocketGroup=serein-stage1

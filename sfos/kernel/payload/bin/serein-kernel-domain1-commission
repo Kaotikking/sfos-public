@@ -1,0 +1,3 @@
+#!/usr/bin/python3
+from serein_stage1.commission_runner import main
+main()

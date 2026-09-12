@@ -1,0 +1,23 @@
+[Unit]
+Description=Serein Kernel OPERATIONS live heartbeat
+Requires=serein-kernel-replay-store.service serein-observation-audit.socket
+After=serein-kernel-replay-store.service serein-observation-audit.socket
+Before=serein-kernel-operations-api.socket
+
+[Service]
+Type=simple
+User=serein-stage1
+Group=serein-stage1
+SupplementaryGroups=serein-stage1
+ExecStart=/usr/libexec/serein/serein-kernel-operations-heartbeat
+Restart=on-failure
+RestartSec=1s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/serein/kernel
+RestrictAddressFamilies=AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

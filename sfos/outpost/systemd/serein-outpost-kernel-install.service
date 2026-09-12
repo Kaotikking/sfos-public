@@ -1,0 +1,22 @@
+[Unit]
+Description=Serein Outpost-owned inactive Kernel first install
+Requires=serein-outpost-host-witness.service
+After=serein-outpost-host-witness.service
+ConditionPathExists=/var/lib/serein-outpost/kernel/install-request.json
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/usr/libexec/serein/outpost-generation-launcher install/kernel_first_install_runner.py
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/var/lib/serein-outpost/host-vitality /etc/serein-outpost/cognition-signing.pem /usr/share/serein/outpost/cognition-verification.pem
+ReadWritePaths=/var/lib/serein-outpost/kernel /var/lib/serein/kernel /var/lib/serein/rollback /etc/serein/kernel /usr/lib/serein/kernel /usr/lib/python3/dist-packages/serein_stage1 /usr/libexec/serein /etc/systemd/system
+RestrictAddressFamilies=AF_UNIX
+LockPersonality=yes
+MemoryDenyWriteExecute=yes

@@ -12,9 +12,10 @@ def archive(tmp_path,commit,tree,hostile=None):
         "install/generation_launcher.py":b"#!/usr/bin/python3\n",
         "systemd/serein-outpost-host-witness.service":b"[Unit]\n[Service]\nExecStart=/usr/bin/python3 -m outpost.host_witness_runner\n",
         "systemd/serein-outpost-presentation.service":b"[Unit]\nRequires=serein-outpost-host-witness.service\nAfter=serein-outpost-host-witness.service\n[Service]\nExecStart=/usr/bin/python3 -m outpost.presentation_service\n",
+        "systemd/serein-outpost-kernel-install.service":b"[Unit]\nRequires=serein-outpost-host-witness.service\nAfter=serein-outpost-host-witness.service\n[Service]\nType=oneshot\nExecStart=/usr/libexec/serein/outpost-generation-launcher install/kernel_first_install_runner.py\n",
         "systemd/serein-outpost.target":b"[Unit]\nRequires=serein-outpost-host-witness.service serein-outpost-presentation.service\nAfter=serein-outpost-host-witness.service serein-outpost-presentation.service\n[Install]\nWantedBy=multi-user.target\n"}
     if hostile=="missing-image": payload.pop("systemd/serein-outpost.target"); hostile=None
-    release={"schema":"SereinOutpostSourceRelease/v2","classification":"PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED","replacement_unit_allowlist":["serein-outpost-host-witness.service","serein-outpost-presentation.service"],"generated_files":[{"target":"/etc/serein-outpost/rollback-root","mode":"0600","uid":0,"gid":0}],"required_immutable_inputs":[{"target":target} for target in sorted(("/etc/serein-outpost/readonly.token","/etc/serein-outpost/admission.token","/etc/serein-outpost/cognition-signing.pem","/usr/share/serein/outpost/cognition-verification.pem","/etc/serein/tls/serein-backend-cert.pem","/etc/serein/tls/serein-backend-key.pem"))],"payload":[{"path":p,"bytes":len(d),"sha256":sha(d)} for p,d in payload.items()]}
+    release={"schema":"SereinOutpostSourceRelease/v2","classification":"PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED","replacement_unit_allowlist":["serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost-kernel-install.service"],"generated_files":[{"target":"/etc/serein-outpost/rollback-root","mode":"0600","uid":0,"gid":0}],"required_immutable_inputs":[{"target":target} for target in sorted(("/etc/serein-outpost/readonly.token","/etc/serein-outpost/admission.token","/etc/serein-outpost/cognition-signing.pem","/usr/share/serein/outpost/cognition-verification.pem","/etc/serein/tls/serein-backend-cert.pem","/etc/serein/tls/serein-backend-key.pem"))],"payload":[{"path":p,"bytes":len(d),"sha256":sha(d)} for p,d in payload.items()]}
     release["self_digest"]="sha256:"+sha(canonical(release)); payload["release-manifest.json"]=(json.dumps(release,indent=2)+"\n").encode(); release["payload"].append({"path":"release-manifest.json","bytes":len(payload["release-manifest.json"]),"sha256":sha(payload["release-manifest.json"])})
     # Release cannot include its own serialized bytes in payload; regenerate with the canonical public denominator excluding itself.
     release["payload"]=[row for row in release["payload"] if row["path"]!="release-manifest.json"]
@@ -72,7 +73,7 @@ def test_exact_public_generation_installs_and_flips(tmp_path):
     assert adapter.read_unit("serein-outpost.target")["active"]=="active"
     assert adapter.read_unit("serein-outpost.target")["enabled"]=="enabled"
     assert adapter.read_unit("serein-outpost-host-witness.service")["active"]!="active"
-    assert set(json.loads((adapter.root/plan["rollback_selector"].lstrip("/")/"transaction-receipt.json").read_text())["service_deltas"]["units"])=={"serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost.target"}
+    assert set(json.loads((adapter.root/plan["rollback_selector"].lstrip("/")/"transaction-receipt.json").read_text())["service_deltas"]["units"])=={"serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost-kernel-install.service","serein-outpost.target"}
     journal=json.loads((adapter.root/plan["rollback_selector"].lstrip("/")/"forward-state.json").read_text())
     assert journal["schema"]=="SereinPublicOutpostForwardState/v1" and journal["phase"]=="COMPLETE"
     assert journal["state_digest"]==sha(canonical({key:value for key,value in journal.items() if key!="state_digest"}))
@@ -148,7 +149,7 @@ def test_image_payload_missing_is_denied_and_prestate_preserved(tmp_path):
 
 def test_image_rollback_restores_exact_files_and_unit_prestate(tmp_path):
     adapter,plan,authority,fetch,ok,launcher=fixture(tmp_path)
-    before={unit:copy.deepcopy(adapter.read_unit(unit)) for unit in ("serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost.target")}
+    before={unit:copy.deepcopy(adapter.read_unit(unit)) for unit in ("serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost-kernel-install.service","serein-outpost.target")}
     install_public_generation(adapter,plan,authority,fetch,ok,ok)
     rollback_public_generation(adapter,adapter.root/plan["rollback_selector"].lstrip("/"))
     assert {unit:adapter.read_unit(unit) for unit in before}==before
@@ -158,8 +159,8 @@ def test_image_rollback_restores_exact_files_and_unit_prestate(tmp_path):
 def test_complete_image_every_failure_boundary_restores_prestate(tmp_path):
     probe=tmp_path/"probe"; adapter,plan,authority,fetch,ok,launcher=fixture(probe)
     install_public_generation(adapter,plan,authority,fetch,ok,ok); boundaries=adapter.writes
-    image=("usr/libexec/serein/outpost-generation-launcher","etc/systemd/system/serein-outpost-host-witness.service","etc/systemd/system/serein-outpost-presentation.service","etc/systemd/system/serein-outpost.target")
-    units=("serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost.target")
+    image=("usr/libexec/serein/outpost-generation-launcher","etc/systemd/system/serein-outpost-host-witness.service","etc/systemd/system/serein-outpost-presentation.service","etc/systemd/system/serein-outpost-kernel-install.service","etc/systemd/system/serein-outpost.target")
+    units=("serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost-kernel-install.service","serein-outpost.target")
     for point in range(1,boundaries+1):
         root=tmp_path/f"failure-{point}"; adapter,plan,authority,fetch,ok,launcher=fixture(root); before={u:copy.deepcopy(adapter.read_unit(u)) for u in units}; adapter.fail_after=point
         with pytest.raises(TransactionError,match="INJECTED_WRITE_FAILURE"): install_public_generation(adapter,plan,authority,fetch,ok,ok)

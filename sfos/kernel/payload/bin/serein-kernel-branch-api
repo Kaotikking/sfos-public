@@ -1,0 +1,13 @@
+#!/usr/bin/python3
+import argparse,json,os,pwd,socket,struct
+from serein_stage1.kernel_branch_api import answer,domain_authority_answer,live_facts
+p=argparse.ArgumentParser();p.add_argument("--branch",choices=("AUTHORITY","OPERATIONS","INTERFACE"),required=True);a=p.parse_args()
+listener=socket.socket(fileno=3);connection,_=listener.accept()
+with connection:
+ peer=struct.unpack("3i",connection.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))[1]
+ request=json.loads(connection.recv(16384));facts=live_facts(a.branch)
+ if a.branch=="AUTHORITY" and request.get("schema")=="SEREIN/OutpostDomainAuthorityCheck/v1":
+  state=json.loads(open("/var/lib/serein-outpost/domains/state.json",encoding="utf-8").read())
+  response=domain_authority_answer(request,peer_uid=peer,expected_outpost_uid=pwd.getpwnam("serein-outpost").pw_uid,boot_id=facts["boot_id"],admitted_domains=state["admitted_domains"])
+ else: response=answer(a.branch,request,facts,peer_uid=peer,expected_outpost_uid=pwd.getpwnam("serein-outpost").pw_uid)
+ connection.sendall((json.dumps(response,sort_keys=True,separators=(",",":"))+"\n").encode())

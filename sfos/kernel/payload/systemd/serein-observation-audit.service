@@ -1,0 +1,19 @@
+[Unit]
+Description=Serein observation audit
+Requires=serein-observation-audit.socket
+After=serein-observation-audit.socket
+[Service]
+Type=notify
+User=serein-stage1
+Group=serein-stage1
+StateDirectory=serein/kernel/audit
+StateDirectoryMode=0700
+ExecStart=/usr/libexec/serein/serein-observation-audit
+Restart=always
+RestartSec=2s
+WatchdogSec=30s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX

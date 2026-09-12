@@ -1,0 +1,26 @@
+{
+  "schema": "SereinPortableKernelInstallLayout/v1",
+  "branch_order": ["AUTHORITY", "OPERATIONS", "INTERFACE"],
+  "stage1_order": ["AUTHORITY", "OPERATIONS", "INTERFACE", "GPU_CONTROL", "OFFLINE_COMPANION", "COGNITIVE_GATEWAY", "OUTPOST_STAGE1_WITNESS"],
+  "activation": "INACTIVE_OUTPOST_OWNED",
+  "generated_vm_local": [
+    {"target":"/var/lib/serein/kernel/authority/replay.key","bytes":32,"mode":"0600","owner":"serein-stage1:serein-stage1","export":"DENIED"},
+    {"target":"/var/lib/serein/kernel/authority/replay-descriptor.json","mode":"0644"},
+    {"target":"/etc/serein/kernel/replay-peer.env","mode":"0600","owner":"root:root","content":"OUTPOST_UID_GID_ONLY"}
+  ],
+  "offline_model_transaction": {
+    "executor": "OUTPOST_ONLY",
+    "source": "install/offline_ollama_transaction.py",
+    "network": "PROHIBIT_FETCH_AND_PULL",
+    "runtime_archive_sha256": "9088b9e666c0db7e4eafa8ac110a4f114af15595e4bcda2a3b0dba2afb376604",
+    "model_digest": "sha256:0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0",
+    "blobs_in_public_archive": false
+  },
+  "excluded": ["HAOS_IMPLEMENTATION", "ANDROID_IMPLEMENTATION", "ESP32_IMPLEMENTATION", "PRIVATE_CREDENTIALS", "MODEL_OR_RUNTIME_BLOBS", "WAN_MODEL_PULL", "STAGE2_ACTIVATION", "DOWNSTREAM_DOMAIN_ACTIVATION"],
+  "payload_roots": {
+    "payload/serein_stage1": "/usr/lib/python3/dist-packages/serein_stage1",
+    "payload/runtime": "/usr/lib/serein/kernel",
+    "payload/bin": "/usr/libexec/serein",
+    "payload/systemd": "/etc/systemd/system"
+  }
+}

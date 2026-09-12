@@ -1,0 +1,17 @@
+[Unit]
+Description=Serein isolated Kernel Gateway function %i
+After=serein-kernel-interface-api.socket serein-kernel-replay-store.service serein-observation-audit.socket
+Requires=serein-conversation-runtime.socket serein-kernel-replay-store.service serein-observation-audit.socket
+[Service]
+Type=notify
+User=serein-stage1
+Group=serein-stage1
+EnvironmentFile=/etc/serein/kernel/replay-peer.env
+ExecStart=/usr/libexec/serein/serein-kernel-client-gateway %i
+Restart=on-failure
+RestartSec=1s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX

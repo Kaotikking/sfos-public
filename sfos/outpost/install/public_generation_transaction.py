@@ -33,14 +33,15 @@ IMMUTABLE_POLICY={
     "/etc/serein/tls/serein-backend-cert.pem":"0600",
     "/etc/serein/tls/serein-backend-key.pem":"0600",
 }
-PUBLIC_UNITS={"serein-outpost-host-witness.service","serein-outpost-presentation.service"}
+PUBLIC_UNITS={"serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost-kernel-install.service"}
 IMAGE_FILES={
     "install/generation_launcher.py":("/usr/libexec/serein/outpost-generation-launcher","0755"),
     "systemd/serein-outpost-host-witness.service":("/etc/systemd/system/serein-outpost-host-witness.service","0644"),
     "systemd/serein-outpost-presentation.service":("/etc/systemd/system/serein-outpost-presentation.service","0644"),
+    "systemd/serein-outpost-kernel-install.service":("/etc/systemd/system/serein-outpost-kernel-install.service","0644"),
     "systemd/serein-outpost.target":("/etc/systemd/system/serein-outpost.target","0644"),
 }
-IMAGE_UNITS=("serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost.target")
+IMAGE_UNITS=("serein-outpost-host-witness.service","serein-outpost-presentation.service","serein-outpost-kernel-install.service","serein-outpost.target")
 
 
 def _deny(condition, code):

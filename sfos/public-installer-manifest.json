@@ -11,28 +11,28 @@
     },
     {
       "path": "base/installer/base-policy.json",
-      "bytes": 876,
-      "sha256": "ded18d6261640c590d6fa7de3516b985545dd3aa50a48fca84544a7602349cbf"
+      "bytes": 877,
+      "sha256": "30f91e2985e1e87cb83007c7598f5d351a519d05b177a69ba5f2ae66b9f9ff1c"
     },
     {
       "path": "base/installer/base-road-transaction.py",
-      "bytes": 9497,
-      "sha256": "f9cbec941d674ee6907b896d444af74952d92cc594847db170aa1a137cb0a908"
+      "bytes": 9607,
+      "sha256": "522aa88702670497b330671bb8165c124c2a4ffcc92c81f3f544eacd3125d07b"
     },
     {
       "path": "base/installer/build-media.sh",
-      "bytes": 7322,
-      "sha256": "97e1b5660787ceba2581a8f2610e4605b38c74c476108bb096118695be40c0db"
+      "bytes": 7333,
+      "sha256": "661cdb07dd417686051e5d15ac7edc5c13385f1e5e2e2714c4f1e253b230ac26"
     },
     {
       "path": "base/installer/converge-existing.sh",
-      "bytes": 3287,
-      "sha256": "438a1403d1d265eb187c665d4168ad4b3e92f5d46762a8e2ea6d74948f24f4e7"
+      "bytes": 3330,
+      "sha256": "fa551db7203c09234141bb9317506a9356f16bb97676468e72f6e2b9505a87df"
     },
     {
       "path": "base/installer/late-install.sh",
-      "bytes": 1975,
-      "sha256": "a6843d6e62a1ab268de21d8ce8cbd3d262b8eecbc44f0477e475eafa73dc718f"
+      "bytes": 2000,
+      "sha256": "3a467eab606dbd694d9f6e9ad874b05919333ea6ff865ae023df756847c890a4"
     },
     {
       "path": "base/installer/media-lock.json",
@@ -41,8 +41,8 @@
     },
     {
       "path": "base/installer/preseed.cfg",
-      "bytes": 1039,
-      "sha256": "85f1990f9bbf6f31f7b915c5d26c071ed165b9d30c0d7af03bb1bf6ef515cb34"
+      "bytes": 1040,
+      "sha256": "a5c1b1533942a3d5e89c4f2df437303027808004f70d543bf0077bb24c73f242"
     },
     {
       "path": "base/installer/verify-media.sh",
@@ -71,8 +71,8 @@
     },
     {
       "path": "base/tests/test_base_road_transaction.py",
-      "bytes": 5499,
-      "sha256": "ad60fa406c94cec7499b8fae8dfb9cebdca0606ae6a6be960f0d7d9cf47b1176"
+      "bytes": 5573,
+      "sha256": "697e9254f2ae4f4b25894347f31d36ffa316103737a38861e8ffb41b74defa11"
     },
     {
       "path": "base/tests/test_build_media_contract.py",
@@ -81,13 +81,13 @@
     },
     {
       "path": "base/tests/test_converge_existing.py",
-      "bytes": 1463,
-      "sha256": "16e1952bb3a2b95b9bc002e929f31d22a93062085b19d7830320f872c8afc16b"
+      "bytes": 1485,
+      "sha256": "de775810130f140a0e93f0bde4632928d055bdbf4293fdf135e267c6f5d7e6f2"
     },
     {
       "path": "base/tests/test_late_install_contract.py",
-      "bytes": 1076,
-      "sha256": "95f36ccf3f6bd3199da2927ad2426e017ac232272d40ffaeb677ad5c95831c7c"
+      "bytes": 1092,
+      "sha256": "100ed3e7730637ab99b2d9336627776ebb42dd865b724f99e00c63719533c826"
     },
     {
       "path": "base/tests/test_media_lock.py",
@@ -103,6 +103,311 @@
       "path": "base/tests/test_source_road.py",
       "bytes": 4033,
       "sha256": "8520f7a1f8cc8879802aca2b8ae5403e35dc300279fed3bc2a40c5b57481710c"
+    },
+    {
+      "path": "kernel/__init__.py",
+      "bytes": 68,
+      "sha256": "c7b7b80862d93f72b66ce3db0d40ba7f6923005ff392302c49395d2f264e43c1"
+    },
+    {
+      "path": "kernel/install-layout.json",
+      "bytes": 1552,
+      "sha256": "5017cd8685fec6eef4f6dfe8d21cc435a7d6987dce5f50f2eb437b19d6e1ba49"
+    },
+    {
+      "path": "kernel/install/__init__.py",
+      "bytes": 49,
+      "sha256": "b1f3ef4551160af44c14a8aae7805631c2ec2b632ff215679269d1d66e957f3f"
+    },
+    {
+      "path": "kernel/install/kernel_first_install.py",
+      "bytes": 15560,
+      "sha256": "9d359e6e1973daf036c61ea6f91db76339f7119ea5a9a2effd656a6d373f5a25"
+    },
+    {
+      "path": "kernel/install/offline_ollama_transaction.py",
+      "bytes": 42993,
+      "sha256": "62ebfac8f80b64088e9cd97b2e00b277b66995a6034f0ef6254676394de4d80b"
+    },
+    {
+      "path": "kernel/payload/bin/serein-conversation-runtime",
+      "bytes": 83,
+      "sha256": "b73f15edd110f1d1901059b08fcbfa2f67d135ef29da8a19159d9c28989a4b5e"
+    },
+    {
+      "path": "kernel/payload/bin/serein-kernel-branch-api",
+      "bytes": 1125,
+      "sha256": "940bf83de05a7c81fcc0254d724db4ca96fe0e1289f9c19cf988593352a52590"
+    },
+    {
+      "path": "kernel/payload/bin/serein-kernel-client-gateway",
+      "bytes": 129,
+      "sha256": "c0b5bb26a44e401a02bf4349ad261df512c36d0d0b9c5c35c68940e94033950f"
+    },
+    {
+      "path": "kernel/payload/bin/serein-kernel-domain1",
+      "bytes": 366,
+      "sha256": "63434773139bb1c6032dbcb8f681c9b76b44f871f10a130a576b41cb21751075"
+    },
+    {
+      "path": "kernel/payload/bin/serein-kernel-domain1-commission",
+      "bytes": 78,
+      "sha256": "8a6b9f009408c5e21531ae08124cab043b0d89189ffafd7628aee8ee98014457"
+    },
+    {
+      "path": "kernel/payload/bin/serein-kernel-haos-edge",
+      "bytes": 81,
+      "sha256": "3e221af418a30bc37019427bfb43726d883181bc3b985b5b1eea7a4d0a1f0cc3"
+    },
+    {
+      "path": "kernel/payload/bin/serein-kernel-operations-heartbeat",
+      "bytes": 478,
+      "sha256": "e87e35c1b7e8700bcd70fc56a82a39805c7fd7af06121b0724b9b4ae9994ea77"
+    },
+    {
+      "path": "kernel/payload/bin/serein-kernel-router",
+      "bytes": 76,
+      "sha256": "8fa7714269498f4b0be8e28c8eeaceda0f733031d766c1ed020a6a3ebb337533"
+    },
+    {
+      "path": "kernel/payload/bin/serein-observation-audit",
+      "bytes": 146,
+      "sha256": "4737d04d7bb14d6f9bc6d61c889a3e559a855e99f7511ac73efeacf05dfceb58"
+    },
+    {
+      "path": "kernel/payload/runtime/persistent_replay_store.py",
+      "bytes": 17599,
+      "sha256": "afea4e825fdd76f1b996c6400e24eb1a3f4cfac8f6721040e2a2e545f1f9611d"
+    },
+    {
+      "path": "kernel/payload/runtime/replay_store.py",
+      "bytes": 15451,
+      "sha256": "0633e0746496cd20d98abbea7f52455af66c91fe122523046ccad959d6604e0b"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/__init__.py",
+      "bytes": 148,
+      "sha256": "9c471b6a295ef9950d608bf62b85f00fe2cb0dbd8bf43d2fb24d74d4fca752de"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/audit.py",
+      "bytes": 2578,
+      "sha256": "aeed2b41ce7c74ad12e261dc7bc281f8b3675674011d9582a8506238ffdf56ee"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/authority_contract.py",
+      "bytes": 4240,
+      "sha256": "92fd7fb4923121c13ccaba634fce7ff9a46608e639c61d5ddeff70d09cc8d684"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/cognitive_gateway.py",
+      "bytes": 931,
+      "sha256": "5862b266c3280bd94be62f51176b475d7695748ca7b043a4b8450116d8046f8a"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/commission_runner.py",
+      "bytes": 6461,
+      "sha256": "a4c5cdc2dadb855e63e5c44cf7a90c686d5eb6f7c7360b03cbbcc9af8a45d63d"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/companion_provider.py",
+      "bytes": 6958,
+      "sha256": "4ebe8c745a17bf4be46e8e8081f1a990f8455fa481e169e9d6a8f16b1d856526"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/compute_dispatch.py",
+      "bytes": 5751,
+      "sha256": "dfd971c496ba48b494f7c4287b4439613b3adeabfc66266eb0ecddb7bf2bb7b5"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/conversation_runtime.py",
+      "bytes": 5824,
+      "sha256": "1cc4e8687304d3fa449d1fe9a1b0005ed314c12bf8b1b24ba223302cf289b3e7"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/core_attachments.py",
+      "bytes": 507,
+      "sha256": "6b81321bf476978d1ca4e93979c4bdf17d8ad26aa7522f251ec7d5cb2f7ee87d"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/domain1_runner.py",
+      "bytes": 2017,
+      "sha256": "3f91198c6936cf7fe655ca85049f7f59954eb2a82a8f9c94f18057dafe491ce1"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/gateway_runtime.py",
+      "bytes": 8892,
+      "sha256": "ce295cc24780214c4d289ad5ea11eb4e48059a4eed9df5712bd3d743e82b2e14"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/gpu_control.py",
+      "bytes": 2407,
+      "sha256": "2ab62b5f4d56d3e258ed9691cf99d2d295470f75cc8ede7bc6577268f7b43155"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/haos_https_adapter.py",
+      "bytes": 7031,
+      "sha256": "e85878bbcbd380e9771e1d2ae441e74fe8dfa5c5718b1d7d708c5bd6cad981a3"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/independent_audit.py",
+      "bytes": 2959,
+      "sha256": "01d4ead4d9fce6239359b86bec27884ecd997d1757737d898167d3811c5351e0"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/kernel.py",
+      "bytes": 3805,
+      "sha256": "eacd71890ce6efc991858a2d11f64a128dbafdc20016264d7854b1415e1d11af"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/kernel_branch_api.py",
+      "bytes": 6796,
+      "sha256": "bf8830d97234bd16b2021ce0bd041bd2d2142b2cfb598cfab7abc80ffb27affc"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/kernel_operations.py",
+      "bytes": 8042,
+      "sha256": "fd3b9e24f4a6522c733748b8920fe4a150f545cffee8573cb5caaab317995e69"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/kernel_router.py",
+      "bytes": 16141,
+      "sha256": "cc123d99aeb4f0d9c2585ec6d2481d976fd99efcb988e3323813099d1259628c"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/offline_companion.py",
+      "bytes": 919,
+      "sha256": "a5f72a8bb28667dc83010c2eeec196331388441c6e8ab662d1ccb07f68f173bc"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/stage1_witness.py",
+      "bytes": 4454,
+      "sha256": "8bc4bb6c712b3600e2a3ea3207f81d3c90aac7f3394e48c94f0465604f426912"
+    },
+    {
+      "path": "kernel/payload/serein_stage1/supervision.py",
+      "bytes": 545,
+      "sha256": "a5f07c30f29c48ea746ae12522ebdea947c841ddd33e8a68d25a9a04ac5c559f"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-conversation-runtime.service",
+      "bytes": 386,
+      "sha256": "024a2a9e4419d695ab88933c1e723118314198e4a38da7a30b2099083768e02b"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-conversation-runtime.socket",
+      "bytes": 214,
+      "sha256": "16c200a17fca28738417627f5a5cbd6f24b69b18339075eb5a8d37bb494609d3"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-authority-api.service",
+      "bytes": 271,
+      "sha256": "989e4b742572e61c202607cbcc39baaacd9198f0902dd117979712caba8846d8"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-authority-api.socket",
+      "bytes": 259,
+      "sha256": "709799f51b9dbb55d4521be94448bbab4de0c2ee45106dc85c44aad0b5097c78"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-client-gateway-android.socket",
+      "bytes": 163,
+      "sha256": "3f44e7f951c494432e0b1900cbc8d69b91f6fe5eaa10f71d417a1cd746a28711"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-client-gateway-esp32.socket",
+      "bytes": 159,
+      "sha256": "bd636d392fca75ce93cd62c91e4474986e94cf71c8d0245c4be351719371f02e"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-client-gateway-haos.socket",
+      "bytes": 156,
+      "sha256": "cc286ba4e0c6ae23faf9d0ea71bd2bf1b9465cf6e83360c6065dc6bca3e94336"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-client-gateway-internal.socket",
+      "bytes": 165,
+      "sha256": "1cf713d89dd4352659490298d0022a199a55986822a8724fce36366c57749cf9"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-client-gateway@.service",
+      "bytes": 609,
+      "sha256": "cfe89064711d3e6cdbe3b0eb7d3bbd0a3dd247fbdcad49f2ef87c0da1f81ba3a"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-domain1-commission.service",
+      "bytes": 790,
+      "sha256": "df5372ca9b4133f59dc62cb86eae568fa96d970ca8a3c1a576ccb70880d2b7a1"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-haos-edge.service",
+      "bytes": 961,
+      "sha256": "922d8ee5c29c00dca41c4195f3d3932855ba1eb4fb6f6c4b1c150832799f4b64"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-interface-api.service",
+      "bytes": 271,
+      "sha256": "1af28cf805225f537ffd45d50e4dc680adf4091cb1b435e5fb5d346984c266cf"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-interface-api.socket",
+      "bytes": 259,
+      "sha256": "ce1792e3749f426a84e616ab51b016751029e0db8be2c4ed4e6ef2155afd2802"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-operations-api.service",
+      "bytes": 273,
+      "sha256": "2a9c028206809a6c9172f79c74b38d38ddd2a79a869e0f2ebdbda3d729505f3f"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-operations-api.socket",
+      "bytes": 364,
+      "sha256": "4c710f58a513c2379f978863e06b161ae7994f8de804c8c583f054c77753997c"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-operations-heartbeat.service",
+      "bytes": 648,
+      "sha256": "4607e71995a431926162f38600d6965558b4e73587b72a49e35b19e4186ca865"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-replay-store.service",
+      "bytes": 766,
+      "sha256": "8470f506bbc8b000d3459ed9c474ff8b62a0ea9e80406c80041d6ea8386caaa3"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-router.service",
+      "bytes": 495,
+      "sha256": "e0f3c4d9aa6827313162abc716f473de53fac05c0d81740a7ebcef208b549e88"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-kernel-router.socket",
+      "bytes": 162,
+      "sha256": "a28fce120b1dda9d11206613a0ff6651619fa4e4daa0d38a8821a59e75159d0c"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-observation-audit.service",
+      "bytes": 466,
+      "sha256": "e580582b2dae2b1dfcc8a0f40d4dfcdc9fe4f69f45116fd16eb23072612f944f"
+    },
+    {
+      "path": "kernel/payload/systemd/serein-observation-audit.socket",
+      "bytes": 213,
+      "sha256": "4f81a24190f191fb3139c4c2e4f63af549897b078c39c965891f40687b96b2d7"
+    },
+    {
+      "path": "kernel/refresh_manifest.py",
+      "bytes": 2046,
+      "sha256": "1ed550b895a70d5fb35abd72f402bd55074d912eb5b9b05f4fe631ebf26bfe65"
+    },
+    {
+      "path": "kernel/release-manifest.json",
+      "bytes": 10149,
+      "sha256": "0be6b0917491035f75b25f975382112a31de13daf86ecc6c8f9bbda02a168d1f"
+    },
+    {
+      "path": "kernel/tests/test_kernel_first_install.py",
+      "bytes": 50494,
+      "sha256": "1c5c1cb9dd5fc1c012d465fcff337ef63b2a1b00fe5a293219825861e4953e58"
     },
     {
       "path": "outpost/.gitattributes",
@@ -130,6 +435,11 @@
       "sha256": "7272f7a6e7e864d443a3634eba6e92660c39f899e58b3d1cd528a2b2917366b0"
     },
     {
+      "path": "outpost/install/kernel_first_install_runner.py",
+      "bytes": 14542,
+      "sha256": "0788f6bd33bf87e67282dd1ba94d48650cd997c3c7e22055d5dabd97b586b564"
+    },
+    {
       "path": "outpost/install/public-rollback.sh",
       "bytes": 211,
       "sha256": "4a4e9bada94a3ab505ae70ec082c23d6d84c9872df7c87c30ac9a95a800316c7"
@@ -141,8 +451,8 @@
     },
     {
       "path": "outpost/install/public_generation_transaction.py",
-      "bytes": 50976,
-      "sha256": "c9058101841182fce9b9de21379bff73429fb47cb5cb19e2ad5a5851340ff2e7"
+      "bytes": 51178,
+      "sha256": "40a29066553072e036727c5da5762f2e6fbc8aface8bbfc7e60fbc362840af08"
     },
     {
       "path": "outpost/install/public_installer_cli.py",
@@ -216,18 +526,23 @@
     },
     {
       "path": "outpost/refresh_manifest.py",
-      "bytes": 6415,
-      "sha256": "4ce3070ad7bd66a0a916d33f2c972b496a108faed97014002d6dc1efc9e804e9"
+      "bytes": 6542,
+      "sha256": "cd3398a2e8817ed8aba924cc7a80db3c4a8d610a94564c9b765fda8dee42f6ce"
     },
     {
       "path": "outpost/release-manifest.json",
-      "bytes": 19408,
-      "sha256": "d6ab3c237de1875982d8a98a8e28e248c5c0e0a69489b294c317c430e86de599"
+      "bytes": 20934,
+      "sha256": "a2f83c37437cc33689067e08f00227ed1fc63705e8ad02377d01bb44bf15a0bf"
     },
     {
       "path": "outpost/systemd/serein-outpost-host-witness.service",
       "bytes": 636,
       "sha256": "02014ef45aebdf3b97b208b6f7ede16a054c216f09290bb927102ca287030e15"
+    },
+    {
+      "path": "outpost/systemd/serein-outpost-kernel-install.service",
+      "bytes": 939,
+      "sha256": "be2742e2d2e3a4f702791d65381f50b3bed35ef6f7169b529c363520eb25daf1"
     },
     {
       "path": "outpost/systemd/serein-outpost-presentation.service",
@@ -265,14 +580,19 @@
       "sha256": "f2449c7384ff46c19122a37afd80737338c66665d7c182246a4961ca28a683d0"
     },
     {
+      "path": "outpost/tests/test_kernel_first_install_runner.py",
+      "bytes": 4504,
+      "sha256": "f55cba62accd082c08fc8149e5de3b62af8f44a9e8dc13939ae11853d564d623"
+    },
+    {
       "path": "outpost/tests/test_presentation_service.py",
       "bytes": 4225,
       "sha256": "e225f2f22b2882a596ace7f69ad2bf32c5170e3a4c3452554be09f7e141e6450"
     },
     {
       "path": "outpost/tests/test_public_generation_transaction.py",
-      "bytes": 30698,
-      "sha256": "0f2679bfcb9ee70356e0360d979cd70956f8d4737ffd5ceec9b965ad83a04fa6"
+      "bytes": 31198,
+      "sha256": "559d66b1f8fe7c250d9f5eed6dc14a1dbb6cfa29c1d25988ef92972ce873a22e"
     },
     {
       "path": "outpost/tests/test_public_installer_cli.py",
@@ -286,8 +606,8 @@
     },
     {
       "path": "outpost/tests/test_systemd_contract.py",
-      "bytes": 1786,
-      "sha256": "bc0a89288213cf79411c889451b0d79b57c6e3d327f3983b5753ada84e72ee69"
+      "bytes": 2479,
+      "sha256": "ecaa5426642339746fe59ebe77a6eadb5c5e77afd70c7b6d80971eee581281ab"
     },
     {
       "path": "outpost/tests/test_transaction.py",
@@ -310,5 +630,5 @@
       "sha256": "7da5241d65bf3221cc018be6e1cc437a2ebd8b18143e17a1609398c0b43ff782"
     }
   ],
-  "self_digest": "sha256:447150193cc0c95d266d953c37689ad73bd28ead45a7224f5355e30b10570bfe"
+  "self_digest": "sha256:91845e182f105f89e78ca9b25cf31862ad57ed6980e39e7625a55d22faa02b4e"
 }

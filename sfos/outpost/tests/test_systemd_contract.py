@@ -27,5 +27,14 @@ def test_presentation_is_read_only_local_unix_socket():
 
 def test_public_release_has_no_downstream_install_targets():
     release=json.loads(text("release-manifest.json"))
-    forbidden=("stage1","stage2","gateway-edge","domain-packages","kernel")
-    assert not any(any(word in row["source"].lower() for word in forbidden) for row in release["install_files"])
+    forbidden_targets=("/var/lib/serein/kernel","/etc/serein/kernel","/usr/lib/serein/kernel","/run/serein/kernel")
+    assert not any(row["target"].startswith(forbidden_targets) for row in release["install_files"])
+    assert all(row["target"].startswith(("/usr/share/serein/outpost/","/etc/systemd/system/","/usr/libexec/serein/")) for row in release["install_files"])
+
+def test_kernel_installer_is_outpost_owned_and_inactive():
+    unit=text("systemd/serein-outpost-kernel-install.service")
+    target=text("systemd/serein-outpost.target")
+    assert "ExecStart=/usr/libexec/serein/outpost-generation-launcher install/kernel_first_install_runner.py" in unit
+    assert "ConditionPathExists=/var/lib/serein-outpost/kernel/install-request.json" in unit
+    assert "[Install]" not in unit and "WantedBy=" not in unit
+    assert "serein-outpost-kernel-install.service" not in target
