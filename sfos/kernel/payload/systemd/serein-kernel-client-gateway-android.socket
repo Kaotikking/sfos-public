@@ -1,5 +1,0 @@
-[Socket]
-ListenStream=/run/serein/kernel/gateway-android.sock
-Service=serein-kernel-client-gateway@android.service
-SocketMode=0660
-SocketGroup=serein-outpost

@@ -1,5 +1,0 @@
-[Socket]
-ListenStream=/run/serein/kernel/gateway-internal.sock
-Service=serein-kernel-client-gateway@internal.service
-SocketMode=0660
-SocketGroup=serein-outpost

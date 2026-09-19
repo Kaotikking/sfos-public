@@ -1,5 +1,0 @@
-#!/usr/bin/python3
-from pathlib import Path
-from serein_stage1.audit import serve
-
-serve(Path("/var/lib/serein/kernel/audit/gateway.jsonl"))

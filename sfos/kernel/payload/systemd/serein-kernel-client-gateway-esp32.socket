@@ -1,5 +1,0 @@
-[Socket]
-ListenStream=/run/serein/kernel/gateway-esp32.sock
-Service=serein-kernel-client-gateway@esp32.service
-SocketMode=0660
-SocketGroup=serein-outpost

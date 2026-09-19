@@ -1,7 +1,0 @@
-[Socket]
-ListenStream=/run/serein/kernel/router.sock
-SocketMode=0660
-SocketUser=serein-stage1
-SocketGroup=serein-outpost
-[Install]
-WantedBy=sockets.target

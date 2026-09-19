@@ -1,4 +1,0 @@
-#!/usr/bin/python3
-from serein_stage1.gateway_runtime import serve
-import sys
-serve(sys.argv[1] if len(sys.argv)==2 else "")

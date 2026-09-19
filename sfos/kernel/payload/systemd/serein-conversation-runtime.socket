@@ -1,8 +1,0 @@
-[Unit]
-Description=Serein Kernel companion conversation socket
-[Socket]
-ListenStream=/run/serein/kernel/conversation.sock
-SocketMode=0660
-SocketUser=serein-stage1
-SocketGroup=serein-stage1
-RemoveOnStop=yes

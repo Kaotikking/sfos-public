@@ -1,3 +1,0 @@
-#!/usr/bin/python3
-from serein_stage1.kernel_router import serve
-serve()
