@@ -823,6 +823,24 @@ def bootstrap_material():
     return release, material
 
 
+def test_generated_public_source_is_exact_plan_bound_and_inventory_covered():
+    release,material=bootstrap_material()
+    source={'schema':'SereinOutpostPublicSource/v1','repository':'Kaotikking/sfos-public',
+            'commit':'a'*40,'tree':'b'*40,'archive_sha256':'c'*64,
+            'release_digest':release['self_digest'],'source_plan_sha256':'d'*64}
+    material['public-source.json']=canonical(source)
+    assert generation.bind_generation_material(release,material,release['self_digest'])==material
+    selector=generation.prepared_generation_selector(release,material,'d'*64)
+    assert selector['inventory_digest']==sha(canonical(generation.generation_inventory(material)))
+    assert any(row['path']=='public-source.json' for row in generation.generation_inventory(material))
+    with pytest.raises(TransactionError,match='SOURCE_PLAN_BINDING'):
+        generation.prepared_generation_selector(release,material,'e'*64)
+    source['private_key']='forbidden'
+    material['public-source.json']=canonical(source)
+    with pytest.raises(TransactionError,match='PUBLIC_SOURCE_DENIED'):
+        generation.bind_generation_material(release,material,release['self_digest'])
+
+
 def complete_preparation_fixture(root):
     successor_fixture(root)
     units = bootstrap_fixture(root)

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .constitutional_registry import registry_snapshot
-from .host_vitality import BOOT, JOINED_SCHEMA, HostVitalityStore, HostCollectionAttempts, host_attempt_matches, digest
+from .host_vitality import BOOT, JOINED_SCHEMA, RECIPE_SCHEMA, HostVitalityStore, HostCollectionAttempts, host_attempt_matches, digest
 from .reboot_vitality import VitalityChronology, classify_reboot
 from .vitals_aggregation import producer_observation
 
@@ -63,7 +63,7 @@ def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, 
         current = host_attempt_matches(host, HostCollectionAttempts(host_root).latest(), boot_id, now)
     except (OSError, ValueError, TypeError):
         current = False
-    healthy = current and host.get("latest", {}).get("schema") == JOINED_SCHEMA and host.get("classification") in {"FIRST_BOOT_OBSERVED", "CURRENT_BOOT_STABLE", "RECOVERED_AFTER_BOOT_CHANGE"}
+    healthy = current and host.get("latest", {}).get("schema") in {JOINED_SCHEMA, RECIPE_SCHEMA} and host.get("classification") in {"FIRST_BOOT_OBSERVED", "CURRENT_BOOT_STABLE", "RECOVERED_AFTER_BOOT_CHANGE"}
     state = {
         "schema": "SereinOutpostWatchdogWitness/v1",
         "boot_id": boot_id,
@@ -103,7 +103,7 @@ def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, 
                 # or the complete installation recovery set.
                 "post_boot": {"readiness": "UNKNOWN" if healthy else "DEGRADED", "failed_components": [] if healthy else ["HOST_GATE"], "trust_changes": [], "capability_changes": []},
                 "evidence_ref": "host-vitality:" + host["projection_digest"],
-                "policy_version": latest["public_base"]["policy_sha256"],
+                "policy_version": latest["public_base"]["manifest_sha256" if latest["schema"] == RECIPE_SCHEMA else "policy_sha256"],
             }
             recovery = classify_reboot({**observation, "evidence_digest": digest(observation)})
             _write_atomic(state_root.parent / "recovery" / "current.json", recovery)

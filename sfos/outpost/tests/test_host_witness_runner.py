@@ -187,3 +187,41 @@ def test_by_hash_response_must_match_exact_verified_bytes(monkeypatch, tmp_path)
         runner.download(url, tmp_path / "truncated", len(body) + 1, expected_sha256=checksum)
     with pytest.raises(RuntimeError, match="DEBIAN_DOWNLOAD_URL_DENIED"):
         runner.download(url, tmp_path / "unbound", len(body))
+
+
+def test_selected_generation_uses_recipe_in_existing_state_and_attempts(tmp_path,monkeypatch):
+    from tests.test_host_vitality import recipe_witness
+    from outpost.host_vitality import HostCollectionAttempts,RECIPE_SCHEMA
+    recipe=recipe_witness();boot=recipe["comparison"]["boot_id"]
+    monkeypatch.setattr(runner,"installed_recipe_required",lambda:True)
+    monkeypatch.setattr(runner,"collect_public_host_recipe",lambda:recipe)
+    monkeypatch.setattr(public_tree_host,"installed_public_source",lambda:recipe["source"])
+    monkeypatch.setattr(runner,"_current_boot_id",lambda:boot)
+    clock=iter((1.0,2.0,3.0));monkeypatch.setattr(runner.time,"time",lambda:next(clock))
+    monkeypatch.setattr(runner,"download",lambda *a,**k:pytest.fail("No moving-index fallback"))
+    result=runner.run(tmp_path)
+    assert result["latest"]["schema"]==RECIPE_SCHEMA
+    assert result["latest"]["recipe"]==recipe
+    assert result["classification"]=="FIRST_BOOT_OBSERVED"
+    assert HostCollectionAttempts(tmp_path).latest()["terminal"]["event_kind"]=="HOST_COLLECTION_SUCCEEDED"
+    assert result["authority_effect"]==result["mutation_effect"]=="NONE"
+
+
+@pytest.mark.parametrize("defect",["source","boot"])
+def test_recipe_failure_never_falls_back_or_replaces_previous_state(tmp_path,monkeypatch,defect):
+    from tests.test_host_vitality import recipe_witness,observation
+    from outpost.host_vitality import HostVitalityStore,HostCollectionAttempts
+    old=HostVitalityStore(tmp_path).record(observation());before=(tmp_path/"state.json").read_bytes()
+    recipe=recipe_witness()
+    monkeypatch.setattr(runner,"installed_recipe_required",lambda:True)
+    monkeypatch.setattr(runner.time,"time",lambda:10.0)
+    boots=iter((old["current_boot_id"],"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee" if defect=="boot" else old["current_boot_id"]))
+    monkeypatch.setattr(runner,"_current_boot_id",lambda:next(boots))
+    def collect():
+        if defect=="source":raise public_tree_host.PublicTreeHostError("INSTALLED_PUBLIC_SOURCE_DENIED")
+        return recipe
+    monkeypatch.setattr(runner,"collect_public_host_recipe",collect)
+    monkeypatch.setattr(runner,"download",lambda *a,**k:pytest.fail("No moving-index fallback"))
+    with pytest.raises((RuntimeError,public_tree_host.PublicTreeHostError)):runner.run(tmp_path)
+    assert (tmp_path/"state.json").read_bytes()==before
+    assert HostCollectionAttempts(tmp_path).latest()["terminal"]["event_kind"]=="HOST_COLLECTION_FAILED"

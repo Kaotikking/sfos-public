@@ -1,5 +1,6 @@
 import hashlib
 import json
+from pathlib import Path
 import pytest
 from verify_install_preflight import canonical, main, verify_source, verify_host_identity, collect_source_rows, collect_public_installer_manifest
 from install.transaction import TransactionError, strict_json
@@ -21,6 +22,20 @@ def source(tmp_path):
 def seal(root, release):
     release["self_digest"] = "sha256:" + hashlib.sha256(canonical({k:v for k,v in release.items() if k != "self_digest"})).hexdigest()
     (root / "release-manifest.json").write_bytes(canonical(release))
+
+
+def test_public_package_excludes_private_role_matrix():
+    """Audit evidence is retained privately, never installed as runtime payload."""
+    package = Path(__file__).resolve().parents[1]
+    release = json.loads((package / "release-manifest.json").read_bytes())
+    combined = json.loads((package.parent / "public-installer-manifest.json").read_bytes())
+    assert not (package / "outpost-role-matrix.json").exists()
+    assert "outpost-role-matrix.json" not in {
+        row["path"] for row in release["payload"] + release["source_only_files"]
+    }
+    assert "outpost/outpost-role-matrix.json" not in {
+        row["path"] for row in combined["files"]
+    }
 
 
 def test_combined_manifest_binds_base_and_outpost_without_installation_claim(tmp_path):

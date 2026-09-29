@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .constitutional_registry import registry_snapshot
-from .host_vitality import BOOT, JOINED_SCHEMA, HostVitalityStore, HostCollectionAttempts, host_attempt_matches
+from .host_vitality import BOOT, JOINED_SCHEMA, RECIPE_SCHEMA, HostVitalityStore, HostCollectionAttempts, host_attempt_matches
 from .reboot_vitality import VitalityChronology, validate_classification
 from .vitals_aggregation import aggregate_vitals, producer_observation, validate_producer
 from .service import validate_coordinator_witness, held_domain_boot_view
@@ -129,7 +129,7 @@ class VitalsRuntimeStore:
         if isinstance(latest, dict) and completed:
             sources.setdefault("host", []).append(producer_observation(
                 perspective="host", producer="OUTPOST_HOST_WITNESS",
-                claim=str(host.get("classification", "UNKNOWN")) if latest.get("schema")==JOINED_SCHEMA else "HISTORICAL_HOST_OBSERVATION", observed_at=float(latest.get("observed_at", 0)),
+                claim=str(host.get("classification", "UNKNOWN")) if latest.get("schema") in {JOINED_SCHEMA, RECIPE_SCHEMA} else "HISTORICAL_HOST_OBSERVATION", observed_at=float(latest.get("observed_at", 0)),
                 boot_id=latest["boot_id"], evidence_ref="host-vitality:" + str(host.get("projection_digest", "UNKNOWN")),
                 payload=host,
             ))

@@ -154,3 +154,37 @@ def test_watchdog_does_not_call_old_success_current_after_new_failure(tmp_path):
     value=witness_once(state_root=tmp_path/"watchdog",host_root=host,boot_id_path=boot,observed_at=4.0)
     assert value["watchdog_state"]=="DEGRADED"
     assert value["host_witness"]=="STALE_OR_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("defect", [None, "package"])
+def test_recipe_witness_reaches_watchdog_vitals_and_boot_history(tmp_path, monkeypatch, defect):
+    from outpost import public_tree_host, vitals_runtime
+    from outpost.host_vitality import recipe_observation
+    from tests.test_host_vitality import recipe_witness
+    recipe = recipe_witness(defect)
+    monkeypatch.setattr(public_tree_host, "installed_public_source", lambda: recipe["source"])
+    boot = tmp_path / "boot"
+    for boot_id, observed in [(BOOT, 1.0), ("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", 3.0)]:
+        recipe["comparison"]["boot_id"] = boot_id
+        recipe["comparison"]["evidence_digest"] = digest({k:v for k,v in recipe["comparison"].items() if k != "evidence_digest"})
+        recipe["evidence_digest"] = digest({k:v for k,v in recipe.items() if k != "evidence_digest"})
+        record_completed(tmp_path / "host", recipe_observation(recipe, observed))
+        boot.write_text(boot_id, encoding="ascii")
+        state = witness_once(state_root=tmp_path/"watchdog", host_root=tmp_path/"host", boot_id_path=boot, observed_at=observed+1)
+        assert state["host_witness"] == "CURRENT"
+        assert state["watchdog_state"] == ("DEGRADED" if defect else "CURRENT_BOOT_WITNESS")
+    monkeypatch.setattr(vitals_runtime.time, "time", lambda: 4.0)
+    runtime = VitalsRuntimeStore(tmp_path/"host", tmp_path/"vitals-producers", tmp_path/"domains.json", tmp_path/"recovery/current.json")
+    snapshot = runtime.snapshot(current_boot_id=boot_id)
+    expected = "DRIFT_DETECTED" if defect else "RECOVERED_AFTER_BOOT_CHANGE"
+    assert snapshot["sections"]["host"]["claim"] == expected
+    recovery = snapshot["sections"]["recovery"]["perspectives"][0]["payload"]
+    assert recovery["policy_version"] == recipe["manifest_sha256"]
+    assert recovery["previous_boot_id"] == BOOT
+    page = present(runtime, "GET", "/v1/runtime/status", "text/html", boot_id)
+    assert page.status == 200 and expected in page.body.decode()
+    assert snapshot["admission_effect"] == snapshot["mutation_effect"] == "NONE"
+    monkeypatch.setattr(public_tree_host, "installed_public_source", lambda: {**recipe["source"], "commit": "0"*40})
+    assert runtime.snapshot(current_boot_id=boot_id)["sections"]["host"]["claim"] == "HOST_ATTEMPT_RESULT_UNBOUND"
+    changed = witness_once(state_root=tmp_path/"watchdog", host_root=tmp_path/"host", boot_id_path=boot, observed_at=5.0)
+    assert changed["watchdog_state"] == "DEGRADED" and changed["host_witness"] == "STALE_OR_UNAVAILABLE"

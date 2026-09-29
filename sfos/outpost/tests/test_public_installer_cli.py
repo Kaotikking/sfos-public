@@ -577,6 +577,8 @@ def test_recorded_preparation_keeps_lock_and_private_material_internal(monkeypat
     if failure=='promote':
         expected_receipt['path']='/var/lib/serein/rollback/outpost-public-generation-20260929T020000Z-aaaaaaaaaaaa/prestate-receipt.json'
         evidence['source_plan_sha256']='a'*64
+        evidence['source']={'repository':'Kaotikking/sfos-public','commit':'a'*40,
+                            'tree':'b'*40,'archive_sha256':'c'*64,'release_digest':'sha256:'+'d'*64}
         evidence['target_prestate'].update(current_boot_id='same-boot',host_identity='same-host',immutable_rows='same-keys')
     class Plan:
         encoded=b'fixture-plan'

@@ -11,8 +11,8 @@ import time
 from pathlib import Path
 
 from .debian_host_collector import collect_host_observation, verify_inrelease
-from .host_vitality import HostVitalityStore, HostCollectionAttempts, validate_state
-from .public_tree_host import bind_signed_debian_observation
+from .host_vitality import HostVitalityStore, HostCollectionAttempts, validate_state, recipe_observation, installed_recipe_required
+from .public_tree_host import bind_signed_debian_observation, collect_public_host_recipe
 
 RELEASES = {
     "debian:trixie": "https://deb.debian.org/debian/dists/trixie/InRelease",
@@ -111,6 +111,15 @@ def run(state_root: Path) -> dict:
     attempt_id = attempts.start(boot_id, time.time())
     temporary = None
     try:
+        # An installed generation selects its own exact public recipe. Invalid
+        # metadata or recipe evidence must never fall back to moving indexes.
+        if installed_recipe_required():
+            recipe=collect_public_host_recipe()
+            if recipe['comparison']['boot_id']!=boot_id or _current_boot_id()!=boot_id:
+                raise RuntimeError('HOST_RECIPE_BOOT_CHANGED')
+            state=HostVitalityStore(state_root).record(recipe_observation(recipe,time.time()))
+            attempts.finish(attempt_id,time.time(),state=state)
+            return state
         temporary = Path(tempfile.mkdtemp(prefix=".debian-witness-", dir=state_root))
         releases = {}
         indexes = {}

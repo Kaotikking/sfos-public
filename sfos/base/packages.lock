@@ -1,4 +1,6 @@
 # SFOS Stage-1 Debian 13/trixie package lock.
+# Historical scaffold only. The minimum existing-VM4010 Host generation is
+# pinned by host-manifest.json; these five references are not whole-OS truth.
 # Reference versions verified against packages.debian.org/trixie on 2026-09-08.
 # Installation/admission is governed by the signature-bound Debian indexes;
 # this file is descriptive evidence and never overrides those indexes.

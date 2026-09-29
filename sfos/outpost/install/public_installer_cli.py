@@ -333,6 +333,13 @@ def recorded_prepared_generation(plan_path, expected_plan_sha256, evidence,
         load_prestate_signer, seal_prestate_receipt, persist_prestate_receipt,
         reread_prestate_receipt, seal_prepared_forward_state, prepared_forward_record,
         prepared_candidate_record, bootstrap_candidate_precheck)
+    if promote:
+        # Non-secret public provenance derived from the signed plan, not a
+        # second authority file or a private-plan permission change. It joins
+        # the same atomic generation inventory and is checked again in staging.
+        if 'public-source.json' in material:
+            raise TransactionError('PREPARED_PUBLIC_SOURCE_COLLISION')
+        material={**material,'public-source.json':_public_source_bytes(evidence)}
     precheck = bootstrap_candidate_precheck(release,material,evidence['source_plan_sha256']) if promote else None
     service_account = _bootstrap_service_account() if promote else None
     with locked_prepared_generation(plan_path,expected_plan_sha256,evidence,
@@ -387,6 +394,17 @@ def recorded_prepared_generation(plan_path, expected_plan_sha256, evidence,
             yield prepared
 
 
+def _public_source_bytes(evidence):
+    from .transaction import canonical
+    try:
+        source=evidence['source']
+        return canonical({'schema':'SereinOutpostPublicSource/v1',
+            **{k:source[k] for k in ('repository','commit','tree','archive_sha256','release_digest')},
+            'source_plan_sha256':evidence['source_plan_sha256']})
+    except (KeyError,TypeError):
+        raise TransactionError('PREPARED_PUBLIC_SOURCE_DENIED') from None
+
+
 def _stage_prepared(evidence, release, material, staging_parent):
     from .transaction import stage_inactive_generation
     from .public_generation_transaction import bind_generation_material, prepared_generation_selector, prepared_bootstrap_image
@@ -395,6 +413,8 @@ def _stage_prepared(evidence, release, material, staging_parent):
             or release.get("self_digest") != release_digest):
         raise TransactionError("PREPARED_RELEASE_IDENTITY_DENIED")
     material = bind_generation_material(release, material, release_digest)
+    if 'public-source.json' in material and material['public-source.json']!=_public_source_bytes(evidence):
+        raise TransactionError('PREPARED_PUBLIC_SOURCE_CHANGED')
     selector = prepared_generation_selector(release, material, evidence.get('source_plan_sha256'))
     image = prepared_bootstrap_image(release, material, evidence.get('target_prestate'))
     staged = stage_inactive_generation(staging_parent, release_digest.removeprefix("sha256:"), material)

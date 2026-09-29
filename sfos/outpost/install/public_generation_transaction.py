@@ -24,8 +24,8 @@ from .public_installer_cli import MAX_ARCHIVE_BYTES
 from .transaction import TransactionError, canonical, sha, strict_json, nofollow_ancestors
 
 _VERIFIED = object()
-# Immutable identity, not donor candidate code. PRO-132 receipt
-# 69463156-0839-4fa6-93b2-16e135555b55, corroborated by 608d934b.
+# Immutable identity, not donor candidate code. Private authority evidence
+# is retained in the governed transaction ledger, not public source comments.
 # Rebuilding Outpost does not rotate or invalidate this preserved identity.
 CANONICAL_AUTHORITY_SHA256 = "1f7533bbd5e2645f52a0d7e17502166f079a76c8c1fd31c8feaa0fc057a48652"
 CANONICAL_AUTHORITY_PATH = Path("/usr/share/serein/outpost/cognition-verification.pem")
@@ -38,7 +38,7 @@ IMMUTABLE_POLICY = {
     "/etc/serein/tls/serein-backend-key.pem": "0600",
 }
 
-# Exact ccdc6f4 bootstrap image, cut to PRO-132's Sep26 G0 scope:
+# Exact bootstrap image, limited to the 2026-09-26 G0 scope:
 # coordinator replaces the mature presentation prerequisite; no Gateway file.
 IMAGE_FILES = {
     'install/generation_launcher.py': ('/usr/libexec/serein/outpost-generation-launcher', '0755'),
@@ -1125,7 +1125,19 @@ def bind_generation_material(release, material, release_digest):
                 or type(row["bytes"]) is not int or row["bytes"] < 0):
             raise TransactionError("PREPARED_PAYLOAD_DENIED")
         expected[row["path"]] = row
-    if set(material) != set(expected) | {"release-manifest.json"}:
+    generated=set()
+    if "public-source.json" in material:
+        binding=strict_json(material["public-source.json"])
+        if (not isinstance(binding,dict) or set(binding)!={"schema","repository","commit","tree","archive_sha256","release_digest","source_plan_sha256"}
+                or binding.get("schema")!="SereinOutpostPublicSource/v1"
+                or binding.get("repository")!="Kaotikking/sfos-public"
+                or binding.get("release_digest")!=release_digest
+                or any(not re.fullmatch(r'[0-9a-f]{40}',str(binding.get(k))) for k in ('commit','tree'))
+                or any(not re.fullmatch(r'[0-9a-f]{64}',str(binding.get(k))) for k in ('archive_sha256','source_plan_sha256'))
+                or "public-source.json" in expected):
+            raise TransactionError("PREPARED_PUBLIC_SOURCE_DENIED")
+        generated.add("public-source.json")
+    if set(material) != set(expected) | {"release-manifest.json"} | generated:
         raise TransactionError("PREPARED_MATERIAL_DENOMINATOR_DENIED")
     if any(not isinstance(data, bytes) for data in material.values()) or sum(map(len, material.values())) > MAX_ARCHIVE_BYTES:
         raise TransactionError("PREPARED_MATERIAL_DENIED")
@@ -1172,7 +1184,7 @@ def bootstrap_candidate_precheck(release, material, source_plan_sha256):
 def prepared_generation_selector(release, material, source_plan_sha256):
     """Build the existing selector grammar without promoting any generation.
 
-    This is the selector-construction slice of public ccdc6f4's installer.
+    This constructs the existing canonical selector grammar.
     The predecessor receipt field binds its canonical signed source-plan bytes,
     not file formatting, a claimed constitution, or inferred install authority.
     """
@@ -1181,6 +1193,9 @@ def prepared_generation_selector(release, material, source_plan_sha256):
         raise TransactionError('PREPARED_SOURCE_PLAN_BINDING_DENIED')
     release_digest=release.get('self_digest') if isinstance(release,dict) else None
     material=bind_generation_material(release,material,release_digest)
+    if ('public-source.json' in material
+            and strict_json(material['public-source.json'])['source_plan_sha256']!=source_plan_sha256):
+        raise TransactionError('PREPARED_SOURCE_PLAN_BINDING_DENIED')
     selector={'schema':'SereinOutpostGenerationSelector/v1',
               'generation':release_digest.removeprefix('sha256:'),
               'release_digest':release_digest,
