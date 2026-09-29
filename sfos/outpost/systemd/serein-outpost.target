@@ -1,10 +1,8 @@
 [Unit]
-Description=Serein Outpost G0 bootstrap witness
-# PRO-132 2026-09-26: G0 starts independently of later presentation, watchdog
-# and Gateway capabilities. A failed Host collection remains evidence, never
-# Host admission. The Outpost service must report that failure and deny advance.
-Requires=serein-outpost.service
-After=serein-outpost.service
+Description=Serein Outpost independent witness and Serein Vitals
+# Recovery observability is available independently of Host admission and Serein.
+Requires=serein-outpost.service serein-outpost-presentation.service serein-https-gateway-adapter.service
+After=serein-outpost.service serein-outpost-presentation.service serein-https-gateway-adapter.service
 Wants=serein-outpost-host-witness.service
 
 [Install]

@@ -370,7 +370,7 @@ def prepared_forward(tmp_path,private_prestate_record):
     return body,prestate,public,receipt,raw,private
 
 
-@pytest.mark.parametrize('failure',[None,'image','witness','restored_unit','disabled_target'])
+@pytest.mark.parametrize('failure',[None,'image','witness','restored_unit','disabled_target','vitals_absent','vitals_wrong_generation','vitals_inactive'])
 def test_complete_g0_promotion_native_files_and_exact_failure_compensation(tmp_path,private_prestate_record,failure):
     """Real Linux file CAS/journal; synthetic systemd/witness, never VM proof."""
     body,_,_,directory,_,release,material,_=private_prestate_record
@@ -394,6 +394,8 @@ def test_complete_g0_promotion_native_files_and_exact_failure_compensation(tmp_p
             if action=='start':
                 for selected in (generation.IMAGE_UNITS if name=='serein-outpost.target' else (name,)):
                     self.units[selected].update(ActiveState='active',SubState='running')
+                if failure=='vitals_inactive':
+                    self.units['serein-https-gateway-adapter.service'].update(ActiveState='inactive',SubState='dead')
             if action=='stop':self.units[name].update(ActiveState='inactive',SubState='dead')
             if action in {'enable','disable'}:self.units[name]['UnitFileState']='enabled' if action=='enable' else 'disabled'
         def replace(self,path,before,after):
@@ -413,7 +415,11 @@ def test_complete_g0_promotion_native_files_and_exact_failure_compensation(tmp_p
                     original(action,name)
                 io.unit=sticky_stop
             raise TransactionError('INJECTED_WITNESS_FAILURE')
-        return {'result':'SUPPORTING_CURRENT_BOOT_WITNESS','witness':{'boot_id':body['boot_id'],'generation_identity':selector}}
+        result={'result':'SUPPORTING_CURRENT_BOOT_WITNESS','witness':{'boot_id':body['boot_id'],'generation_identity':selector}}
+        if failure!='vitals_absent':
+            result['vitals']={'result':'LOCAL_VITALS_JSON_HTML_OBSERVED','boot_id':body['boot_id'],
+                'generation':'f'*64 if failure=='vitals_wrong_generation' else selector['generation']}
+        return result
     if failure in {'disabled_target','restored_unit'}:
         match='PUBLIC_ENABLED_SUCCESSOR_TARGET_REQUIRED' if failure=='disabled_target' else 'PUBLIC_INSTALL_FAILED_RECOVERY_UNPROVEN'
         with pytest.raises(TransactionError,match=match):
@@ -688,7 +694,7 @@ def test_current_boot_observer_samples_clock_after_intervening_publication(tmp_p
 def test_bootstrap_prestate_binds_exact_files_and_units_without_effect(tmp_path):
     units = bootstrap_fixture(tmp_path)
     result = generation.bootstrap_prestate(tmp_path, units.__getitem__)
-    assert len(result['files']) == 4 and result['units'] == units
+    assert len(result['files']) == 6 and result['units'] == units
     assert result['mutation_effect'] == 'NONE' and result['admission'] == 'UNPROVEN'
     for row in result['files']:
         data = (tmp_path / row['target'].lstrip('/')).read_bytes()

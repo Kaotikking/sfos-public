@@ -1,0 +1,33 @@
+[Unit]
+Description=Serein Outpost independent read-only Serein Vitals edge
+After=network-online.target serein-outpost-presentation.service
+Requires=serein-outpost-presentation.service
+
+[Service]
+Type=simple
+User=serein-stage1
+Group=serein-stage1
+SupplementaryGroups=serein-outpost
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/libexec/serein/outpost-generation-launcher outpost/vitals_edge.py
+LoadCredential=serein-backend-cert.pem:/etc/serein/tls/serein-backend-cert.pem
+LoadCredential=serein-backend-key.pem:/etc/serein/tls/serein-backend-key.pem
+Restart=on-failure
+RestartSec=2s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=192.168.40.10/32
+IPAddressAllow=192.168.40.1/32
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=multi-user.target

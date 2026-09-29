@@ -12,6 +12,128 @@ from tests.active_host import active_host
 BOOT="11111111-2222-4333-8444-555555555555"
 
 
+def test_presentation_socket_allows_existing_edge_supplementary_group_only():
+    """Distinct child identities, creation umask only, no socket chmod repair."""
+    import os,stat,tempfile,time
+    from outpost import presentation_service
+    from outpost.vitals_runtime import VitalsRuntimeStore
+    assert os.geteuid()==0  # Native isolated Debian proof; no host accounts changed.
+    with tempfile.TemporaryDirectory(prefix='outpost-vitals-peer-',dir='/tmp') as name:
+        root=Path(name);root.chmod(0o750);os.chown(root,65533,65533)
+        address=root/'status.sock';boot=root/'boot';boot.write_text(BOOT);boot.chmod(0o644)
+        producer=os.fork()
+        if producer==0:
+            try:
+                os.setgroups([]);os.setgid(65533);os.setuid(65533);os.umask(0o007)
+                presentation_service.BOOT_ID_PATH=boot
+                store=VitalsRuntimeStore(root/'host',root/'producers',root/'domains',root/'recovery')
+                with presentation_service.PresentationServer(str(address),store) as server:
+                    server.timeout=5;server.handle_request()
+                os._exit(0)
+            except BaseException:os._exit(1)
+        try:
+            for _ in range(100):
+                if address.exists():break
+                time.sleep(0.01)
+            assert stat.S_IMODE(address.stat().st_mode)==0o770
+            assert address.stat().st_uid==address.stat().st_gid==65533
+            outsider=os.fork()
+            if outsider==0:
+                try:
+                    os.setgroups([]);os.setgid(65534);os.setuid(65534)
+                    with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
+                        client.connect(str(address))
+                    os._exit(1)
+                except PermissionError:os._exit(0)
+                except BaseException:os._exit(1)
+            assert os.waitpid(outsider,0)[1]==0
+            consumer=os.fork()
+            if consumer==0:
+                try:
+                    os.setgroups([65533]);os.setgid(65534);os.setuid(65534)
+                    vitals_edge.PRESENTATION_SOCKET=address
+                    status,_,_,body=vitals_edge._presentation('GET','/v1/runtime/status','application/json')
+                    os._exit(0 if status==200 and json.loads(body)['current_boot_id']==BOOT else 1)
+                except BaseException:os._exit(1)
+            assert os.waitpid(consumer,0)[1]==0
+            assert os.waitpid(producer,0)[1]==0;producer=None
+        finally:
+            if producer is not None:
+                try:os.kill(producer,15)
+                except ProcessLookupError:pass
+                os.waitpid(producer,0)
+
+
+@pytest.mark.parametrize('fault',[None,'wrong_generation','stale','html_tamper','wrong_certificate'])
+def test_installer_vitals_witness_uses_real_unix_tls_json_and_html(tmp_path,monkeypatch,fault):
+    """Native ephemeral listeners and synthetic TLS; not public-edge proof."""
+    import ssl,time,datetime
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes,serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from cryptography.x509.oid import NameOID
+    from install import public_generation_transaction as transaction
+    from outpost import presentation_service,service
+    from outpost.vitals_runtime import VitalsRuntimeStore
+    from tests.test_generation_launcher import native_generation
+    fixture=tmp_path/'fixture';fixture.mkdir()
+    _,_,_,selector=native_generation(fixture)
+    monkeypatch.setattr(service,'current_generation_identity',lambda:selector)
+    boot=tmp_path/'boot';boot.write_text(BOOT)
+    not_before=time.time()-1
+    service.coordinator_witness(host_root=tmp_path/'host',state_path=tmp_path/'coordinator/current.json',
+        boot_id_path=boot,observed_at=time.time()-100 if fault=='stale' else time.time())
+    runtime=VitalsRuntimeStore(tmp_path/'host',tmp_path/'producers',tmp_path/'domains/state.json',tmp_path/'recovery/current.json')
+    monkeypatch.setattr(presentation_service,'BOOT_ID_PATH',boot)
+    address=tmp_path/'s';monkeypatch.setattr(vitals_edge,'PRESENTATION_SOCKET',address)
+    key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
+    name=x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,'serein.sardonyxsapphire.us')])
+    now=datetime.datetime.now(datetime.timezone.utc)
+    def cert(serial):
+        return (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(serial).not_valid_before(now-datetime.timedelta(days=1))
+            .not_valid_after(now+datetime.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName('serein.sardonyxsapphire.us')]),False)
+            .sign(key,hashes.SHA256()).public_bytes(serialization.Encoding.PEM))
+    certificate=cert(1);certpath=tmp_path/'cert.pem';certpath.write_bytes(certificate)
+    keypath=tmp_path/'key.pem';keypath.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,serialization.NoEncryption()))
+    expected_cert=cert(2) if fault=='wrong_certificate' else certificate
+    def read_cert(root,path,**kwargs):
+        assert path=='/etc/serein/tls/serein-backend-cert.pem'
+        return expected_cert if kwargs.get('capture') else None
+    monkeypatch.setattr(transaction,'_read_target_fact',read_cert)
+    original=vitals_edge.edge_response
+    def response(method,path,accept):
+        status,kind,headers,body=original(method,path,accept)
+        if fault=='html_tamper' and 'text/html' in accept:body+=b'tampered'
+        return status,kind,headers,body
+    monkeypatch.setattr(vitals_edge,'edge_response',response)
+    with presentation_service.PresentationServer(str(address),runtime) as local:
+        server=vitals_edge.ThreadingHTTPServer(('127.0.0.1',0),vitals_edge.VitalsHandler)
+        context=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);context.load_cert_chain(certpath,keypath)
+        server.socket=context.wrap_socket(server.socket,server_side=True)
+        monkeypatch.setattr(vitals_edge,'BACKEND_ADDRESS','127.0.0.1')
+        monkeypatch.setattr(vitals_edge,'BACKEND_PORT',server.server_port)
+        threads=[threading.Thread(target=local.serve_forever),threading.Thread(target=server.serve_forever)]
+        for thread in threads:thread.start()
+        try:
+            expected=dict(selector,generation='f'*64) if fault=='wrong_generation' else selector
+            arguments=dict(expected_generation=expected,boot_id=BOOT,not_before=not_before,
+                           certificate_row={'sha256':transaction.sha(expected_cert)})
+            if fault:
+                with pytest.raises(transaction.TransactionError):transaction.read_vitals_witness(**arguments)
+            else:
+                result=transaction.read_vitals_witness(**arguments)
+                assert result['result']=='LOCAL_VITALS_JSON_HTML_OBSERVED'
+                assert result['generation']==selector['generation']
+                assert result['public_edge']=='INDEPENDENT_VERIFICATION_REQUIRED'
+                assert not (tmp_path/'host').exists()  # unavailable Host remains observable
+        finally:
+            server.shutdown();local.shutdown();server.server_close()
+            for thread in threads:thread.join(timeout=3)
+
+
 @pytest.mark.parametrize("accept", ["application/json", "text/html"])
 def test_native_vitals_presentation_socket_without_host_or_gateway(tmp_path, monkeypatch, accept):
     """Native temporary Unix API, not canonical edge or service acceptance."""

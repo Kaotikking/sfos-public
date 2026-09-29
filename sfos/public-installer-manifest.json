@@ -126,13 +126,13 @@
     },
     {
       "path": "outpost/install/public_generation_transaction.py",
-      "bytes": 93971,
-      "sha256": "5a17cd6d3c4de14be9e9aae34dae00c4f83560d9ce37b47c07540c0094d27f2b"
+      "bytes": 99739,
+      "sha256": "6a0f583572acdcd1ac6b6174f46ed1fd1ff5d459d4a102e15ee32bebe0cb0aaa"
     },
     {
       "path": "outpost/install/public_installer_cli.py",
-      "bytes": 27421,
-      "sha256": "041b52c8cc85477476f47fab5ca9733707d34dcab2a7da67f5132b8cab5ba2d5"
+      "bytes": 28209,
+      "sha256": "64924c057fe93656c258fd578bfea4c0e9f88a9f0b6eb784e8ce99c2e4020a43"
     },
     {
       "path": "outpost/install/transaction.py",
@@ -216,13 +216,23 @@
     },
     {
       "path": "outpost/release-manifest.json",
-      "bytes": 9040,
-      "sha256": "84ca85f2398eea3c04c81fa6bbf902f45950164395bf8d39ebc7e98d4279a29c"
+      "bytes": 9395,
+      "sha256": "226c055260803ab50a6b44cc47aa0f03129428364c5b728a12ae134eaee2aa25"
+    },
+    {
+      "path": "outpost/systemd/serein-https-gateway-adapter.service",
+      "bytes": 974,
+      "sha256": "698f294cc79969c061779f5ca425773b10f0ede0a6cffa4bc8a80475f66bca3b"
     },
     {
       "path": "outpost/systemd/serein-outpost-host-witness.service",
       "bytes": 621,
       "sha256": "8ec510c06e48c9bbdcb3f0e186db4385ff5df4bc3e79ba2825d95725702bae53"
+    },
+    {
+      "path": "outpost/systemd/serein-outpost-presentation.service",
+      "bytes": 715,
+      "sha256": "8428e431e767637d4fe5ea9fbd6d12c8d3714e7c1ba771352582162ed1e95052"
     },
     {
       "path": "outpost/systemd/serein-outpost.service",
@@ -231,8 +241,8 @@
     },
     {
       "path": "outpost/systemd/serein-outpost.target",
-      "bytes": 432,
-      "sha256": "0567283f04ed0fa25492fdf79aadac901f1dc1531383ac591b79b82098e1db95"
+      "bytes": 441,
+      "sha256": "dd90d4c210617c84f9cafc1cbcba29166a1e52d710b2749cd2337b4910c2efa1"
     },
     {
       "path": "outpost/tests/active_host.py",
@@ -246,8 +256,8 @@
     },
     {
       "path": "outpost/tests/test_base_entry_contract.py",
-      "bytes": 18287,
-      "sha256": "403ddb319554906837d9a5a7d7de554db13e397dc8b7505be414621c9d69415c"
+      "bytes": 20156,
+      "sha256": "43ca4fb3fd64154cee05daee061e024afaee57c02fcb707196ac8258570faa78"
     },
     {
       "path": "outpost/tests/test_base_policy.py",
@@ -306,8 +316,8 @@
     },
     {
       "path": "outpost/tests/test_public_generation_transaction.py",
-      "bytes": 69256,
-      "sha256": "2eea091111d68a7209010316f5407b6c7e4b54a88324382f975a3a0769eef840"
+      "bytes": 69743,
+      "sha256": "08929defcec7fa381580c81d01a37206f92a069a6dc6e9089cda8b2635dd9a9b"
     },
     {
       "path": "outpost/tests/test_public_installer_cli.py",
@@ -336,8 +346,8 @@
     },
     {
       "path": "outpost/tests/test_vitals_edge.py",
-      "bytes": 11565,
-      "sha256": "e4055dc207f047a28592feee50baecfbe40d50793372e52e0396f292fa2f924e"
+      "bytes": 18882,
+      "sha256": "793e828563862cd345ee8b919ef96a3882394366133907840d85b7a4af563e44"
     },
     {
       "path": "outpost/tests/test_vitals_runtime.py",
@@ -355,5 +365,5 @@
       "sha256": "1f2c365c369b3fd3257044925e14b7a471bdcec4a9fafdadf0cfaad09346f8b7"
     }
   ],
-  "self_digest": "sha256:8e7a2c4ef3f538bbf3ccf69b125986c47c15860291be81300e7a7947929a01e9"
+  "self_digest": "sha256:0b24174fbfd85b42afd7fc84dec11193ad845f3e2decff295203bb5f7a66b76b"
 }

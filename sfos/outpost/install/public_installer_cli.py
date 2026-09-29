@@ -386,7 +386,21 @@ def recorded_prepared_generation(plan_path, expected_plan_sha256, evidence,
                     raise TransactionError('PUBLIC_TARGET_CHANGED_DURING_PROMOTION')
                 reread_prestate_receipt(Path('/'),receipt,body,public)
             def accept(selector,not_before):
-                return read_postpromotion_witness(plan_path,expected_plan_sha256,selector,not_before=not_before)
+                from .public_generation_transaction import read_vitals_witness
+                import time
+                deadline=time.monotonic()+30
+                while True:
+                    invariants()
+                    try:
+                        result=read_postpromotion_witness(plan_path,expected_plan_sha256,selector,not_before=not_before)
+                        result['vitals']=read_vitals_witness(expected_generation=selector,
+                            boot_id=fields['current_boot_id'],not_before=not_before,
+                            certificate_row=next(row for row in fields['immutable_rows']
+                                if row['target']=='/etc/serein/tls/serein-backend-cert.pem'))
+                        return result
+                    except TransactionError:
+                        if time.monotonic()>=deadline:raise
+                        time.sleep(0.5)
             io=_GenerationFileIO(Path('/'),str(Path(receipt['path']).parent))
             result=_complete_bootstrap_promotion(io,prepared,body,raw,private,public,precheck,invariants,accept)
             yield result

@@ -38,15 +38,19 @@ IMMUTABLE_POLICY = {
     "/etc/serein/tls/serein-backend-key.pem": "0600",
 }
 
-# Exact bootstrap image, limited to the 2026-09-26 G0 scope:
-# coordinator replaces the mature presentation prerequisite; no Gateway file.
+# Exact Outpost image. The legacy-named TLS unit hosts only read-only Vitals;
+# the old Serein Gateway executable and downstream files are never replaced.
 IMAGE_FILES = {
     'install/generation_launcher.py': ('/usr/libexec/serein/outpost-generation-launcher', '0755'),
     'systemd/serein-outpost-host-witness.service': ('/etc/systemd/system/serein-outpost-host-witness.service', '0644'),
     'systemd/serein-outpost.service': ('/etc/systemd/system/serein-outpost.service', '0644'),
+    'systemd/serein-outpost-presentation.service': ('/etc/systemd/system/serein-outpost-presentation.service', '0644'),
+    'systemd/serein-https-gateway-adapter.service': ('/etc/systemd/system/serein-https-gateway-adapter.service', '0644'),
     'systemd/serein-outpost.target': ('/etc/systemd/system/serein-outpost.target', '0644'),
 }
-IMAGE_UNITS = ('serein-outpost-host-witness.service', 'serein-outpost.service', 'serein-outpost.target')
+IMAGE_UNITS = ('serein-outpost-host-witness.service', 'serein-outpost.service',
+               'serein-outpost-presentation.service', 'serein-https-gateway-adapter.service',
+               'serein-outpost.target')
 UNIT_PROPERTIES = ('Id', 'LoadState', 'ActiveState', 'SubState', 'UnitFileState',
                    'FragmentPath', 'DropInPaths', 'NeedDaemonReload')
 
@@ -902,6 +906,83 @@ def read_generation_witness(root, *, expected_generation, boot_id, not_before,
             'admission':'UNPROVEN','authority_effect':'NONE','mutation_effect':'NONE'}
 
 
+def read_vitals_witness(*, expected_generation, boot_id, not_before, certificate_row):
+    """Supporting local presentation/TLS proof, never public-edge acceptance.
+
+    Reuse the installed fixed edge and its immutable certificate. No secret
+    leaves the guest. JSON and HTML each carry their own validated projection;
+    live timestamps mean their projection digests need not be identical.
+    """
+    import html
+    import http.client
+    import socket
+    import ssl
+    from outpost import vitals_edge
+    from outpost.http_readonly import html_body
+    from outpost.service import validate_coordinator_witness
+
+    def projection(raw):
+        value=strict_json(raw)
+        if (not vitals_edge._surface_ready(raw) or value['current_boot_id']!=boot_id
+                or not not_before<=value['generated_at']<=time.time()):
+            raise TransactionError('PUBLIC_VITALS_PROJECTION_DENIED')
+        rows=[item for item in value['sections']['domains']['perspectives']
+              if item['producer']=='OUTPOST_DOMAIN_COORDINATOR']
+        if len(rows)!=1 or 'coordinator' not in rows[0]['payload']:
+            raise TransactionError('PUBLIC_VITALS_GENERATION_DENIED')
+        coordinator=validate_coordinator_witness(rows[0]['payload']['coordinator'],
+            boot_id=boot_id,observed_at=time.time(),expected_generation=expected_generation)
+        if coordinator['observed_at']<not_before:
+            raise TransactionError('PUBLIC_VITALS_GENERATION_DENIED')
+        return value
+
+    certificate=_read_target_fact(Path('/'),'/etc/serein/tls/serein-backend-cert.pem',
+                                  expected=certificate_row,capture=True)
+    context=ssl.create_default_context(cadata=certificate.decode('ascii'))
+    context.verify_flags|=ssl.VERIFY_X509_PARTIAL_CHAIN
+    expected_der=ssl.PEM_cert_to_DER_cert(certificate.decode('ascii'))
+    def fetch(path,accept):
+        # Exact already-installed backend route; not a substitute for public
+        # HAProxy readback by the independent SFOS verifier.
+        with socket.create_connection((vitals_edge.BACKEND_ADDRESS,vitals_edge.BACKEND_PORT),timeout=3) as tcp:
+            with context.wrap_socket(tcp,server_hostname='serein.sardonyxsapphire.us') as tls:
+                if tls.getpeercert(binary_form=True)!=expected_der:
+                    raise TransactionError('PUBLIC_VITALS_TLS_IDENTITY_DENIED')
+                request=('GET '+path+' HTTP/1.1\r\nHost: serein.sardonyxsapphire.us\r\nAccept: '+accept+'\r\nConnection: close\r\n\r\n').encode('ascii')
+                tls.sendall(request)
+                response=http.client.HTTPResponse(tls);response.begin()
+                body=response.read(vitals_edge.MAX_RESPONSE_BYTES+1)
+                if response.status!=200 or len(body)>vitals_edge.MAX_RESPONSE_BYTES:
+                    raise TransactionError('PUBLIC_VITALS_ENDPOINT_DENIED')
+                return response.getheader('Content-Type'),body
+    try:
+        status,kind,_,raw=vitals_edge._presentation('GET',vitals_edge.STATUS_PATH,'application/json')
+        if status!=200 or kind!='application/json':
+            raise TransactionError('PUBLIC_VITALS_SOCKET_DENIED')
+        local=projection(raw)
+        kind,raw=fetch(vitals_edge.STATUS_PATH,'application/json')
+        if kind!='application/json':raise TransactionError('PUBLIC_VITALS_TYPE_DENIED')
+        api=projection(raw)
+        kind,raw=fetch(vitals_edge.STATUS_PATH,'text/html')
+        if kind!='text/html; charset=utf-8':raise TransactionError('PUBLIC_VITALS_TYPE_DENIED')
+        text=raw.decode('utf-8');prefix="<pre id='vitality'>"
+        if text.count(prefix)!=1:raise TransactionError('PUBLIC_VITALS_HTML_DENIED')
+        embedded=html.unescape(text.split(prefix,1)[1].split('</pre>',1)[0]).encode()
+        rendered=projection(embedded)
+        if html_body(rendered)!=raw:raise TransactionError('PUBLIC_VITALS_HTML_DENIED')
+        kind,ready=fetch(vitals_edge.READY_PATH,'application/json')
+        if kind!='application/json' or strict_json(ready)!={'status':'READY'}:
+            raise TransactionError('PUBLIC_VITALS_READINESS_DENIED')
+        _read_target_fact(Path('/'),'/etc/serein/tls/serein-backend-cert.pem',expected=certificate_row)
+    except (OSError,ValueError,KeyError,TypeError,http.client.HTTPException) as error:
+        raise TransactionError('PUBLIC_VITALS_ACCEPTANCE_DENIED') from error
+    return {'result':'LOCAL_VITALS_JSON_HTML_OBSERVED','boot_id':boot_id,
+            'generation':expected_generation['generation'],
+            'local_projection':local['projection_digest'],'api_projection':api['projection_digest'],
+            'html_projection':rendered['projection_digest'],'certificate_sha256':certificate_row['sha256'],
+            'public_edge':'INDEPENDENT_VERIFICATION_REQUIRED','admission_effect':'NONE'}
+
+
 def successor_generation_prestate(root):
     """Capture the observed existing-generation road without any mutation.
 
@@ -998,7 +1079,8 @@ def _read_target_fact(root, absolute, *, expected=None, capture=False):
     immutable checks continue returning no file contents.
     """
     if capture and (expected is None or absolute not in {
-            '/etc/serein-outpost/cognition-signing.pem',str(CANONICAL_AUTHORITY_PATH)}):
+            '/etc/serein-outpost/cognition-signing.pem',str(CANONICAL_AUTHORITY_PATH),
+            '/etc/serein/tls/serein-backend-cert.pem'}):
         raise TransactionError('PUBLIC_KEY_CAPTURE_PATH_DENIED')
     root=Path(os.path.abspath(root))
     if absolute not in IMMUTABLE_POLICY and absolute!="/proc/sys/kernel/random/boot_id":
@@ -1150,7 +1232,7 @@ def bind_generation_material(release, material, release_digest):
 
 
 def bootstrap_candidate_precheck(release, material, source_plan_sha256):
-    """Independent G0 source predicate, not the mature donor's Vitals gate.
+    """Independent Outpost source predicate, not installed Vitals acceptance.
 
     Native target/transaction checks still run separately under the lock.
     Host compatibility is not SFOS admission; source consistency is not
@@ -1169,6 +1251,8 @@ def bootstrap_candidate_precheck(release, material, source_plan_sha256):
     runtime = {'outpost/service.py','outpost/host_witness_runner.py',
                'outpost/constitutional_registry.py','outpost/host_vitality.py',
                'outpost/vitals_aggregation.py','outpost/debian_host_collector.py',
+               'outpost/presentation_service.py','outpost/vitals_edge.py',
+               'outpost/http_readonly.py','outpost/vitals_runtime.py',
                'outpost/public_tree_host.py','install/install-outpost.sh',
                'install/public_installer_cli.py','install/public_generation_transaction.py',
                'install/transaction.py','install/kernel_first_install_runner.py',
@@ -1545,12 +1629,17 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
         units={name:io.unit_state(name) for name in IMAGE_UNITS}
         if (units['serein-outpost.target']['ActiveState']!='active'
                 or units['serein-outpost.target']['UnitFileState']!='enabled'
-                or units['serein-outpost.service']['ActiveState']!='active'):
+                or any(units[name]['ActiveState']!='active' for name in (
+                    'serein-outpost.service','serein-outpost-presentation.service',
+                    'serein-https-gateway-adapter.service'))):
             raise TransactionError('PUBLIC_TARGET_ACTIVATION_DENIED')
         witness=accept(selector,not_before)
         if (witness.get('result')!='SUPPORTING_CURRENT_BOOT_WITNESS'
                 or witness.get('witness',{}).get('boot_id')!=body['boot_id']
-                or witness.get('witness',{}).get('generation_identity')!=selector):
+                or witness.get('witness',{}).get('generation_identity')!=selector
+                or witness.get('vitals',{}).get('result')!='LOCAL_VITALS_JSON_HTML_OBSERVED'
+                or witness['vitals'].get('boot_id')!=body['boot_id']
+                or witness['vitals'].get('generation')!=selector['generation']):
             raise TransactionError('PUBLIC_POSTPROMOTION_WITNESS_DENIED')
         for row in body['image_files']:
             if io.read(row['target'])!=row['post']:raise TransactionError('PUBLIC_IMAGE_READBACK_DENIED')

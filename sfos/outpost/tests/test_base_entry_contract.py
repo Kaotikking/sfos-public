@@ -51,19 +51,47 @@ def test_retired_base_entry_denies_without_access_or_argument_translation(monkey
     assert caught.value.code == "RETIRED_BASE_ROAD_USE_CANONICAL_INSTALL_OUTPOST"
 
 
-def test_g0_target_does_not_require_later_surfaces_or_successful_host_collection():
-    """PRO-132 Sep26 G0 cut; target-only contract, not runtime admission."""
+def test_outpost_target_requires_independent_vitals_not_successful_host_collection():
+    """Current-boot recovery observability cannot be deferred behind Kernel."""
     import configparser
     path=Path(__file__).parents[1]/"systemd/serein-outpost.target"
     unit=configparser.ConfigParser(interpolation=None)
     unit.read_string(path.read_text())
     assert set(unit.sections())=={"Unit","Install"}
-    assert set(unit["Unit"]["Requires"].split())=={"serein-outpost.service"}
-    assert set(unit["Unit"]["After"].split())=={"serein-outpost.service"}
+    required={"serein-outpost.service","serein-outpost-presentation.service",
+              "serein-https-gateway-adapter.service"}
+    assert set(unit["Unit"]["Requires"].split())==required
+    assert set(unit["Unit"]["After"].split())==required
     assert set(unit["Unit"]["Wants"].split())=={"serein-outpost-host-witness.service"}
     assert unit["Install"]["WantedBy"]=="multi-user.target"
     assert set(unit["Unit"])=={"description","requires","after","wants"}
     assert set(unit["Install"])=={"wantedby"}
+
+
+def test_vitals_units_reuse_unprivileged_generation_and_existing_tls_identity():
+    import configparser
+    root=Path(__file__).parents[1]/'systemd'
+    presentation=configparser.ConfigParser(interpolation=None)
+    presentation.read(root/'serein-outpost-presentation.service')
+    assert presentation['Unit'].get('Requires','')==''
+    assert presentation['Unit']['After']=='local-fs.target'
+    assert presentation['Service']['User']==presentation['Service']['Group']=='serein-outpost'
+    assert presentation['Service']['ExecStart']=='/usr/libexec/serein/outpost-generation-launcher outpost/presentation_service.py'
+    assert presentation['Service']['RestrictAddressFamilies']=='AF_UNIX'
+    assert presentation['Service']['RuntimeDirectoryMode']=='0750'
+    assert presentation['Service']['UMask']=='0007'
+    # Preserve duplicate LoadCredential directives; configparser would discard them.
+    edge=(root/'serein-https-gateway-adapter.service').read_text()
+    assert 'Requires=serein-outpost-presentation.service\n' in edge
+    for line in ['User=serein-stage1','Group=serein-stage1','SupplementaryGroups=serein-outpost',
+                 'ExecStart=/usr/libexec/serein/outpost-generation-launcher outpost/vitals_edge.py',
+                 'LoadCredential=serein-backend-cert.pem:/etc/serein/tls/serein-backend-cert.pem',
+                 'LoadCredential=serein-backend-key.pem:/etc/serein/tls/serein-backend-key.pem',
+                 'RestrictAddressFamilies=AF_INET AF_UNIX','IPAddressDeny=any',
+                 'IPAddressAllow=192.168.40.10/32','IPAddressAllow=192.168.40.1/32']:
+        assert line+'\n' in edge
+    assert 'ReadWritePaths=' not in edge and 'ExecStart=+' not in edge
+    assert 'gateway.sock' not in edge and 'host-witness' not in edge
 
 
 def test_g0_host_witness_unit_uses_existing_unprivileged_collector_contract():
