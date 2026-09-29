@@ -1,25 +1,24 @@
 #!/bin/sh
 set -eu
-[ "$#" -eq 5 ] || exit 64
-TARGET=$1 SOURCE_ROOT=$2 SOURCE_KIND=$3 SOURCE_RECEIPT=$4 IMMUTABLE_INPUT_PLAN=$5
+export PYTHONDONTWRITEBYTECODE=1
+[ "$#" -eq 6 ] || { echo "usage: late-install.sh TARGET PUBLIC_TREE SOURCE_KIND SOURCE_RECEIPT IMMUTABLE_INPUT_PLAN EXPECTED_PLAN_SHA256" >&2; exit 64; }
+TARGET=$1 PUBLIC_TREE=$2 SOURCE_KIND=$3 SOURCE_RECEIPT=$4 IMMUTABLE_INPUT_PLAN=$5 EXPECTED_PLAN_SHA256=$6
+case "$EXPECTED_PLAN_SHA256" in ''|*[!0-9a-f]*) echo EXPECTED_PLAN_SHA256_REQUIRED >&2; exit 64 ;; esac
+[ "${#EXPECTED_PLAN_SHA256}" -eq 64 ] || { echo EXPECTED_PLAN_SHA256_REQUIRED >&2; exit 64; }
+[ "$TARGET" = /target ] && [ -d "$TARGET" ] && [ ! -L "$TARGET" ] || { echo OFFLINE_INSTALLER_TARGET_REQUIRED >&2; exit 64; }
 [ "$(id -u)" -eq 0 ] || { echo ROOT_REQUIRED >&2; exit 1; }
-[ "$SOURCE_KIND" = OFFLINE_USB_MEDIA ] || [ "$SOURCE_KIND" = PINNED_PUBLIC_REPOSITORY ] || exit 1
-[ "$TARGET" = /target ] && [ -r "$TARGET/etc/os-release" ] || exit 1
-grep -q '^ID=debian$' "$TARGET/etc/os-release" && grep -Eq '^VERSION_ID="?13"?$' "$TARGET/etc/os-release" || exit 1
-SOURCE=$SOURCE_ROOT/sfos/outpost
-python3 -B "$SOURCE/verify_install_preflight.py" --source "$SOURCE" --mode source
-python3 -B "$SOURCE_ROOT/sfos/base/installer/verify-source-road.py" "$SOURCE_ROOT" "$SOURCE_KIND" "$SOURCE_RECEIPT"
-[ -f "$IMMUTABLE_INPUT_PLAN" ] && [ ! -L "$IMMUTABLE_INPUT_PLAN" ] || { echo IMMUTABLE_INPUT_PLAN_REQUIRED >&2; exit 1; }
-[ "$(stat -c '%a:%u:%g' "$IMMUTABLE_INPUT_PLAN")" = 600:0:0 ] || { echo IMMUTABLE_INPUT_PLAN_CUSTODY_DENIED >&2; exit 1; }
-for path in "$TARGET/usr/share/serein/outpost" "$TARGET/etc/serein-outpost" "$TARGET/var/lib/serein-outpost"; do [ ! -e "$path" ] || { echo NEW_OUTPOST_REQUIRED >&2; exit 1; }; done
-STAGE=$(mktemp -d "$TARGET/var/tmp/sfos-outpost-source.XXXXXXXX")
-[ ! -L "$STAGE" ] && [ "$(stat -c '%u:%a:%F' "$STAGE")" = '0:700:directory' ] || { echo SECURE_STAGE_DENIED >&2; exit 1; }
-cleanup() { [ -n "${STAGE:-}" ] && [ ! -L "$STAGE" ] && rm -rf -- "$STAGE"; }
-trap cleanup EXIT HUP INT TERM
-cp -a "$SOURCE/." "$STAGE/"
-cp "$IMMUTABLE_INPUT_PLAN" "$STAGE/immutable-input-plan.json"
-cp "$SOURCE_ROOT/sfos/base/installer/base-road-transaction.py" "$STAGE/base-road-transaction.py"
-chmod 600 "$STAGE/immutable-input-plan.json"
-GUEST_STAGE=${STAGE#"$TARGET"}
-chroot "$TARGET" /usr/bin/python3 -B "$GUEST_STAGE/verify_install_preflight.py" --source "$GUEST_STAGE" --mode source
-chroot "$TARGET" /usr/bin/python3 -B "$GUEST_STAGE/base-road-transaction.py" install "$GUEST_STAGE" "$GUEST_STAGE/immutable-input-plan.json" BARE_INSTALL "$SOURCE_KIND"
+[ "$SOURCE_KIND" = OFFLINE_USB_MEDIA ] || { echo OFFLINE_INSTALLER_SOURCE_REQUIRED >&2; exit 64; }
+[ -r "$TARGET/etc/os-release" ] || { echo DEBIAN_TARGET_REQUIRED >&2; exit 1; }
+grep -q '^ID=debian$' "$TARGET/etc/os-release" && grep -Eq '^VERSION_ID="?13"?$' "$TARGET/etc/os-release" || { echo DEBIAN_TARGET_REQUIRED >&2; exit 1; }
+SOURCE=$PUBLIC_TREE/sfos/outpost
+ENTRY=$SOURCE/install/install-outpost.sh
+[ -f "$ENTRY" ] && [ ! -L "$ENTRY" ] || { echo CANONICAL_OUTPOST_ENTRY_UNAVAILABLE >&2; exit 1; }
+# One package entry owns source authority, exact immutable-input custody,
+# staging, installation and enable-only first-host-boot behavior. This Base
+# wrapper must neither copy a partial package nor execute a second transaction.
+# d-i itself need not provide Python: the complete package entry must use the
+# installed target's declared toolchain through Debian's in-target/chroot road.
+# The offline source receipt remains explicit input, not an authority claim.
+# Portable media authority and the complete entry are not implemented yet;
+# this delegation alone is not a fresh-install witness.
+exec /bin/sh "$ENTRY" "$SOURCE" install "$TARGET" "$IMMUTABLE_INPUT_PLAN" "$EXPECTED_PLAN_SHA256" "$SOURCE_KIND" "$SOURCE_RECEIPT"

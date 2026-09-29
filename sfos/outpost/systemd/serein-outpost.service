@@ -1,0 +1,34 @@
+[Unit]
+Description=Serein Outpost G0 independent coordinator
+# PRO-132 G0: unavailable Host evidence denies admission, not observation.
+After=local-fs.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+WatchdogSec=30s
+User=serein-outpost
+Group=serein-outpost
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Preserve the existing VM4010 unprivileged generation-launcher road.
+# No privileged prefix, selector permission change or credential loading.
+ExecStart=/usr/libexec/serein/outpost-generation-launcher outpost/service.py --host-vitality-root /var/lib/serein-outpost/host-vitality
+CapabilityBoundingSet=
+AmbientCapabilities=
+StateDirectory=serein-outpost/coordinator
+StateDirectoryMode=0750
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=serein-outpost.target

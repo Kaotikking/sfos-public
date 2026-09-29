@@ -7,8 +7,13 @@ import hashlib,json,re,sys
 from pathlib import Path
 l=json.loads(Path(sys.argv[1]).read_text())
 if l.get('schema')!='SFOSDebianMediaLock/v1' or l.get('status')!='BOUND' or l.get('authority')!='OFFICIAL_DEBIAN_SIGNED_RELEASE_ONLY': raise SystemExit('MEDIA_LOCK_UNBOUND')
+def digest(path):
+ h=hashlib.sha256()
+ with Path(path).open('rb') as stream:
+  for block in iter(lambda:stream.read(1024*1024),b''):h.update(block)
+ return h.hexdigest()
 for supplied,key in ((sys.argv[2],'image_sha256'),(sys.argv[3],'checksums_sha256'),(sys.argv[4],'signature_sha256')):
- if not re.fullmatch(r'[0-9a-f]{64}',str(l.get(key))) or hashlib.sha256(Path(supplied).read_bytes()).hexdigest()!=l[key]: raise SystemExit('MEDIA_ARTIFACT_HASH_DENIED')
+ if not re.fullmatch(r'[0-9a-f]{64}',str(l.get(key))) or digest(supplied)!=l[key]: raise SystemExit('MEDIA_ARTIFACT_HASH_DENIED')
 if Path(sys.argv[2]).name!=l.get('image_filename') or Path(sys.argv[2]).stat().st_size!=l.get('image_bytes'): raise SystemExit('MEDIA_IDENTITY_DENIED')
 PY
 STATUS=$(mktemp); trap 'rm -f "$STATUS"' EXIT HUP INT TERM

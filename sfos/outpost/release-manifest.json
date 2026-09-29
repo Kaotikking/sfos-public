@@ -1,0 +1,283 @@
+{
+  "schema": "SereinOutpostSourceRelease/v2",
+  "generation": "outpost-local-source-only-incomplete",
+  "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
+  "payload": [
+    {
+      "path": "install/generation_launcher.py",
+      "bytes": 7968,
+      "sha256": "e189f4fc2a2e8e4cb7a392a9a98c55fb547a66f1be3224c3c948f8cc59310ed1"
+    },
+    {
+      "path": "install/install-outpost.sh",
+      "bytes": 385,
+      "sha256": "e072cbec19c3149385ef186fca29d83e395452266a80cca1d9c1fd1609ad17bf"
+    },
+    {
+      "path": "install/kernel_first_install_runner.py",
+      "bytes": 19577,
+      "sha256": "7f7bb187e80e9894c7e579538dd7e6de37131bb92b9982adc523896509c94f06"
+    },
+    {
+      "path": "install/public_generation_transaction.py",
+      "bytes": 92859,
+      "sha256": "a334ad6188002a9192c64546c0db0fb1a123219e57a5ba07b0aef04f5f6fa439"
+    },
+    {
+      "path": "install/public_installer_cli.py",
+      "bytes": 26338,
+      "sha256": "b69045dd6bd82d109bc8edaf58f2a844817115aeb04412802f3b6991ba4b6a58"
+    },
+    {
+      "path": "install/transaction.py",
+      "bytes": 21278,
+      "sha256": "024fe2e697b860240d15f4fff681a203f1f61473aef1770785eeef451bc09fb6"
+    },
+    {
+      "path": "outpost-role-matrix.json",
+      "bytes": 17641,
+      "sha256": "346ad655b06cc1e79aafc0fb78ccc600e6bdc306cac571db3eac6c4fe8473c71"
+    },
+    {
+      "path": "outpost/__init__.py",
+      "bytes": 79,
+      "sha256": "2a5d9296024067d5a7302bc83db7b16c03c0d5fd7b39caf008c07d601d9b8e41"
+    },
+    {
+      "path": "outpost/bootstrap-constitution.json",
+      "bytes": 5010,
+      "sha256": "5c98df0e7101572b7748bef10585714588814b107ee637acff470d2201d1e3c9"
+    },
+    {
+      "path": "outpost/constitutional_registry.py",
+      "bytes": 6820,
+      "sha256": "e1ae9ac2253f79273ec9459477ff8a5c52e22120aac033b07f84b337d5a4b81a"
+    },
+    {
+      "path": "outpost/debian_host_collector.py",
+      "bytes": 22614,
+      "sha256": "0f315b6eee9a4d9413df7561fc5ee674b4fc890f45e4ae886ab90230b0c197dd"
+    },
+    {
+      "path": "outpost/host_vitality.py",
+      "bytes": 18649,
+      "sha256": "0c3c97cfd5f3734c1d04064f535b6a43a1c7de3173c682d1b0a833f0068de20a"
+    },
+    {
+      "path": "outpost/host_witness_runner.py",
+      "bytes": 7825,
+      "sha256": "42544cb6517a2a33a309d51a59218ffadc614d6470ad57532550af40f0103c6c"
+    },
+    {
+      "path": "outpost/http_readonly.py",
+      "bytes": 14460,
+      "sha256": "00a5e9d961fb1d039d217ba05a929deb3db295237f016be10e84ccd119c7325c"
+    },
+    {
+      "path": "outpost/presentation_service.py",
+      "bytes": 4312,
+      "sha256": "a27befa08644f3b7ab23766065d29c7cbbe7f0c6f6df4b26c07e35a08e87468e"
+    },
+    {
+      "path": "outpost/public_tree_host.py",
+      "bytes": 11357,
+      "sha256": "3b648a29bc149b210e515eb1ac55da784ac0afa2691e57f8155c6bcfec19b977"
+    },
+    {
+      "path": "outpost/reboot_vitality.py",
+      "bytes": 15927,
+      "sha256": "24a02958c2e690919547b710fbdc0ed3d67e379aa3d46f54c479b279f01ce69a"
+    },
+    {
+      "path": "outpost/service.py",
+      "bytes": 11915,
+      "sha256": "1162bcc2c5c1b2660acdee9d1461cfe7235996661ad358e3f86b9ec1b55c761e"
+    },
+    {
+      "path": "outpost/vitals_aggregation.py",
+      "bytes": 6062,
+      "sha256": "4110e1ba8ab37cf8eaf20c811ba44e8675d9947e865def16c3d50dec7537d826"
+    },
+    {
+      "path": "outpost/vitals_edge.py",
+      "bytes": 8496,
+      "sha256": "c35db34b54fdb35e84ad22d8463746c52499d3f517e8bdf7d2d6aebf2b30e176"
+    },
+    {
+      "path": "outpost/vitals_runtime.py",
+      "bytes": 12129,
+      "sha256": "e425a224f194231dc48cb3faf38bc96a943210565a0faefffc03ef890ccada48"
+    },
+    {
+      "path": "outpost/watchdog.py",
+      "bytes": 7047,
+      "sha256": "fa384e3d4bb29f8406eb48d8e4a9d044162607187f7791d3d218925c73fcf0b8"
+    },
+    {
+      "path": "systemd/serein-outpost-host-witness.service",
+      "bytes": 621,
+      "sha256": "8ec510c06e48c9bbdcb3f0e186db4385ff5df4bc3e79ba2825d95725702bae53"
+    },
+    {
+      "path": "systemd/serein-outpost.service",
+      "bytes": 1003,
+      "sha256": "482b522f64f6afb57db11c6933b9a34e0246620efba1a63fc088f39f16b63c2c"
+    },
+    {
+      "path": "systemd/serein-outpost.target",
+      "bytes": 432,
+      "sha256": "0567283f04ed0fa25492fdf79aadac901f1dc1531383ac591b79b82098e1db95"
+    },
+    {
+      "path": "verify_install_preflight.py",
+      "bytes": 10463,
+      "sha256": "1f2c365c369b3fd3257044925e14b7a471bdcec4a9fafdadf0cfaad09346f8b7"
+    }
+  ],
+  "source_only_files": [
+    {
+      "path": "tests/active_host.py",
+      "bytes": 1422,
+      "sha256": "990b2f93c991575261d2e6dc68d7752de781bb3b8f7dbb86fc87d16b54d4a55d"
+    },
+    {
+      "path": "tests/donor_kernel_first_install.py",
+      "bytes": 15425,
+      "sha256": "03bbecf3eaa5e270513f9ba685729b67025fd4a0209fd3314b0f0638375569f3"
+    },
+    {
+      "path": "tests/test_base_entry_contract.py",
+      "bytes": 18287,
+      "sha256": "403ddb319554906837d9a5a7d7de554db13e397dc8b7505be414621c9d69415c"
+    },
+    {
+      "path": "tests/test_base_policy.py",
+      "bytes": 2327,
+      "sha256": "4c5f03aa7160e67369d539b525825a020a6db3aae0db3117d484bb18cef81e4a"
+    },
+    {
+      "path": "tests/test_base_source_road.py",
+      "bytes": 8562,
+      "sha256": "6623a01f41128570d6a92b1acff3ece404677632083b7346502c172483d476cc"
+    },
+    {
+      "path": "tests/test_constitutional_registry.py",
+      "bytes": 2696,
+      "sha256": "1c7df1f7dab7f5fef3c2eb9e0d2a732fda3488ae7f7f3b473753c7ea14c1e1d7"
+    },
+    {
+      "path": "tests/test_debian_host_collector.py",
+      "bytes": 19370,
+      "sha256": "db65f40ef3256b0b6675822c9247a8370d98495c0d3a1e661e8444b70212fcee"
+    },
+    {
+      "path": "tests/test_generation_launcher.py",
+      "bytes": 4868,
+      "sha256": "13aef363ac6a6a7360f5bbe317515fb164e0ce7891e3f85d1c41bdd990a940d5"
+    },
+    {
+      "path": "tests/test_host_vitality.py",
+      "bytes": 10503,
+      "sha256": "04e9b03fda4919065b894c53878a8981e698704367be0c3ff4724486fe75b7c6"
+    },
+    {
+      "path": "tests/test_host_witness_runner.py",
+      "bytes": 11154,
+      "sha256": "72163fab60459d3f80a6a595db5e6058146d24fcfee0a928c374623bb4ea2a3c"
+    },
+    {
+      "path": "tests/test_http_readonly.py",
+      "bytes": 5714,
+      "sha256": "73a5c59bd416d80302b0448596d3ab31a664b7093996202ab2e1f66bb6cf3bca"
+    },
+    {
+      "path": "tests/test_install_source_preflight.py",
+      "bytes": 10722,
+      "sha256": "d4834b84782a883679a3f72e53bcd7204b79c9f95de73e3b99db733dd251ead7"
+    },
+    {
+      "path": "tests/test_kernel_first_install_runner.py",
+      "bytes": 8755,
+      "sha256": "661710d2acdbf17a25f942f7657eb0ec1ab6f1bf8bf6c768dae886689a57be78"
+    },
+    {
+      "path": "tests/test_media_build.py",
+      "bytes": 16945,
+      "sha256": "995a4d25e6220574e4c832faccb7b27a475468a43a353e3cedc81e3e250eaf15"
+    },
+    {
+      "path": "tests/test_public_generation_transaction.py",
+      "bytes": 68074,
+      "sha256": "eb7f830ad9f0d46f255f7a7c479ae1e0c27546f0836d5a56b8249969ef81d484"
+    },
+    {
+      "path": "tests/test_public_installer_cli.py",
+      "bytes": 43714,
+      "sha256": "ac9d87cf0cfc14513b2be61ee88e248ed60f9b2208885a460a32755c0392e7d3"
+    },
+    {
+      "path": "tests/test_public_tree_host.py",
+      "bytes": 7111,
+      "sha256": "7de073de2c95a56e67a635309fd4648e06c2a48425a0ae07b9c0c3e74b0344bc"
+    },
+    {
+      "path": "tests/test_reboot_vitality.py",
+      "bytes": 12800,
+      "sha256": "4e4f27f6221de3e4f90aad51f19b26c4bdc26810812ff62c3d88f3811f8ba160"
+    },
+    {
+      "path": "tests/test_service.py",
+      "bytes": 17431,
+      "sha256": "2de6cc644fd9158e7995a5c579c509fdfc08c1165997c35550abc5aba19dc965"
+    },
+    {
+      "path": "tests/test_vitals_aggregation.py",
+      "bytes": 4432,
+      "sha256": "33930ed61cc784896282dde51b7565982c399c7e7d85e622d97e65727c1cd233"
+    },
+    {
+      "path": "tests/test_vitals_edge.py",
+      "bytes": 11565,
+      "sha256": "e4055dc207f047a28592feee50baecfbe40d50793372e52e0396f292fa2f924e"
+    },
+    {
+      "path": "tests/test_vitals_runtime.py",
+      "bytes": 14839,
+      "sha256": "c74ad61bd27b753e0b76c25afe87ef3364bfcf1c20c7a2fd1f2b2c524ac6e74a"
+    },
+    {
+      "path": "tests/test_watchdog.py",
+      "bytes": 8906,
+      "sha256": "0e1b3611dcfc1562fafad7e738d323325515429e5c2e93da62f98db27a270bd6"
+    }
+  ],
+  "runtime_dependencies": [
+    {
+      "python_module": "cryptography",
+      "purpose": "Ed25519 witness signing",
+      "required_before_install": true
+    },
+    {
+      "network": "https://api.github.com/repos/Kaotikking/sfos-public",
+      "purpose": "pinned public-tree Host contract",
+      "required_before_host_gate": true
+    },
+    {
+      "executable": "nvidia-smi",
+      "purpose": "GPU driver evidence",
+      "required_before_host_gate": true
+    },
+    {
+      "path": "/usr/share/keyrings/debian-archive-keyring.gpg",
+      "debian_package": "debian-archive-keyring",
+      "purpose": "Debian archive trust anchor",
+      "required_before_install": true
+    },
+    {
+      "executable": "gpgv",
+      "purpose": "signed Debian Release verification",
+      "required_before_host_gate": true
+    }
+  ],
+  "self_digest": "sha256:877f5d34ca3cab3cc4cbcead9874397b4e1a608e52d844a7f21f5d18aea434be"
+}
