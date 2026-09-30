@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G3",
+  "generation": "G4",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -90,8 +90,8 @@
     },
     {
       "path": "outpost/vitals_aggregation.py",
-      "bytes": 6062,
-      "sha256": "4110e1ba8ab37cf8eaf20c811ba44e8675d9947e865def16c3d50dec7537d826"
+      "bytes": 6848,
+      "sha256": "362d6cf067b456ab67cabd22f0143789a10c36266964496c6e5f87af9d9585ec"
     },
     {
       "path": "outpost/vitals_edge.py",
@@ -232,13 +232,13 @@
     },
     {
       "path": "tests/test_service.py",
-      "bytes": 20931,
-      "sha256": "a90b076ffc679c781dcef3f05bcee2b27143649dbea4df7dacd6712744826a17"
+      "bytes": 21133,
+      "sha256": "14851e99dbbc14fdadba8f645bb237dedd9d5d0cb57fb6423a13f65d12437884"
     },
     {
       "path": "tests/test_vitals_aggregation.py",
-      "bytes": 4432,
-      "sha256": "33930ed61cc784896282dde51b7565982c399c7e7d85e622d97e65727c1cd233"
+      "bytes": 6866,
+      "sha256": "ee4fd438e3b12b8050f1782736a3fe147128de141f6681894426cd884eee709e"
     },
     {
       "path": "tests/test_vitals_edge.py",
@@ -284,5 +284,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:890f32b30065ed19d0098b967bb273a3685d30898576f7ed1b23287911a3b26e"
+  "self_digest": "sha256:e8e1a193f368f37e401dc7ec94e53ebbc78eb53ea93bb09270718f2a057038aa"
 }

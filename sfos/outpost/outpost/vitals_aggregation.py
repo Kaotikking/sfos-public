@@ -11,6 +11,9 @@ from .host_vitality import BOOT
 SCHEMA = "SereinVitalsAggregation/v1"
 SOURCE_SCHEMA = "SereinVitalsProducerObservation/v1"
 PERSPECTIVES = ("host", "serein", "outpost", "domains", "budget", "recovery")
+# These existing native readers report different subjects, not competing
+# answers to one question. Unknown producers retain conservative comparison.
+_OUTPOST_RESPONSIBILITIES = frozenset({"OUTPOST_WATCHDOG", "OUTPOST_VITALITY_CHRONOLOGY", "OUTPOST_CONSTITUTIONAL_REGISTRY"})
 _SECRET_KEYS = {"authorization", "cookie", "credential", "credentials", "password", "private_key", "secret", "token", "access_token", "refresh_token"}
 
 
@@ -96,9 +99,18 @@ def aggregate_vitals(sources: Mapping[str, Sequence[Mapping[str, Any]]], *, curr
         # No canonical producer TTL is specified. Bind the boot and timestamps
         # without asserting quantitative freshness from a matching boot alone.
         rendered = [{**item, "freshness": "INVALID_FUTURE" if item["observed_at"] > generated_at else "CURRENT_BOOT_ATTRIBUTABLE" if item["boot_id"] == current_boot_id else "STALE"} for item in observations]
-        claims = {item["claim"] for item in rendered if item["freshness"] == "CURRENT_BOOT_ATTRIBUTABLE"}
-        views = {_canonical(item["payload"]) for item in rendered if item["freshness"] == "CURRENT_BOOT_ATTRIBUTABLE"}
-        state = "UNKNOWN" if not claims else ("OBSERVED" if len(claims) == 1 and len(views) == 1 else "DISAGREEMENT")
-        sections[perspective] = {"state": state, "claim": next(iter(claims)) if state == "OBSERVED" else None, "producer_count": len(rendered), "current_producer_count": sum(item["freshness"] == "CURRENT_BOOT_ATTRIBUTABLE" for item in rendered), "perspectives": rendered}
+        current = [item for item in rendered if item["freshness"] == "CURRENT_BOOT_ATTRIBUTABLE"]
+        groups: dict[str, list[dict[str, Any]]] = {}
+        separate_roles = perspective == "outpost" and all(item["producer"] in _OUTPOST_RESPONSIBILITIES for item in current)
+        for item in current:
+            groups.setdefault(item["producer"] if separate_roles else perspective, []).append(item)
+        disagreement = any(len({item["claim"] for item in group}) != 1
+                           or len({_canonical(item["payload"]) for item in group}) != 1
+                           for group in groups.values())
+        state = "UNKNOWN" if not current else "DISAGREEMENT" if disagreement else "OBSERVED"
+        # OBSERVED is evidence availability, never health or admission. Keep
+        # unlike role claims on their producers rather than inventing one PASS.
+        claim = current[0]["claim"] if state == "OBSERVED" and len(groups) == 1 else None
+        sections[perspective] = {"state": state, "claim": claim, "producer_count": len(rendered), "current_producer_count": len(current), "perspectives": rendered}
     body = {"schema": SCHEMA, "current_boot_id": current_boot_id, "generated_at": generated_at, "sections": sections, "authority_effect": "NONE", "admission_effect": "NONE", "mutation_effect": "NONE"}
     return {**body, "projection_digest": _digest(body)}

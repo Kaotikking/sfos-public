@@ -25,6 +25,47 @@ def test_matching_claim_labels_cannot_hide_different_current_payloads():
     assert section["state"]=="DISAGREEMENT" and section["claim"] is None
     assert [row["payload"] for row in section["perspectives"]]==[row["payload"] for row in values]
 
+
+def outpost_roles():
+    return [source("outpost", "OUTPOST_WATCHDOG", "CURRENT_BOOT_WITNESS", host_witness="CURRENT"),
+            source("outpost", "OUTPOST_VITALITY_CHRONOLOGY", "CHRONOLOGY_OBSERVED", event_count=3),
+            source("outpost", "OUTPOST_CONSTITUTIONAL_REGISTRY", "HOLD_INTENTIONAL", admission="DENIED")]
+
+
+def test_distinct_outpost_responsibilities_are_not_contradictory_observations():
+    values = outpost_roles()
+    section = aggregate_vitals({"outpost": values}, current_boot_id=BOOT, generated_at=2.0)["sections"]["outpost"]
+    assert section["state"] == "OBSERVED"
+    # There is no single aggregate health/admission claim across these roles.
+    assert section["claim"] is None
+    assert [row["payload"] for row in section["perspectives"]] == [row["payload"] for row in values]
+    from outpost.http_readonly import html_body
+    page = html_body(aggregate_vitals({"outpost": values}, current_boot_id=BOOT, generated_at=2.0)).decode()
+    assert "State: DISAGREEMENT" not in page
+    for value in values:
+        assert "Source: " + value["producer"] in page
+        assert "Claim: " + value["claim"] in page
+    assert "Admission: NOT PROVEN" in page and "No mutation controls are exposed" in page
+
+
+@pytest.mark.parametrize("claim,payload", [("DEGRADED", {"host_witness": "STALE_OR_UNAVAILABLE"}),
+                                         ("CURRENT_BOOT_WITNESS", {"host_witness": "STALE_OR_UNAVAILABLE"})])
+def test_same_outpost_responsibility_conflict_stays_visible(claim, payload):
+    values = outpost_roles() + [source("outpost", "OUTPOST_WATCHDOG", claim, **payload)]
+    section = aggregate_vitals({"outpost": values}, current_boot_id=BOOT, generated_at=2.0)["sections"]["outpost"]
+    assert section["state"] == "DISAGREEMENT" and section["claim"] is None
+    assert len(section["perspectives"]) == 4
+    from outpost.http_readonly import html_body
+    page = html_body(aggregate_vitals({"outpost": values}, current_boot_id=BOOT, generated_at=2.0)).decode()
+    assert "State: DISAGREEMENT" in page
+    assert "Claim: " + claim in page and "Claim: CURRENT_BOOT_WITNESS" in page
+
+
+def test_unknown_outpost_producer_cannot_escape_conflict_detection():
+    values = outpost_roles() + [source("outpost", "UNKNOWN_PRODUCER", "PASS")]
+    section = aggregate_vitals({"outpost": values}, current_boot_id=BOOT, generated_at=2.0)["sections"]["outpost"]
+    assert section["state"] == "DISAGREEMENT"
+
 def test_budget_is_a_real_producer_slot_and_stale_claims_do_not_project():
     stale = source("budget", "BUDGET_LEDGER", "GREEN", boot_id="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee")
     section = aggregate_vitals({"budget": [stale]}, current_boot_id=BOOT, generated_at=2.0)["sections"]["budget"]

@@ -203,6 +203,8 @@ def test_actual_producer_pipeline_reaches_independent_presentation_socket(tmp_pa
                                  "chronology_failed": "FIRST_BOOT_OBSERVED"}
                 assert value["sections"]["host"]["claim"] == expected_host[host_condition]
                 rows = {row["producer"]:row for row in value["sections"]["outpost"]["perspectives"]}
+                assert value["sections"]["outpost"]["state"] == "OBSERVED"
+                assert value["sections"]["outpost"]["claim"] is None
                 assert rows["OUTPOST_WATCHDOG"]["claim"] == (
                     "CURRENT_BOOT_WITNESS" if host_condition == "healthy" else "DEGRADED")
                 history = rows["OUTPOST_VITALITY_CHRONOLOGY"]
@@ -223,6 +225,7 @@ def test_actual_producer_pipeline_reaches_independent_presentation_socket(tmp_pa
                 assert value["sections"]["domains"]["claim"] == "DENIED_HELD_SEED_CONTENT"
             else:
                 assert b"<title>Serein Vitals</title>" in body
+                assert b"State: DISAGREEMENT" not in body
                 assert b"held, not admitted" in body
                 assert (b"CHRONOLOGY_UNAVAILABLE" if host_condition == "chronology_failed" else b"CHRONOLOGY_OBSERVED") in body
                 assert (b"CURRENT_BOOT_WITNESS" if host_condition == "healthy" else b"DEGRADED") in body

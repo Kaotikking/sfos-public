@@ -196,8 +196,8 @@
     },
     {
       "path": "outpost/outpost/vitals_aggregation.py",
-      "bytes": 6062,
-      "sha256": "4110e1ba8ab37cf8eaf20c811ba44e8675d9947e865def16c3d50dec7537d826"
+      "bytes": 6848,
+      "sha256": "362d6cf067b456ab67cabd22f0143789a10c36266964496c6e5f87af9d9585ec"
     },
     {
       "path": "outpost/outpost/vitals_edge.py",
@@ -217,7 +217,7 @@
     {
       "path": "outpost/release-manifest.json",
       "bytes": 9361,
-      "sha256": "011f51d366b5be68aff779b5ab213db46d986b0517b2e0d294a85899149ef40f"
+      "sha256": "038713c98e0bc01f8ef9274a6abad10bd003c0127b9790d53c220c8f6d67af89"
     },
     {
       "path": "outpost/systemd/serein-https-gateway-adapter.service",
@@ -336,13 +336,13 @@
     },
     {
       "path": "outpost/tests/test_service.py",
-      "bytes": 20931,
-      "sha256": "a90b076ffc679c781dcef3f05bcee2b27143649dbea4df7dacd6712744826a17"
+      "bytes": 21133,
+      "sha256": "14851e99dbbc14fdadba8f645bb237dedd9d5d0cb57fb6423a13f65d12437884"
     },
     {
       "path": "outpost/tests/test_vitals_aggregation.py",
-      "bytes": 4432,
-      "sha256": "33930ed61cc784896282dde51b7565982c399c7e7d85e622d97e65727c1cd233"
+      "bytes": 6866,
+      "sha256": "ee4fd438e3b12b8050f1782736a3fe147128de141f6681894426cd884eee709e"
     },
     {
       "path": "outpost/tests/test_vitals_edge.py",
@@ -365,5 +365,5 @@
       "sha256": "1f2c365c369b3fd3257044925e14b7a471bdcec4a9fafdadf0cfaad09346f8b7"
     }
   ],
-  "self_digest": "sha256:a0cf480140e470f00ddbe0f0f0e48e4c933772f59e15be54ba28a124f7904431"
+  "self_digest": "sha256:f6e54ba9595433a095af18380b50196103db3f16b2e2314124f5024d8933aee0"
 }
