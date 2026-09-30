@@ -15,7 +15,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/usr/libexec/serein/outpost-generation-launcher outpost/service.py --host-vitality-root /var/lib/serein-outpost/host-vitality
 CapabilityBoundingSet=
 AmbientCapabilities=
-StateDirectory=serein-outpost/coordinator
+StateDirectory=serein-outpost/coordinator serein-outpost/watchdog serein-outpost/vitals-producers serein-outpost/recovery
 StateDirectoryMode=0750
 NoNewPrivileges=yes
 PrivateTmp=yes

@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "outpost-local-source-only-incomplete",
+  "generation": "G3",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -85,8 +85,8 @@
     },
     {
       "path": "outpost/service.py",
-      "bytes": 11915,
-      "sha256": "1162bcc2c5c1b2660acdee9d1461cfe7235996661ad358e3f86b9ec1b55c761e"
+      "bytes": 12145,
+      "sha256": "a924cababb0c5b3eead1e7a7edfbf5ab43b16260b9840be2db6e3a8d0252cc3a"
     },
     {
       "path": "outpost/vitals_aggregation.py",
@@ -125,8 +125,8 @@
     },
     {
       "path": "systemd/serein-outpost.service",
-      "bytes": 1003,
-      "sha256": "482b522f64f6afb57db11c6933b9a34e0246620efba1a63fc088f39f16b63c2c"
+      "bytes": 1083,
+      "sha256": "d147804e0768ba317fbce4886088f5f3a3b88bb3525e5c96dcca50354e634fd2"
     },
     {
       "path": "systemd/serein-outpost.target",
@@ -232,8 +232,8 @@
     },
     {
       "path": "tests/test_service.py",
-      "bytes": 17431,
-      "sha256": "2de6cc644fd9158e7995a5c579c509fdfc08c1165997c35550abc5aba19dc965"
+      "bytes": 20931,
+      "sha256": "a90b076ffc679c781dcef3f05bcee2b27143649dbea4df7dacd6712744826a17"
     },
     {
       "path": "tests/test_vitals_aggregation.py",
@@ -284,5 +284,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:7cde3690c0d9d789c80116e2c24f02e88be4557eae0d2b3c7dce02230ff7ce93"
+  "self_digest": "sha256:890f32b30065ed19d0098b967bb273a3685d30898576f7ed1b23287911a3b26e"
 }

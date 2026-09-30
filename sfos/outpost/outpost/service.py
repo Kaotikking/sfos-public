@@ -21,6 +21,7 @@ from typing import Any
 from .constitutional_registry import DOMAIN_ORDER, registry_snapshot
 from .host_vitality import BOOT, HostVitalityStore, HostCollectionAttempts, host_attempt_matches
 from .vitals_aggregation import validate_producer
+from .watchdog import witness_once
 
 # Observation grammar from canonical domain_postinstall.py; no installer,
 # service-start, rollback or self-admission behavior is imported.
@@ -205,6 +206,9 @@ def run_coordinator(*, host_root: Path, state_path: Path, boot_id_path: Path,
     while not stop.is_set():
         state = coordinator_witness(host_root=host_root, state_path=state_path,
                                     boot_id_path=boot_id_path)
+        witness_once(state_root=state_path.parent.parent / "watchdog",
+                     host_root=host_root, boot_id_path=boot_id_path,
+                     observed_at=state["observed_at"])
         _notify("READY=1\nWATCHDOG=1\nSTATUS=" + state["host_gate"])
         stop.wait(5.0)
 

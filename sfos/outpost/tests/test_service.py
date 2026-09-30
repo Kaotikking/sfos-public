@@ -111,6 +111,10 @@ def test_native_coordinator_loop_publishes_before_notify_without_host_or_admissi
                                 tmp_path/"domains/state.json", tmp_path/"recovery/current.json")
     snapshot = runtime.snapshot(current_boot_id=BOOT)
     assert snapshot["sections"]["domains"]["claim"] == "DENIED_HELD_SEED_CONTENT"
+    producers = {row["producer"]: row for row in snapshot["sections"]["outpost"]["perspectives"]}
+    assert producers["OUTPOST_WATCHDOG"]["claim"] == "DEGRADED"
+    assert producers["OUTPOST_VITALITY_CHRONOLOGY"]["claim"] == "CHRONOLOGY_OBSERVED"
+    assert producers["OUTPOST_VITALITY_CHRONOLOGY"]["payload"]["event_count"] == 2
 
 
 def test_coordinator_loop_failure_never_sends_ready_or_watchdog(tmp_path, monkeypatch):
@@ -123,27 +127,58 @@ def test_coordinator_loop_failure_never_sends_ready_or_watchdog(tmp_path, monkey
                                 boot_id_path=tmp_path/"boot")
 
 
-@pytest.mark.parametrize("host_condition", ["missing", "failed_after_success"])
+def test_producer_failure_prevents_ready_notification(tmp_path, monkeypatch):
+    from outpost import service
+    boot = tmp_path / "boot"
+    boot.write_text(BOOT)
+    def failed(**_):
+        raise OSError("injected watchdog producer failure")
+    monkeypatch.setattr(service, "witness_once", failed)
+    monkeypatch.setattr(service, "_notify", lambda _: pytest.fail("No ready after producer failure"))
+    with pytest.raises(OSError, match="watchdog producer failure"):
+        service.run_coordinator(host_root=tmp_path/"host", state_path=tmp_path/"coordinator/current.json",
+                                boot_id_path=boot)
+
+
+def test_coordinator_declares_only_its_unprivileged_evidence_directories():
+    from pathlib import Path
+    unit = (Path(__file__).resolve().parents[1]/"systemd/serein-outpost.service").read_text()
+    directories = next(line.partition("=")[2].split() for line in unit.splitlines()
+                       if line.startswith("StateDirectory="))
+    assert directories == ["serein-outpost/coordinator", "serein-outpost/watchdog",
+                           "serein-outpost/vitals-producers", "serein-outpost/recovery"]
+    for setting in ("User=serein-outpost", "Group=serein-outpost", "NoNewPrivileges=yes",
+                    "ProtectSystem=strict", "CapabilityBoundingSet=", "AmbientCapabilities="):
+        assert setting in unit.splitlines()
+    assert not any(line.startswith(("ExecStart=+", "ExecStart=!", "ReadWritePaths="))
+                   for line in unit.splitlines())
+
+
+@pytest.mark.parametrize("host_condition", ["missing", "failed_after_success", "healthy", "chronology_failed"])
 def test_actual_producer_pipeline_reaches_independent_presentation_socket(tmp_path, monkeypatch, host_condition):
     """Real local producer files/socket, not canonical TLS/public installation."""
     import threading
     from outpost import service, presentation_service, vitals_edge
-    from outpost.watchdog import witness_once
     boot = tmp_path/"boot"
     boot.write_text(BOOT)
-    if host_condition == "failed_after_success":
+    if host_condition != "missing":
         produce(tmp_path, completed=True)
+    if host_condition == "failed_after_success":
         attempts = HostCollectionAttempts(tmp_path/"host")
         identifier = attempts.start(BOOT, 3.0)
         attempts.finish(identifier, 4.0, error_code="DEBIAN_INRELEASE_SIGNATURE_DENIED")
+    if host_condition == "chronology_failed":
+        watchdog_root = tmp_path/"watchdog"
+        watchdog_root.mkdir()
+        (watchdog_root/"chronology.jsonl").write_text("injected malformed chronology\n")
+    healthy_host = host_condition in {"healthy", "chronology_failed"}
     stop = threading.Event()
     def notify(message):
-        assert message.endswith("HOST_GATE_UNAVAILABLE")
+        assert message.endswith("CURRENT_BOOT_OBSERVED" if healthy_host else "HOST_GATE_UNAVAILABLE")
         stop.set()
     monkeypatch.setattr(service, "_notify", notify)
     service.run_coordinator(host_root=tmp_path/"host", state_path=tmp_path/"coordinator/current.json",
                             boot_id_path=boot, stop=stop)
-    witness_once(state_root=tmp_path/"watchdog", host_root=tmp_path/"host", boot_id_path=boot)
     runtime = VitalsRuntimeStore(tmp_path/"host", tmp_path/"vitals-producers",
                                 tmp_path/"domains/state.json", tmp_path/"recovery/current.json")
     address = tmp_path/"s"
@@ -162,16 +197,35 @@ def test_actual_producer_pipeline_reaches_independent_presentation_socket(tmp_pa
             assert not worker.is_alive() and status == 200
             if accept == "application/json":
                 value = json.loads(body)
-                assert value["sections"]["host"]["claim"] == (
-                    "HOST_WITNESS_UNAVAILABLE" if host_condition == "missing" else "HOST_COLLECTION_FAILED")
+                expected_host = {"missing": "HOST_WITNESS_UNAVAILABLE",
+                                 "failed_after_success": "HOST_COLLECTION_FAILED",
+                                 "healthy": "FIRST_BOOT_OBSERVED",
+                                 "chronology_failed": "FIRST_BOOT_OBSERVED"}
+                assert value["sections"]["host"]["claim"] == expected_host[host_condition]
                 rows = {row["producer"]:row for row in value["sections"]["outpost"]["perspectives"]}
-                assert rows["OUTPOST_WATCHDOG"]["claim"] == "DEGRADED"
-                assert rows["OUTPOST_VITALITY_CHRONOLOGY"]["payload"]["event_count"] >= 1
-                assert value["admission_effect"] == "NONE" and not vitals_edge._ready(body)
+                assert rows["OUTPOST_WATCHDOG"]["claim"] == (
+                    "CURRENT_BOOT_WITNESS" if host_condition == "healthy" else "DEGRADED")
+                history = rows["OUTPOST_VITALITY_CHRONOLOGY"]
+                assert history["claim"] == (
+                    "CHRONOLOGY_UNAVAILABLE" if host_condition == "chronology_failed" else "CHRONOLOGY_OBSERVED")
+                if host_condition == "chronology_failed":
+                    assert history["payload"] == {"status": "UNAVAILABLE"}
+                else:
+                    assert history["payload"]["event_count"] >= 1
+                coordinator = json.loads((tmp_path/"coordinator/current.json").read_text())
+                for producer in (rows["OUTPOST_WATCHDOG"], history):
+                    assert producer["boot_id"] == coordinator["boot_id"] == BOOT
+                    assert producer["observed_at"] == coordinator["observed_at"]
+                    assert producer["freshness"] == "CURRENT_BOOT_ATTRIBUTABLE"
+                assert value["admission_effect"] == "NONE"
+                # Edge Host readiness is separate from Kernel/Stage-1 admission.
+                assert vitals_edge._ready(body) is healthy_host
                 assert value["sections"]["domains"]["claim"] == "DENIED_HELD_SEED_CONTENT"
             else:
                 assert b"<title>Serein Vitals</title>" in body
                 assert b"held, not admitted" in body
+                assert (b"CHRONOLOGY_UNAVAILABLE" if host_condition == "chronology_failed" else b"CHRONOLOGY_OBSERVED") in body
+                assert (b"CURRENT_BOOT_WITNESS" if host_condition == "healthy" else b"DEGRADED") in body
     assert not (tmp_path/"domains").exists()
 
 
