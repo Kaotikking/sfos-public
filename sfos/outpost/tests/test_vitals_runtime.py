@@ -6,7 +6,7 @@ from outpost.http_readonly import present
 from outpost.vitals_edge import _ready
 from outpost import vitals_edge
 from outpost.vitals_runtime import VitalsRuntimeStore
-from outpost.reboot_vitality import classify_reboot, _digest
+from outpost.reboot_vitality import classify_reboot, _digest, VitalityChronology
 from outpost.vitals_aggregation import producer_observation
 from tests.active_host import active_host
 from tests.test_reboot_vitality import observation as reboot_observation
@@ -14,6 +14,54 @@ from tests.test_reboot_vitality import intent as reboot_intent
 
 
 BOOT = "11111111-2222-4333-8444-555555555555"
+
+
+def chronology_checkpoint(tmp_path, *, advance=False, corruption=None):
+    producers = tmp_path / "vitals-producers"
+    producers.mkdir()
+    chronology = VitalityChronology(tmp_path / "watchdog/chronology.jsonl")
+    chronology.append("first", "OUTPOST_WATCHDOG", "SEREIN_HOST", 1.0,
+                      {"boot_id": BOOT, "observed_at": 1.0})
+    checkpoint = chronology.read()[0]
+    payload = {"event_count": 1, "latest_event": checkpoint}
+    boot, observed, reference = BOOT, 1.0, "chronology:" + checkpoint["event_hash"]
+    if advance:
+        chronology.append("second", "OUTPOST_WATCHDOG", "SEREIN_HOST", 2.0,
+                          {"boot_id": BOOT, "observed_at": 2.0})
+    if corruption == "zero": payload["event_count"] = 0
+    elif corruption == "bool": payload["event_count"] = True
+    elif corruption == "forward": payload["event_count"] = 3
+    elif corruption == "event": payload["latest_event"] = {**checkpoint, "event_id": "forged"}
+    elif corruption == "reference": reference = "chronology:" + "0" * 64
+    elif corruption == "boot": boot = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    elif corruption == "time": observed = 2.0
+    elif corruption == "tail":
+        with chronology.path.open("ab") as stream: stream.write(b"broken")
+    value = producer_observation(perspective="outpost", producer="OUTPOST_VITALITY_CHRONOLOGY",
+        claim="CHRONOLOGY_OBSERVED", observed_at=observed, boot_id=boot,
+        evidence_ref=reference, payload=payload)
+    (producers / "outpost-chronology.json").write_text(json.dumps(value))
+    runtime = VitalsRuntimeStore(tmp_path / "host", producers, tmp_path / "domains", tmp_path / "recovery")
+    return runtime, value
+
+
+@pytest.mark.parametrize("advance", [False, True])
+def test_chronology_checkpoint_survives_concurrent_append(tmp_path, advance):
+    runtime, expected = chronology_checkpoint(tmp_path, advance=advance)
+    actual = next(row for row in runtime._producers(BOOT, 3.0)["outpost"]
+                  if row["producer"] == "OUTPOST_VITALITY_CHRONOLOGY")
+    assert actual == expected
+    assert actual["payload"]["event_count"] == 1
+    assert actual["observed_at"] == 1.0
+
+
+@pytest.mark.parametrize("corruption", ["zero", "bool", "forward", "event", "reference", "boot", "time", "tail"])
+@pytest.mark.parametrize("advance", [False, True])
+def test_chronology_checkpoint_rejects_invalid_binding(tmp_path, corruption, advance):
+    runtime, _ = chronology_checkpoint(tmp_path, advance=advance, corruption=corruption)
+    actual = next(row for row in runtime._producers(BOOT, 3.0)["outpost"]
+                  if row["producer"] == "OUTPOST_VITALITY_CHRONOLOGY")
+    assert actual["claim"] == "PRODUCER_EVIDENCE_UNAVAILABLE"
 
 
 def test_file_producer_cannot_impersonate_reserved_host_witness(tmp_path):
