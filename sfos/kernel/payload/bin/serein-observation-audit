@@ -1,0 +1,5 @@
+#!/usr/bin/python3
+from pathlib import Path
+from serein_stage1.audit import serve
+
+serve(Path("/var/lib/serein/common/stage1-continuity/audit.jsonl"))

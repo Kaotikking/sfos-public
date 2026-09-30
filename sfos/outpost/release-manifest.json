@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G4",
+  "generation": "G5",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -15,8 +15,8 @@
     },
     {
       "path": "install/kernel_first_install_runner.py",
-      "bytes": 19577,
-      "sha256": "7f7bb187e80e9894c7e579538dd7e6de37131bb92b9982adc523896509c94f06"
+      "bytes": 36263,
+      "sha256": "f843f4dde2cae488ca0ef4f0d2f377b9a18f9cc4c8c5c770cb6ff59ab59b5849"
     },
     {
       "path": "install/public_generation_transaction.py",
@@ -67,6 +67,11 @@
       "path": "outpost/http_readonly.py",
       "bytes": 14460,
       "sha256": "00a5e9d961fb1d039d217ba05a929deb3db295237f016be10e84ccd119c7325c"
+    },
+    {
+      "path": "outpost/kernel_direct_witness.py",
+      "bytes": 15570,
+      "sha256": "6161f97994ab783766a53088397e01d409d786fc7a7829459fbdd0de2ed95f79"
     },
     {
       "path": "outpost/presentation_service.py",
@@ -201,9 +206,14 @@
       "sha256": "efb4e4750b4f32c2106ca172ac532763482997b2608fcf2ecb219e1ac69f61d1"
     },
     {
+      "path": "tests/test_kernel_direct_witness.py",
+      "bytes": 18957,
+      "sha256": "7e19f6fdd290b3579e33a7c652970d8058408c0ed9965e502da8a76b7e498c98"
+    },
+    {
       "path": "tests/test_kernel_first_install_runner.py",
-      "bytes": 8755,
-      "sha256": "661710d2acdbf17a25f942f7657eb0ec1ab6f1bf8bf6c768dae886689a57be78"
+      "bytes": 35269,
+      "sha256": "de6173f3cd058e84d583a8cc280abcf16bf94b1c986f10f66d47310d5b26642e"
     },
     {
       "path": "tests/test_media_build.py",
@@ -284,5 +294,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:e8e1a193f368f37e401dc7ec94e53ebbc78eb53ea93bb09270718f2a057038aa"
+  "self_digest": "sha256:be508d74c2d4f2e0c624275e805f8ba135e5a5df5a03e99e894e838d0db4a3cf"
 }

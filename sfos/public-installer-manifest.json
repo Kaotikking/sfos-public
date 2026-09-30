@@ -121,8 +121,8 @@
     },
     {
       "path": "outpost/install/kernel_first_install_runner.py",
-      "bytes": 19577,
-      "sha256": "7f7bb187e80e9894c7e579538dd7e6de37131bb92b9982adc523896509c94f06"
+      "bytes": 36263,
+      "sha256": "f843f4dde2cae488ca0ef4f0d2f377b9a18f9cc4c8c5c770cb6ff59ab59b5849"
     },
     {
       "path": "outpost/install/public_generation_transaction.py",
@@ -175,6 +175,11 @@
       "sha256": "00a5e9d961fb1d039d217ba05a929deb3db295237f016be10e84ccd119c7325c"
     },
     {
+      "path": "outpost/outpost/kernel_direct_witness.py",
+      "bytes": 15570,
+      "sha256": "6161f97994ab783766a53088397e01d409d786fc7a7829459fbdd0de2ed95f79"
+    },
+    {
       "path": "outpost/outpost/presentation_service.py",
       "bytes": 4312,
       "sha256": "a27befa08644f3b7ab23766065d29c7cbbe7f0c6f6df4b26c07e35a08e87468e"
@@ -216,8 +221,8 @@
     },
     {
       "path": "outpost/release-manifest.json",
-      "bytes": 9361,
-      "sha256": "038713c98e0bc01f8ef9274a6abad10bd003c0127b9790d53c220c8f6d67af89"
+      "bytes": 9701,
+      "sha256": "e622d8ca225b9c84d9bf5fe81b09595a8247c697cec2637a1cc21404758e9450"
     },
     {
       "path": "outpost/systemd/serein-https-gateway-adapter.service",
@@ -305,9 +310,14 @@
       "sha256": "efb4e4750b4f32c2106ca172ac532763482997b2608fcf2ecb219e1ac69f61d1"
     },
     {
+      "path": "outpost/tests/test_kernel_direct_witness.py",
+      "bytes": 18957,
+      "sha256": "7e19f6fdd290b3579e33a7c652970d8058408c0ed9965e502da8a76b7e498c98"
+    },
+    {
       "path": "outpost/tests/test_kernel_first_install_runner.py",
-      "bytes": 8755,
-      "sha256": "661710d2acdbf17a25f942f7657eb0ec1ab6f1bf8bf6c768dae886689a57be78"
+      "bytes": 35269,
+      "sha256": "de6173f3cd058e84d583a8cc280abcf16bf94b1c986f10f66d47310d5b26642e"
     },
     {
       "path": "outpost/tests/test_media_build.py",
@@ -365,5 +375,5 @@
       "sha256": "1f2c365c369b3fd3257044925e14b7a471bdcec4a9fafdadf0cfaad09346f8b7"
     }
   ],
-  "self_digest": "sha256:f6e54ba9595433a095af18380b50196103db3f16b2e2314124f5024d8933aee0"
+  "self_digest": "sha256:4a5055621fd88dcf9aac15014c3959f21b14aa94cb88c214ad625606655a2a69"
 }

@@ -1,0 +1,217 @@
+{
+  "schema": "SereinPortableKernelRelease/v1",
+  "classification": "PUBLIC_KERNEL_COMPANION_FOUNDATION_INACTIVE",
+  "source_basis": {
+    "public_parent": "b43cfde96e65658da1bc651a0eb3659dc5c860bb",
+    "public_tree": "09a3263d46c6ba5e7659f2d71fc42a5196e1bb6a",
+    "donor_commit": "0dca6bd7a22b83b04ddf353df901d2c7ea15c294",
+    "definition": [
+      "PRO-132",
+      "PRO-120",
+      "PRO-142",
+      "PRO-116",
+      "PRO-180"
+    ]
+  },
+  "branch_order": [
+    "AUTHORITY",
+    "OPERATIONS",
+    "INTERFACE"
+  ],
+  "payload": [
+    [
+      "payload/bin/serein-conversation-runtime",
+      81,
+      "a16fda57f756059ff3f29f7763f7e0f755f1136fa1aa0cc38f15a9fa62b92117",
+      "0755"
+    ],
+    [
+      "payload/bin/serein-kernel-branch-api",
+      736,
+      "727310054d674b10c5df27b725bcd636482408bb54a21d4a8ea3b2890849c039",
+      "0755"
+    ],
+    [
+      "payload/bin/serein-observation-audit",
+      151,
+      "ec085cc64882f8b070eb298a0bb1c2444802f3c102a8378ec22c7c91f4d45178",
+      "0755"
+    ],
+    [
+      "payload/runtime/replay_store.py",
+      15083,
+      "19a86b878901106969730811fe276a8f531cfaea2d471f1cb625fc883174865c",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/__init__.py",
+      143,
+      "4cf9a1bcf36f53fc71dc52a5bd8fab2496fb89111a2309ca64fbb5d51a56eb50",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/audit.py",
+      2073,
+      "5d250806d86d3cc806366faf2c4f92ac6737c87617b1c29dea3c4ceb5c9fa276",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/authority-proof-contract.v1.json",
+      1344,
+      "c0aad8ace45e05915622f68a8d8585b7d89869c6f66a6ba4497a75245da0c665",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/authority_boot.py",
+      26921,
+      "971bbff4449c7f3e0e95b0bc54cc75380e3e4d37f938e8eb9afa47d2e607cf8e",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/companion_provider.py",
+      6947,
+      "a4cdfd3d6c97ba745c7a26e1e53188b5e4381843059e09e4794837efe6958c52",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/conversation_runtime.py",
+      4362,
+      "7fba4dba3c518221268225cc9f0296b28d403f1c08a268754c66cb58555d6a82",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/core_attachments.py",
+      1606,
+      "ba16b3ac1239da5c45d447fb8435e6c1e7636bca9e8091095fee07b07aab8706",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/domain_identity.py",
+      10104,
+      "71198c02b1138987b530c0dad920bb9c355557d0d88140b7f14ab4214831b5ea",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/engineering-dictionary.v3.md",
+      8344,
+      "af63410c75f83d0737d4d5ff2cd225879e2b2732bdefe29a3ea9113605dac438",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/gpu_control.py",
+      2405,
+      "bb021cfd1ed223ce9e96569c25cadb053f23e5445b64a97519824c78bde29817",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/kernel-api-blueprint.pro180.md",
+      13348,
+      "460fd7a1a3126e7745a8548fa4ae7ba2e10b11d8e7992cf9e9f2b1b61276c623",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/kernel-seed.v1.json",
+      3669,
+      "4f1ce883e175dd7df04086c6a6c48ef00bd98df45700222ec2c85498291c98ef",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/kernel.py",
+      16632,
+      "5c24512dd9aba3503f6c696589adbfb6a6b7c7f6f4974ec93396cad36a7aa7a5",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/kernel_branch_api.py",
+      7636,
+      "8e365c762965ca15c13e03eea2070a79f9d5d5481c721a57b779817893b03e66",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/kernel_operations.py",
+      18846,
+      "47ce4c9fb7874ed5aab95d64b9dfcb8b52083cb79b4173afec3998bf50e2b5c2",
+      "0644"
+    ],
+    [
+      "payload/serein_stage1/supervision.py",
+      2726,
+      "4a8c66230591aefe4db07efed9717bf02d566f1c15375d0c6dc08d09397334b5",
+      "0644"
+    ],
+    [
+      "payload/systemd/serein-conversation-runtime.socket",
+      206,
+      "4561109b082b0ad2b0716f3070c43fa5eda868cc004ade5f55bb11e2f0a3b44e",
+      "0644"
+    ],
+    [
+      "payload/systemd/serein-kernel-authority-api.service",
+      261,
+      "aa4407fc81b00d623cab7faf488b62fdb3a1510f9694dfe8fe3be5370bd70128",
+      "0644"
+    ],
+    [
+      "payload/systemd/serein-kernel-authority-api.socket",
+      249,
+      "837a4d9abd7ece883ebcbb78f70709c23c6e0a657f2be9f03c7e894eb6587ed2",
+      "0644"
+    ],
+    [
+      "payload/systemd/serein-observation-audit.service",
+      459,
+      "5686eef940bcdea43d258c0a69f581f364abbfe6ff6a6fad58786b9776fb4c71",
+      "0644"
+    ],
+    [
+      "payload/systemd/serein-observation-audit.socket",
+      204,
+      "d673394ad9a38086b207548de77990c87bcd5138712bd3a5af209d9c37a38503",
+      "0644"
+    ]
+  ],
+  "payload_digest": "sha256:fddd477cd44fadd117a8f59fd9fae46543f274c9cf330a9952e85dde00a83324",
+  "install_denominator_digest": "sha256:6075275ffaeefdc53665ca63c12a70baa86f02ee2bb31975d33200630110667b",
+  "generated_secrets": [
+    "/var/lib/serein/kernel/authority/replay.key",
+    "/var/lib/serein/kernel/authority/domain-identity.pem"
+  ],
+  "secret_archive_entries": [],
+  "installer_files": [
+    [
+      "install/kernel_first_install.py",
+      30274,
+      "da3d7ac17520677a183603d6bc088c280326dbcda2deeeccf4665c9419932539",
+      "0755"
+    ],
+    [
+      "install/offline_ollama_transaction.py",
+      42313,
+      "9944fcc93675a9d06b0c0700902dc6487d37aa1721271407fccb27baec700eda",
+      "0755"
+    ]
+  ],
+  "stage1_order": [
+    "AUTHORITY",
+    "OPERATIONS",
+    "INTERFACE",
+    "GPU_CONTROL",
+    "OFFLINE_COMPANION",
+    "COGNITIVE_GATEWAY",
+    "OUTPOST_STAGE1_WITNESS"
+  ],
+  "later_core_attachments": [
+    "PLATFORM",
+    "ROOT",
+    "MEMORY",
+    "KNOWLEDGE",
+    "UI",
+    "AUDIO",
+    "PERSONALITY",
+    "MODULAR",
+    "CLOUD"
+  ],
+  "activation": "OUTPOST_ONLY_AFTER_INACTIVE_PROOF",
+  "admission_effect": "NONE",
+  "self_digest": "sha256:68aad31198e578e4a3667289a5e257323f5e0e47531bbad2d059ae2e4b4e46ea"
+}

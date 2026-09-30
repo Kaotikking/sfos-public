@@ -1,0 +1,44 @@
+{
+  "schema": "SereinKernelAuthorityProofContract/v1",
+  "identity": "KERNEL",
+  "branch": "AUTHORITY",
+  "version": "authority-candidate.1",
+  "source": {
+    "issues": [
+      "PRO-142",
+      "PRO-180"
+    ],
+    "controlling_date": "2026-09-26"
+  },
+  "blueprint_reference": {
+    "issue_id": "8d0407f6-ff86-4d14-ab5a-cf3d578cd0b6",
+    "identifier": "PRO-180",
+    "title": "SereinNet Kernel Domain API Blueprint — PRO-178 Conformance Consolidation",
+    "source_revision": "2026-09-04T21:12:23.438Z",
+    "source_serialization": "UTF-8 Linear issue description plus terminal LF",
+    "payload": "kernel-api-blueprint.pro180.md",
+    "sha256": "460fd7a1a3126e7745a8548fa4ae7ba2e10b11d8e7992cf9e9f2b1b61276c623"
+  },
+  "phase_a": [
+    "implementation-identity",
+    "blueprint-policy-integrity",
+    "frame-identity",
+    "contract-containment",
+    "authority-admission-policy",
+    "unknown-trust-safe-recovery"
+  ],
+  "branch_order": [
+    "AUTHORITY",
+    "OPERATIONS",
+    "INTERFACE"
+  ],
+  "default_decision": "DENY",
+  "cross_domain_access": "API_ONLY",
+  "private_state_access": "DENY",
+  "self_admission": false,
+  "unknown_trust": "SAFE_RECOVERY",
+  "route_admission": "INDEPENDENT_CURRENT_AUTHORITY_REQUIRED",
+  "recovery_ingress": "PRESERVE_OPERATOR_INSPECTION",
+  "authority_effect": "NONE",
+  "admission_effect": "NONE"
+}
