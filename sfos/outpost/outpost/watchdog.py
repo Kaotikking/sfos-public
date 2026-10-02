@@ -108,9 +108,13 @@ def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, 
             recovery = classify_reboot({**observation, "evidence_digest": digest(observation)})
             _write_atomic(state_root.parent / "recovery" / "current.json", recovery)
         event = chronology.append("watchdog:" + digest(state), "OUTPOST_WATCHDOG", "SEREIN_HOST", now, state)
-        rows = chronology.read()
+        # append() has validated the full chain and durably committed this
+        # exact event under its exclusive lock. A later read may observe a
+        # different writer's event; never attribute that event to this sample.
+        checkpoint = {key: value for key, value in event.items()
+                      if key != "append_disposition"}
         history_claim = "CHRONOLOGY_OBSERVED"
-        history_payload = {"event_count": len(rows), "latest_event": rows[-1]}
+        history_payload = {"event_count": checkpoint["sequence"], "latest_event": checkpoint}
         history_ref = "chronology:" + event["event_hash"]
     except (OSError, ValueError, TypeError, AttributeError, KeyError):
         state["watchdog_state"] = "DEGRADED"

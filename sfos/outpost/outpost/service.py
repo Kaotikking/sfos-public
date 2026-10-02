@@ -7,6 +7,7 @@ installer. An unbound observer is evidence, never generation acceptance.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import math
 import os
@@ -217,6 +218,9 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host-vitality-root", required=True)
     args = parser.parse_args(argv)
+    # Preserve code locations on a fatal watchdog SIGABRT through the existing
+    # stderr/journal road. No local values, timer, heartbeat or recovery action.
+    faulthandler.enable(all_threads=False)
     run_coordinator(host_root=Path(args.host_vitality_root),
                     state_path=Path("/var/lib/serein-outpost/coordinator/current.json"),
                     boot_id_path=Path("/proc/sys/kernel/random/boot_id"))

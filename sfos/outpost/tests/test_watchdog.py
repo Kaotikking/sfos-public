@@ -114,6 +114,71 @@ def test_real_watchdog_output_reaches_vitals_and_chronology(tmp_path):
     assert not (tmp_path/"domains.json").exists()
 
 
+def test_chronology_publication_binds_own_append_not_a_later_writer(tmp_path, monkeypatch):
+    from outpost import watchdog, vitals_runtime
+    from outpost.reboot_vitality import VitalityChronology
+    boot = tmp_path / "boot"
+    boot.write_text(BOOT, encoding="ascii")
+    original_append = VitalityChronology.append
+    appended = []
+
+    def append_then_another_writer(self, event_id, event_kind, subject, observed_at, payload):
+        own = original_append(self, event_id, event_kind, subject, observed_at, payload)
+        appended.append(own)
+        original_append(self, "another-writer", event_kind, subject, observed_at + 1,
+                        {**payload, "observed_at": observed_at + 1})
+        return own
+
+    monkeypatch.setattr(VitalityChronology, "append", append_then_another_writer)
+    watchdog.witness_once(state_root=tmp_path/"watchdog", host_root=tmp_path/"host",
+                          boot_id_path=boot, observed_at=2.0)
+    producer = json.loads((tmp_path/"vitals-producers/outpost-chronology.json").read_bytes())
+    expected = {key: value for key, value in appended[0].items()
+                if key != "append_disposition"}
+    assert producer["payload"] == {"event_count": 1, "latest_event": expected}
+    assert producer["evidence_ref"] == "chronology:" + expected["event_hash"]
+    assert producer["observed_at"] == expected["observed_at"] == 2.0
+    assert len(VitalityChronology(tmp_path/"watchdog/chronology.jsonl").read()) == 2
+    monkeypatch.setattr(vitals_runtime.time, "time", lambda: 4.0)
+    runtime = VitalsRuntimeStore(tmp_path/"host", tmp_path/"vitals-producers",
+                                tmp_path/"domains.json", tmp_path/"recovery/current.json")
+    rows = runtime.snapshot(current_boot_id=BOOT)["sections"]["outpost"]["perspectives"]
+    actual = next(row for row in rows if row["producer"] == "OUTPOST_VITALITY_CHRONOLOGY")
+    assert actual["claim"] == "CHRONOLOGY_OBSERVED"
+    assert actual["payload"] == producer["payload"]
+
+
+def test_chronology_replay_preserves_exact_acknowledged_prefix(tmp_path, monkeypatch):
+    from outpost import vitals_runtime
+    from outpost.reboot_vitality import VitalityChronology
+    boot = tmp_path / "boot"
+    boot.write_text(BOOT, encoding="ascii")
+    arguments = dict(state_root=tmp_path/"watchdog", host_root=tmp_path/"host",
+                     boot_id_path=boot, observed_at=2.0)
+    state = witness_once(**arguments)
+    producer_path = tmp_path/"vitals-producers/outpost-chronology.json"
+    original_producer = producer_path.read_bytes()
+    chronology = VitalityChronology(tmp_path/"watchdog/chronology.jsonl")
+    chronology.append("later-writer", "OUTPOST_WATCHDOG", "SEREIN_HOST", 3.0,
+                      {**state, "observed_at": 3.0})
+    original_chain = chronology.path.read_bytes()
+
+    assert witness_once(**arguments) == state
+    assert chronology.path.read_bytes() == original_chain
+    assert producer_path.read_bytes() == original_producer
+    assert len(chronology.read()) == 2
+    producer = json.loads(original_producer)
+    assert producer["payload"]["event_count"] == 1
+    assert producer["observed_at"] == producer["payload"]["latest_event"]["observed_at"] == 2.0
+    monkeypatch.setattr(vitals_runtime.time, "time", lambda: 4.0)
+    runtime = VitalsRuntimeStore(tmp_path/"host", tmp_path/"vitals-producers",
+                                tmp_path/"domains.json", tmp_path/"recovery/current.json")
+    perspectives = runtime.snapshot(current_boot_id=BOOT)["sections"]["outpost"]["perspectives"]
+    actual = next(row for row in perspectives if row["producer"] == "OUTPOST_VITALITY_CHRONOLOGY")
+    assert actual["claim"] == "CHRONOLOGY_OBSERVED"
+    assert actual["payload"] == producer["payload"]
+
+
 @pytest.mark.parametrize("delayed_host", [False, True])
 def test_observed_boot_change_produces_recovery_witness_without_power_effect(tmp_path, delayed_host):
     boot = tmp_path / "boot"
