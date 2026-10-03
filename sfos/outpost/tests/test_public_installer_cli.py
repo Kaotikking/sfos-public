@@ -2,6 +2,8 @@
 import socket
 import os
 import stat
+from contextlib import contextmanager
+from types import SimpleNamespace
 import pytest
 from install import public_installer_cli as cli
 
@@ -108,6 +110,172 @@ def test_entry_binds_real_source_receipt_and_plan_before_target(entry_source):
     assert evidence["source_receipt"] == receipt
     assert evidence["result"] == "ENTRY_PREFLIGHT_ONLY_NOT_INSTALLED"
     assert evidence["mutation_effect"] == "NONE" and evidence["installed"] == "UNPROVEN"
+
+
+def test_restore_action_cannot_reuse_install_only_signed_plan(entry_source):
+    args, _, _, _, events = entry_source
+    args[1] = 'restore'
+    with pytest.raises(cli.TransactionError, match='RECOVERY_ACTION_PLAN_MISMATCH'):
+        cli.preflight_install_request(args)
+    assert events == ['plan']
+
+
+def test_restore_dispatch_does_not_enter_fresh_generation_placement(monkeypatch):
+    args = ['source', 'restore', '/', 'plan', 'a'*64, 'PINNED_PUBLIC_REPOSITORY', 'receipt']
+    expected = object()
+    monkeypatch.setattr(cli, 'restore_install_request', lambda actual: expected if actual == args else None)
+    monkeypatch.setattr(cli, 'prepare_install_request', lambda *_: pytest.fail('fresh placement forbidden'))
+    assert cli.install_request(args) is expected
+
+
+@pytest.fixture
+def retained_restore_entry(tmp_path, monkeypatch):
+    """Entry orchestration only; promotion/systemd/network remain synthetic."""
+    from install import public_generation_transaction as generation
+
+    rollback = tmp_path / 'var/lib/serein/rollback'
+    rollback.mkdir(parents=True, mode=0o755)
+    generation_root = tmp_path / 'usr/share/serein/outpost-generations' / ('7' * 64)
+    generation_root.mkdir(parents=True)
+    retained_file = generation_root / 'generation-inventory.json'
+    retained_file.write_bytes(b'retained-generation-bytes')
+    state = tmp_path / 'var/lib/serein-outpost/generation-state'
+    state.mkdir(parents=True)
+    current = state / 'current.json'
+    lkg = state / 'lkg.json'
+    current.write_bytes(b'original-current-selector\n')
+    lkg.write_bytes(b'original-lkg-selector\n')
+    protected = {path: path.read_bytes() for path in (retained_file, current, lkg)}
+
+    selector = {'generation': '7' * 64,
+                'predecessor_receipt_sha256': '8' * 64}
+    retained = {'selector': selector, 'generation': selector['generation'],
+                'mutation_effect': 'NONE'}
+    destination = {'target': '/usr/share/serein/outpost-generations/' + selector['generation'],
+                   'state': 'RETAINED', 'retained': retained,
+                   'source': {'fixture': 'signed-retained-source'}}
+    target = {'generation_destination': destination,
+              'bootstrap_prestate': {'fixture': 'bootstrap'},
+              'installed_prestate': {'fixture': 'selectors'}}
+    evidence = {'target_prestate': target, 'source_plan_sha256': '9' * 64}
+    fields = {'current_boot_id': '11111111-2222-4333-8444-555555555555',
+              'rollback_selector': '/var/lib/serein/rollback/outpost-public-generation-20261002T010203Z-aaaaaaaaaaaa',
+              'immutable_rows': [{'target': '/etc/serein/tls/serein-backend-cert.pem'}]}
+    plan = SimpleNamespace(encoded=b'exact-signed-plan', as_dict=lambda: fields)
+    args = ['source', 'restore', '/', 'plan', cli.sha(plan.encoded),
+            'PINNED_PUBLIC_REPOSITORY', 'receipt']
+    release, material = {'self_digest': 'sha256:' + 'a' * 64}, {'payload': b'exact'}
+    body = {'fixture': 'fresh-prestate'}
+    raw = b'{"fixture":"fresh-prestate"}\n'
+    receipt = {'path': fields['rollback_selector'] + '/prestate-receipt.json',
+               'sha256': cli.sha(raw)}
+    events = []
+
+    monkeypatch.setattr(cli.os, 'geteuid', lambda: 0)
+    monkeypatch.setattr(cli.os, 'getegid', lambda: 0)
+    monkeypatch.setattr(cli, 'prepare_install_request', lambda actual: (evidence, {}, {}) if actual == args else None)
+    monkeypatch.setattr(cli, 'recheck_prepared_target', lambda *_: plan)
+    monkeypatch.setattr(cli, '_load_plan', lambda *_: fields)
+    monkeypatch.setattr(cli, '_bootstrap_service_account', lambda: (991, 991))
+    real_lock = generation.public_generation_lock
+    @contextmanager
+    def bounded_lock(_root, digest, boot):
+        events.append(('lock', digest, boot))
+        with real_lock(tmp_path, digest, boot) as value:
+            yield value
+    monkeypatch.setattr(generation, 'public_generation_lock', bounded_lock)
+    monkeypatch.setattr(generation, 'capture_retained_material',
+                        lambda _root, observed: events.append(('retained', observed)) or (release, material))
+    monkeypatch.setattr(generation, 'bootstrap_candidate_precheck',
+                        lambda *_: {'result': 'G0_SOURCE_PREDICATES_PASS', 'selector': selector,
+                                    'source_plan_sha256': selector['predecessor_receipt_sha256'],
+                                    'constitution': {'result': 'fixture'}})
+    monkeypatch.setattr(generation, 'capture_bootstrap_predecessor',
+                        lambda *_: events.append('bootstrap-capture') or {'fixture': 'image'})
+    monkeypatch.setattr(generation, 'capture_selector_predecessor',
+                        lambda *_: events.append('selector-capture') or {'fixture': 'selector'})
+    monkeypatch.setattr(generation, 'prepared_prestate_receipt',
+                        lambda *_: events.append('fresh-prestate') or body)
+    monkeypatch.setattr(generation, '_target_prestate', lambda *_: {'fixture': 'immutable'})
+    monkeypatch.setattr(generation, '_verify_plan', lambda *_: plan)
+    monkeypatch.setattr(generation, 'load_prestate_signer', lambda *_: ('private', 'public'))
+    monkeypatch.setattr(generation, 'seal_prestate_receipt', lambda *_: raw)
+    monkeypatch.setattr(generation, 'persist_prestate_receipt',
+                        lambda *_: events.append(('receipt', receipt['path'])) or receipt)
+    monkeypatch.setattr(generation, 'seal_prepared_forward_state', lambda *_: b'forward')
+    monkeypatch.setattr(generation, 'prepared_forward_record',
+                        lambda *_args, **_kwargs: events.append('forward'))
+    monkeypatch.setattr(generation, 'retained_recovery_prestate', lambda *_args, **_kwargs: destination)
+    monkeypatch.setattr(generation, 'reread_prestate_receipt',
+                        lambda *_: events.append('receipt-readback'))
+    monkeypatch.setattr(generation, '_GenerationFileIO',
+                        lambda root, directory: SimpleNamespace(root=root, receipt_directory=directory))
+    return SimpleNamespace(args=args, generation=generation, events=events, selector=selector,
+                           retained=retained, protected=protected, receipt=receipt)
+
+
+def test_restore_entry_uses_locked_fresh_transaction_and_normal_promotion(retained_restore_entry, monkeypatch):
+    fixture = retained_restore_entry
+    generation = fixture.generation
+    witness = {'result': 'SUPPORTING_CURRENT_BOOT_WITNESS',
+               'witness': {'boot_id': '11111111-2222-4333-8444-555555555555',
+                           'generation_identity': fixture.selector}}
+    monkeypatch.setattr(generation, 'read_generation_witness', lambda *_args, **_kwargs: dict(witness))
+    monkeypatch.setattr(generation, 'read_vitals_witness',
+                        lambda **_kwargs: {'result': 'LOCAL_VITALS_JSON_HTML_OBSERVED',
+                                          'boot_id': witness['witness']['boot_id'],
+                                          'generation': fixture.selector['generation']})
+
+    def promotion(io, prepared, body, raw, private, public, precheck,
+                  invariants, accept, *, retained):
+        fixture.events.append(('promotion', prepared, retained, io.receipt_directory))
+        invariants()
+        observed = accept(fixture.selector, 0)
+        assert observed['vitals']['generation'] == fixture.selector['generation']
+        return {'result': 'RESTORED_CURRENT_BOOT_OBSERVED'}
+    monkeypatch.setattr(generation, '_complete_bootstrap_promotion', promotion)
+
+    assert cli.restore_install_request(fixture.args)['result'] == 'RESTORED_CURRENT_BOOT_OBSERVED'
+    names = [event[0] for event in fixture.events if isinstance(event, tuple)]
+    assert names[:3] == ['lock', 'retained', 'receipt']
+    assert names.count('retained') >= 2 and names.index('promotion') < names.index('retained', 2)
+    assert 'bootstrap-capture' in fixture.events and 'selector-capture' in fixture.events
+    assert 'fresh-prestate' in fixture.events and 'receipt-readback' in fixture.events
+    assert any(isinstance(event, tuple) and event[0] == 'promotion' for event in fixture.events)
+    assert all(path.read_bytes() == before for path, before in fixture.protected.items())
+
+
+@pytest.mark.parametrize('failure', ['invariant', 'witness'])
+def test_restore_entry_denies_drift_or_missing_witness_without_touching_retained_bytes(
+        retained_restore_entry, monkeypatch, failure):
+    fixture = retained_restore_entry
+    generation = fixture.generation
+    if failure == 'invariant':
+        calls = 0
+        def changed_prestate(*_):
+            nonlocal calls
+            calls += 1
+            return {'fixture': 'immutable' if calls == 1 else 'changed'}
+        monkeypatch.setattr(generation, '_target_prestate', changed_prestate)
+    else:
+        import time
+        monkeypatch.setattr(generation, 'read_generation_witness',
+                            lambda *_args, **_kwargs: (_ for _ in ()).throw(cli.TransactionError('NO_WITNESS')))
+        times = iter((0, 31))
+        monkeypatch.setattr(time, 'monotonic', lambda: next(times))
+        monkeypatch.setattr(time, 'sleep', lambda *_: None)
+
+    def promotion(_io, _prepared, _body, _raw, _private, _public, _precheck,
+                  invariants, accept, *, retained):
+        assert retained == fixture.retained
+        invariants()
+        return accept(fixture.selector, 0)
+    monkeypatch.setattr(generation, '_complete_bootstrap_promotion', promotion)
+
+    expected = 'PUBLIC_RECOVERY_INVARIANT_CHANGED' if failure == 'invariant' else 'NO_WITNESS'
+    with pytest.raises(cli.TransactionError, match=expected):
+        cli.restore_install_request(fixture.args)
+    assert all(path.read_bytes() == before for path, before in fixture.protected.items())
 
 
 @pytest.mark.parametrize("field", ["commit", "tree"])

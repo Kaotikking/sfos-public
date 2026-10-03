@@ -150,9 +150,28 @@ def _verify_plan_bytes(plan, authority_bytes, expected_authority_sha256):
     anchors do not confer installed authority or prove native file custody.
     """
     required = {"schema", "repository", "repo_url", "ref", "commit", "tree", "archive_url", "archive_sha256", "release_digest", "authority_key_id", "authority_sha256", "signature", "current_boot_id", "immutable_rows", "rollback_selector"}
-    if not isinstance(plan, dict) or set(plan) != required or plan.get("schema") != "SereinPublicOutpostGenerationPlan/v1":
+    if not isinstance(plan, dict) or set(plan) not in (required, required | {'recovery'}) or plan.get("schema") != "SereinPublicOutpostGenerationPlan/v1":
         raise TransactionError("PUBLIC_PLAN_SHAPE_DENIED")
     plan = strict_json(canonical(plan))
+    if 'recovery' in plan:
+        recovery = plan['recovery']
+        names = {'commit','tree','archive_sha256','release_digest','source_plan_sha256',
+                 'predecessor_receipt_path','predecessor_receipt_sha256',
+                 'candidate_path','candidate_sha256','current_selector_sha256',
+                 'lkg_selector_sha256','lkg_generation'}
+        if not isinstance(recovery, dict) or set(recovery) != names:
+            raise TransactionError('PUBLIC_RECOVERY_PLAN_DENIED')
+        for field in names - {'predecessor_receipt_path','candidate_path','release_digest'}:
+            length = 40 if field in {'commit','tree'} else 64
+            if not isinstance(recovery[field], str) or not re.fullmatch('[0-9a-f]{%d}' % length, recovery[field]):
+                raise TransactionError('PUBLIC_RECOVERY_PLAN_DENIED')
+        if (not isinstance(recovery['release_digest'], str)
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}', recovery['release_digest'])):
+            raise TransactionError('PUBLIC_RECOVERY_PLAN_DENIED')
+        for field, suffix in (('predecessor_receipt_path','prestate-receipt.json'), ('candidate_path','candidate.json')):
+            if (not isinstance(recovery[field], str)
+                    or not re.fullmatch(r'/var/lib/serein/rollback/outpost-public-generation-\d{8}T\d{6}Z-[0-9a-f]{12}/' + re.escape(suffix), recovery[field])):
+                raise TransactionError('PUBLIC_RECOVERY_PLAN_DENIED')
     if plan["repository"] != "Kaotikking/sfos-public" or plan["repo_url"] != "https://github.com/Kaotikking/sfos-public.git" or plan["ref"] != "refs/heads/main":
         raise TransactionError("PUBLIC_SOURCE_IDENTITY_DENIED")
     for field in ("commit", "tree"):
@@ -240,12 +259,16 @@ def preflight_target(plan):
     if type(plan) is not VerifiedSourcePlan or not plan.authority_custody_proven:
         raise TransactionError("PUBLIC_VERIFIED_PLAN_REQUIRED")
     before = _target_prestate(Path("/"), plan.as_dict())
-    destination = prospective_generation_prestate(Path('/'),plan.as_dict()['release_digest'])
+    recovery = 'recovery' in plan.as_dict()
+    destination = (retained_recovery_prestate(Path('/'),plan.as_dict()) if recovery
+                   else prospective_generation_prestate(Path('/'),plan.as_dict()['release_digest']))
     installed = successor_generation_prestate(Path("/"))
     bootstrap = bootstrap_prestate(Path('/'), read_bootstrap_unit)
     if _target_prestate(Path("/"), plan.as_dict()) != before:
         raise TransactionError("PUBLIC_TARGET_CHANGED_DURING_PREFLIGHT")
-    if prospective_generation_prestate(Path('/'),plan.as_dict()['release_digest']) != destination:
+    final_destination = (retained_recovery_prestate(Path('/'),plan.as_dict()) if recovery
+                         else prospective_generation_prestate(Path('/'),plan.as_dict()['release_digest']))
+    if final_destination != destination:
         raise TransactionError('PUBLIC_GENERATION_DESTINATION_CHANGED')
     return {**before, "installed_prestate": installed, 'bootstrap_prestate': bootstrap,
             'generation_destination':destination}
@@ -662,6 +685,194 @@ def reread_prestate_receipt(root, receipt, expected, public):
         return dict(receipt)
     except OSError:
         raise TransactionError('PUBLIC_PRESTATE_RECORD_IO_DENIED') from None
+
+
+def retained_predecessor(root, receipt, expected, public, candidate_path, expected_generation):
+    """Read the exact signed predecessor; never move a live selector.
+
+    This is the existing install transaction's recovery input, not a fallback
+    search. The caller must separately bind current state and authorize the
+    recovery effect. A historical receipt cannot confer current admission.
+    """
+    from .generation_launcher import read_selector, LaunchDenied
+    root = Path(os.path.abspath(root))
+    if (not isinstance(expected_generation, str)
+            or not re.fullmatch(r'[0-9a-f]{64}', expected_generation)
+            or not isinstance(candidate_path, str)
+            or not re.fullmatch(r'/var/lib/serein/rollback/outpost-public-generation-\d{8}T\d{6}Z-[0-9a-f]{12}/candidate.json', candidate_path)):
+        raise TransactionError('PUBLIC_RETAINED_TARGET_DENIED')
+    # Freeze the caller's structures before any callback or filesystem read.
+    receipt = strict_json(canonical(receipt))
+    expected = strict_json(canonical(expected))
+    reread_prestate_receipt(root, receipt, expected, public)
+    row = expected['selector_pre'].get('current')
+    required = {'target','bytes','sha256','mode','uid','gid','state','content_b64'}
+    if (not isinstance(row, dict) or set(row) != required
+            or row['target'] != '/var/lib/serein-outpost/generation-state/current.json'
+            or row['state'] != 'PRESENT' or row['mode'] != '0644'
+            or type(row['bytes']) is not int or not 0 < row['bytes'] <= 4096
+            or (row['uid'], row['gid']) != (0, 0)):
+        raise TransactionError('PUBLIC_RETAINED_SELECTOR_DENIED')
+    try:
+        captured = base64.b64decode(row['content_b64'], validate=True)
+        selector = strict_json(captured)
+        if (len(captured) != row['bytes'] or sha(captured) != row['sha256']
+                or selector.get('generation') != expected_generation):
+            raise TransactionError('PUBLIC_RETAINED_SELECTOR_DENIED')
+        path = root / candidate_path.lstrip('/')
+        nofollow_ancestors(Path(root.anchor), path, allow_missing=False)
+        parent = path.parent.lstat()
+        if (parent.st_uid, parent.st_gid, stat.S_IMODE(parent.st_mode)) != (0, 0, 0o700):
+            raise TransactionError('PUBLIC_RETAINED_CUSTODY_DENIED')
+        fingerprint = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gid,
+                                 s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+        def bounded_candidate():
+            parent_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                opened_parent = os.fstat(parent_fd)
+                if fingerprint(opened_parent) != fingerprint(parent):
+                    raise TransactionError('PUBLIC_RETAINED_CHANGED')
+                fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
+                with os.fdopen(fd, 'rb') as stream:
+                    first = os.fstat(stream.fileno())
+                    if (not stat.S_ISREG(first.st_mode) or first.st_nlink != 1
+                            or first.st_size != row['bytes']
+                            or (first.st_uid, first.st_gid, stat.S_IMODE(first.st_mode)) != (0, 0, 0o600)):
+                        raise TransactionError('PUBLIC_RETAINED_CUSTODY_DENIED')
+                    data = stream.read(row['bytes'] + 1)
+                    stream.seek(0)
+                    second = stream.read(row['bytes'] + 1)
+                    last = os.fstat(stream.fileno())
+                named = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+                if (len(data) != row['bytes'] or data != second
+                        or fingerprint(first) != fingerprint(last)
+                        or fingerprint(last) != fingerprint(named)
+                        or fingerprint(opened_parent) != fingerprint(path.parent.lstat())):
+                    raise TransactionError('PUBLIC_RETAINED_CHANGED')
+                return data, last
+            finally:
+                os.close(parent_fd)
+        before, info = bounded_candidate()
+        if strict_json(before) != selector:
+            raise TransactionError('PUBLIC_RETAINED_SELECTOR_DENIED')
+        selected, generation = read_selector(path, root / 'usr/share/serein/outpost-generations')
+        if selected != selector or generation.name != expected_generation:
+            raise TransactionError('PUBLIC_RETAINED_SELECTOR_DENIED')
+        reread_prestate_receipt(root, receipt, expected, public)
+        after, final = bounded_candidate()
+        nofollow_ancestors(Path(root.anchor), path, allow_missing=False)
+        if (before != after or fingerprint(info) != fingerprint(final)
+                or fingerprint(parent) != fingerprint(path.parent.lstat())):
+            raise TransactionError('PUBLIC_RETAINED_CHANGED')
+        again, same_generation = read_selector(path, root / 'usr/share/serein/outpost-generations')
+        if again != selected or same_generation != generation:
+            raise TransactionError('PUBLIC_RETAINED_CHANGED')
+    except (OSError, ValueError, KeyError, TypeError, LaunchDenied):
+        raise TransactionError('PUBLIC_RETAINED_READ_DENIED') from None
+    return {'selector': selector, 'captured_current': row,
+            'predecessor_receipt': receipt, 'candidate_path': candidate_path,
+            'generation': expected_generation, 'mutation_effect': 'NONE',
+            'admission': 'UNPROVEN'}
+
+
+def retained_recovery_prestate(root, fields, *, transitioning=False):
+    """Bind the signed recovery selector to an existing canonical generation."""
+    from .public_installer_cli import _load_plan
+    root = Path(os.path.abspath(root))
+    recovery = fields['recovery']
+    record_path = root / recovery['predecessor_receipt_path'].lstrip('/')
+    record = _load_plan(record_path, recovery['predecessor_receipt_sha256'])
+    expected = {k:v for k,v in record.items() if k not in {'receipt_signature','receipt_digest'}}
+    receipt = {'path':recovery['predecessor_receipt_path'],
+               'sha256':recovery['predecessor_receipt_sha256'],
+               'receipt_digest':record['receipt_digest']}
+    anchor = next(row for row in fields['immutable_rows'] if row['target'] == str(CANONICAL_AUTHORITY_PATH))
+    public = load_pem_public_key(_read_target_fact(root, str(CANONICAL_AUTHORITY_PATH), expected=anchor, capture=True))
+    retained = retained_predecessor(root, receipt, expected, public,
+        recovery['candidate_path'], recovery['release_digest'].removeprefix('sha256:'))
+    candidate = _load_plan(root / recovery['candidate_path'].lstrip('/'), recovery['candidate_sha256'])
+    if candidate != retained['selector'] or candidate['predecessor_receipt_sha256'] != recovery['source_plan_sha256']:
+        raise TransactionError('PUBLIC_RECOVERY_SOURCE_DENIED')
+    current = successor_generation_prestate(root)
+    allowed = {recovery['current_selector_sha256']}
+    if transitioning:
+        allowed.add(retained['captured_current']['sha256'])
+    if current['selectors']['current']['sha256'] not in allowed:
+        raise TransactionError('PUBLIC_RECOVERY_CURRENT_CHANGED')
+    # Preserve the authenticated original selector pair, never an arbitrary
+    # currently available fallback. The successor reader validates its entire
+    # retained inventory as well as selector custody; compare exact bytes too.
+    lkg = expected['selector_pre'].get('lkg')
+    required = {'target','bytes','sha256','mode','uid','gid','state','content_b64'}
+    if (not isinstance(lkg, dict) or set(lkg) != required
+            or lkg['target'] != '/var/lib/serein-outpost/generation-state/lkg.json'
+            or lkg['state'] != 'PRESENT' or lkg['mode'] != '0644'
+            or (lkg['uid'], lkg['gid']) != (0, 0)
+            or type(lkg['bytes']) is not int or not 0 < lkg['bytes'] <= 4096):
+        raise TransactionError('PUBLIC_RECOVERY_LKG_DENIED')
+    try:
+        lkg_bytes = base64.b64decode(lkg['content_b64'], validate=True)
+        lkg_selector = strict_json(lkg_bytes)
+        live = current['selectors']['lkg']
+        facts = {key:value for key,value in lkg.items() if key not in {'state','content_b64'}}
+        if (len(lkg_bytes) != lkg['bytes'] or sha(lkg_bytes) != lkg['sha256']
+                or lkg['sha256'] != recovery['lkg_selector_sha256']
+                or lkg_selector.get('generation') != recovery['lkg_generation']
+                or live != dict(facts, selector=lkg_selector)
+                or capture_selector_predecessor(root, current)['lkg'] != lkg_bytes):
+            raise TransactionError('PUBLIC_RECOVERY_LKG_DENIED')
+    except (ValueError, KeyError, TypeError):
+        raise TransactionError('PUBLIC_RECOVERY_LKG_DENIED') from None
+    generation = root / 'usr/share/serein/outpost-generations' / retained['generation']
+    # The existing inventory reader already checks every byte and file policy.
+    from .generation_launcher import _read_regular, read_selector
+    source_raw, _ = _read_regular(generation / 'public-source.json', 0o644)
+    source = strict_json(source_raw)
+    if (source.get('schema') != 'SereinOutpostPublicSource/v1'
+            or source.get('repository') != fields['repository']
+            or any(source.get(key) != recovery[key] for key in
+                   ('commit','tree','archive_sha256','release_digest','source_plan_sha256'))):
+        raise TransactionError('PUBLIC_RECOVERY_SOURCE_DENIED')
+    again, _ = read_selector(root / recovery['candidate_path'].lstrip('/'), generation.parent)
+    if again != retained['selector']:
+        raise TransactionError('PUBLIC_RETAINED_CHANGED')
+    return {'target':'/usr/share/serein/outpost-generations/' + retained['generation'],
+            'state':'RETAINED', 'retained':retained, 'source':source,
+            'preserved_lkg':live}
+
+
+def capture_retained_material(root, destination):
+    """Read the already-indexed generation; do not stage, replace or delete it."""
+    from .generation_launcher import read_selector, _read_regular, LaunchDenied
+    root = Path(os.path.abspath(root))
+    retained = destination['retained']
+    path = root / retained['candidate_path'].lstrip('/')
+    generations = root / 'usr/share/serein/outpost-generations'
+    try:
+        selector, directory = read_selector(path, generations)
+        if selector != retained['selector'] or '/'+directory.relative_to(root).as_posix() != destination['target']:
+            raise TransactionError('PUBLIC_RETAINED_CHANGED')
+        raw, _ = _read_regular(directory/'generation-inventory.json', 0o644)
+        inventory = strict_json(raw)
+        material = {}
+        for row in inventory:
+            if row['kind'] != 'file':
+                continue
+            name = row['path']
+            value, info = _read_regular(directory/name, int(row['mode'], 8))
+            if info.st_nlink != 1 or len(value) != row['bytes'] or sha(value) != row['sha256']:
+                raise TransactionError('PUBLIC_RETAINED_CHANGED')
+            material[name] = value
+        release = strict_json(material['release-manifest.json'])
+        material = bind_generation_material(release, material, selector['release_digest'])
+        if strict_json(material['public-source.json']) != destination['source']:
+            raise TransactionError('PUBLIC_RECOVERY_SOURCE_DENIED')
+        again, same = read_selector(path, generations)
+        if again != selector or same != directory:
+            raise TransactionError('PUBLIC_RETAINED_CHANGED')
+        return release, material
+    except (OSError, ValueError, KeyError, TypeError, LaunchDenied):
+        raise TransactionError('PUBLIC_RETAINED_MATERIAL_DENIED') from None
 
 
 def seal_prepared_forward_state(prestate_raw, expected, private, public):
@@ -1566,7 +1777,7 @@ def _signed_transition_record(body,private,public):
 
 
 def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
-                                  precheck,verify_invariants,accept):
+                                  precheck,verify_invariants,accept,*,retained=None):
     """Complete the existing donor transaction, not a second installer.
 
     Called under the same verified-plan lock after exact inactive placement.
@@ -1576,8 +1787,14 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
     """
     verify_prestate_receipt(prestate_raw,body,public)
     selector=prepared['candidate_selector']
+    source_digest = body['source_plan_sha256']
+    if retained is not None:
+        if (retained.get('selector') != selector or retained.get('mutation_effect') != 'NONE'
+                or retained.get('generation') != selector.get('generation')):
+            raise TransactionError('PUBLIC_RETAINED_SELECTOR_DENIED')
+        source_digest = selector['predecessor_receipt_sha256']
     if (precheck.get('result')!='G0_SOURCE_PREDICATES_PASS' or precheck.get('selector')!=selector
-            or precheck.get('source_plan_sha256')!=body['source_plan_sha256']
+            or precheck.get('source_plan_sha256')!=source_digest
             or body['generation_target']!='/usr/share/serein/outpost-generations/'+selector['generation']):
         raise TransactionError('PUBLIC_PROMOTION_PRECHECK_DENIED')
     journal_path=io.receipt_directory+'/forward-state.json'
@@ -1609,6 +1826,11 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
         io.replace(journal_path,journal,after);journal=after
     current=body['selector_pre']['current'];lkg=body['selector_pre']['lkg']
     selected=_effect_row(current['target'],canonical(selector)+b'\n','0644')
+    if retained is not None:
+        selected = strict_json(canonical(retained['captured_current']))
+        if (selected.get('target') != current['target']
+                or strict_json(base64.b64decode(selected['content_b64'], validate=True)) != selector):
+            raise TransactionError('PUBLIC_RETAINED_SELECTOR_DENIED')
     started=False
     try:
         for index,name in enumerate(reversed(IMAGE_UNITS),1):
@@ -1646,17 +1868,20 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
         if io.read(current['target'])!=selected or io.read(lkg['target'])!=lkg:
             raise TransactionError('PUBLIC_SELECTOR_READBACK_DENIED')
         verify_invariants();advance('TERMINAL_ACCEPTED')
-        result={'schema':'SereinOutpostBootstrapInstallReceipt/v1','result':'INSTALLED_CURRENT_BOOT_OBSERVED',
+        result={'schema':'SereinOutpostBootstrapInstallReceipt/v1','result':('RESTORED_CURRENT_BOOT_OBSERVED' if retained is not None else 'INSTALLED_CURRENT_BOOT_OBSERVED'),
                 'source_plan_sha256':body['source_plan_sha256'],'boot_id':body['boot_id'],
                 'generation_identity':selector,'constitution':precheck['constitution'],
                 'prestate_receipt_digest':strict_json(prestate_raw)['receipt_digest'],
                 'current_boot_witness':witness,'outpost_admission':'UNPROVEN',
                 'sfos_admission':'UNPROVEN','stage1':'UNPROVEN','downstream_activation':'NONE'}
+        if retained is not None:
+            result['preserved_lkg_selector'] = strict_json(base64.b64decode(lkg['content_b64']))
+            result['preserved_lkg_sha256'] = lkg['sha256']
         path=io.receipt_directory+'/transaction-receipt.json'
         io.replace(path,{'target':path,'state':'ABSENT'},_effect_row(path,_signed_transition_record(result,private,public)))
         advance('COMPLETE')
         return result
-    except Exception as failure:
+    except BaseException as failure:
         # No speculative cleanup, predecessor selection, disk restore or reboot.
         # If concurrent state/immutable identity changed, stop without overwrite.
         try:
@@ -1684,6 +1909,6 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
             for name,expected in body['unit_prestate'].items():
                 if io.unit_state(name)!=expected:raise TransactionError('PUBLIC_RECOVERY_UNIT_STATE_DENIED')
             advance('RESTORED_CAPTURED_PRESTATE')
-        except Exception:
+        except BaseException:
             raise TransactionError('PUBLIC_INSTALL_FAILED_RECOVERY_UNPROVEN') from failure
         raise TransactionError('PUBLIC_INSTALL_FAILED_CAPTURED_PRESTATE_RESTORED') from failure

@@ -44,7 +44,7 @@ def parse_install_request(arguments) -> InstallRequest:
     if any(not isinstance(value, str) or not value or "\0" in value for value in arguments):
         raise TransactionError("OUTPOST_ENTRY_ARGUMENT_INVALID")
     request = InstallRequest(*arguments)
-    if request.action != "install":
+    if request.action not in ("install", "restore"):
         raise TransactionError("OUTPOST_ENTRY_ACTION_DENIED")
     if request.target not in ("/", "/target"):
         raise TransactionError("OUTPOST_ENTRY_TARGET_DENIED")
@@ -91,6 +91,8 @@ def preflight_install_request(arguments):
         raise TransactionError("OFFLINE_SOURCE_AUTHORITY_UNPROVEN")
     plan = _verify_plan(_load_plan(Path(request.plan_path), request.expected_plan_sha256))
     fields = plan.as_dict()
+    if (request.action == 'restore') != ('recovery' in fields):
+        raise TransactionError('PUBLIC_RECOVERY_ACTION_PLAN_MISMATCH')
     if (not isinstance(receipt, dict)
             or receipt.get("schema") != "SFOSSourceRoadReceipt/v1"
             or receipt.get("source_kind") != request.source_kind
@@ -490,6 +492,8 @@ def install_request(arguments):
     """
     import tempfile
     request=parse_install_request(arguments)
+    if request.action == 'restore':
+        return restore_install_request(arguments)
     evidence,release,material=prepare_install_request(arguments)
     if os.geteuid()!=0 or os.getegid()!=0:
         raise TransactionError('PUBLIC_INSTALLER_ROOT_REQUIRED')
@@ -504,6 +508,74 @@ def install_request(arguments):
     with recorded_prepared_generation(Path(request.plan_path),request.expected_plan_sha256,
             evidence,release,material,staging_parent=staging,promote=True) as result:
         return result
+
+
+def restore_install_request(arguments):
+    """Restore one signed retained generation through the existing transaction.
+
+    The executing repair source and the retained destination have distinct
+    source bindings. Never relabel the old generation as newly built, recreate
+    its directory, replay its old journal, or select an unrequested LKG.
+    """
+    import time
+    from . import public_generation_transaction as transaction
+    request = parse_install_request(arguments)
+    if request.action != 'restore' or os.geteuid() != 0 or os.getegid() != 0:
+        raise TransactionError('PUBLIC_RECOVERY_ENTRY_DENIED')
+    evidence, _, _ = prepare_install_request(arguments)
+    plan = recheck_prepared_target(request.plan_path, request.expected_plan_sha256, evidence)
+    fields = plan.as_dict()
+    with transaction.public_generation_lock(Path('/'), sha(plan.encoded), fields['current_boot_id']):
+        recheck_prepared_target(request.plan_path, request.expected_plan_sha256, evidence)
+        target = evidence['target_prestate']
+        destination = target['generation_destination']
+        retained = destination['retained']
+        release, material = transaction.capture_retained_material(Path('/'), destination)
+        precheck = transaction.bootstrap_candidate_precheck(release, material,
+            retained['selector']['predecessor_receipt_sha256'])
+        if precheck['selector'] != retained['selector']:
+            raise TransactionError('PUBLIC_RETAINED_SOURCE_DENIED')
+        capture = {
+            'image_bytes':transaction.capture_bootstrap_predecessor(Path('/'), target['bootstrap_prestate'], transaction.read_bootstrap_unit),
+            'selector_bytes':transaction.capture_selector_predecessor(Path('/'), target['installed_prestate'])}
+        body = transaction.prepared_prestate_receipt(evidence, release, material, capture)
+        account = _bootstrap_service_account()
+        immutable = transaction._target_prestate(Path('/'), fields)
+        recheck_prepared_target(request.plan_path, request.expected_plan_sha256, evidence)
+        private, public = transaction.load_prestate_signer(plan)
+        raw = transaction.seal_prestate_receipt(body, private, public)
+        receipt = transaction.persist_prestate_receipt(Path('/'), fields['rollback_selector'], raw, body, public)
+        forward = transaction.seal_prepared_forward_state(raw, body, private, public)
+        transaction.prepared_forward_record(Path('/'), receipt, raw, body, public, create_raw=forward)
+        def invariants():
+            checked = transaction._verify_plan(_load_plan(Path(request.plan_path), request.expected_plan_sha256))
+            if (checked.encoded != plan.encoded or transaction._target_prestate(Path('/'), fields) != immutable
+                    or _bootstrap_service_account() != account):
+                raise TransactionError('PUBLIC_RECOVERY_INVARIANT_CHANGED')
+            observed = transaction.retained_recovery_prestate(Path('/'), fields, transitioning=True)
+            if observed != destination or transaction.capture_retained_material(Path('/'), observed) != (release, material):
+                raise TransactionError('PUBLIC_RETAINED_CHANGED')
+            transaction.reread_prestate_receipt(Path('/'), receipt, body, public)
+        def accept(selector, not_before):
+            deadline = time.monotonic() + 30
+            while True:
+                invariants()
+                try:
+                    result = transaction.read_generation_witness(Path('/'), expected_generation=selector,
+                        boot_id=fields['current_boot_id'], not_before=not_before,
+                        service_uid=account[0], service_gid=account[1])
+                    result['vitals'] = transaction.read_vitals_witness(expected_generation=selector,
+                        boot_id=fields['current_boot_id'], not_before=not_before,
+                        certificate_row=next(row for row in fields['immutable_rows']
+                            if row['target'] == '/etc/serein/tls/serein-backend-cert.pem'))
+                    return result
+                except TransactionError:
+                    if time.monotonic() >= deadline:
+                        raise
+                    time.sleep(0.5)
+        io = transaction._GenerationFileIO(Path('/'), str(Path(receipt['path']).parent))
+        return transaction._complete_bootstrap_promotion(io, {'candidate_selector':retained['selector']},
+            body, raw, private, public, precheck, invariants, accept, retained=retained)
 
 
 def main(arguments=None):

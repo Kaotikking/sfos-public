@@ -126,13 +126,13 @@
     },
     {
       "path": "outpost/install/public_generation_transaction.py",
-      "bytes": 99739,
-      "sha256": "6a0f583572acdcd1ac6b6174f46ed1fd1ff5d459d4a102e15ee32bebe0cb0aaa"
+      "bytes": 114178,
+      "sha256": "5554605a01659b75c41af251ced34593b374410e5c8df52a6f9b7c334b94a710"
     },
     {
       "path": "outpost/install/public_installer_cli.py",
-      "bytes": 28209,
-      "sha256": "64924c057fe93656c258fd578bfea4c0e9f88a9f0b6eb784e8ce99c2e4020a43"
+      "bytes": 32981,
+      "sha256": "0905b2ed3761b5987b79f34eb0bf4c30beefe15c5cfca7e643cfde1cfbe52c11"
     },
     {
       "path": "outpost/install/transaction.py",
@@ -216,8 +216,8 @@
     },
     {
       "path": "outpost/release-manifest.json",
-      "bytes": 9361,
-      "sha256": "038713c98e0bc01f8ef9274a6abad10bd003c0127b9790d53c220c8f6d67af89"
+      "bytes": 9379,
+      "sha256": "9b5eff13ebb8205489901a876eb429394dc36645671f78452be8985d68a54e62"
     },
     {
       "path": "outpost/systemd/serein-https-gateway-adapter.service",
@@ -316,13 +316,13 @@
     },
     {
       "path": "outpost/tests/test_public_generation_transaction.py",
-      "bytes": 69743,
-      "sha256": "08929defcec7fa381580c81d01a37206f92a069a6dc6e9089cda8b2635dd9a9b"
+      "bytes": 81894,
+      "sha256": "2db0703d17dcc1c06d93da7dc8f9b6585cd35ad3457f82829bc169cb091197e9"
     },
     {
       "path": "outpost/tests/test_public_installer_cli.py",
-      "bytes": 43898,
-      "sha256": "46e285eab6f321c957ae0ec3ca4d8d82c2ffc1e0d6184309215dc3e9411e1298"
+      "bytes": 53737,
+      "sha256": "62d0e4f6b1060ce2b376eac9845315d261f431712c241561c88676d9bfc8a7d8"
     },
     {
       "path": "outpost/tests/test_public_tree_host.py",
@@ -365,5 +365,5 @@
       "sha256": "1f2c365c369b3fd3257044925e14b7a471bdcec4a9fafdadf0cfaad09346f8b7"
     }
   ],
-  "self_digest": "sha256:f6e54ba9595433a095af18380b50196103db3f16b2e2314124f5024d8933aee0"
+  "self_digest": "sha256:36029627e612d9f1d7b8866003008230912c2056d4bad9f7258c6c2cf937d839"
 }

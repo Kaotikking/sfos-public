@@ -5,6 +5,7 @@ import base64
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -42,6 +43,35 @@ def signed_plan_fields(identity, *, target_root=None):
 def verified(identity):
     plan, public = signed_plan_fields(identity)
     return generation._verify_plan_bytes(plan, public, sha(public))
+
+
+@pytest.mark.parametrize('defect', [None, 'unsigned_change', 'extra', 'path', 'digest', 'missing'])
+def test_recovery_plan_is_exact_and_signature_bound(defect):
+    plan, _ = signed_plan_fields({'archive_sha256':'c'*64, 'release_digest':'sha256:'+'d'*64})
+    private = Ed25519PrivateKey.generate()
+    public = private.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    plan['authority_sha256'] = sha(public)
+    for row in plan['immutable_rows']:
+        if row['target'].endswith('verification.pem'):
+            row.update(bytes=len(public), sha256=sha(public))
+    directory = '/var/lib/serein/rollback/outpost-public-generation-20260930T080850Z-b43cfde96e65'
+    plan['recovery'] = {'commit':'a'*40,'tree':'b'*40,'archive_sha256':'c'*64,
+        'release_digest':'sha256:'+'d'*64,'source_plan_sha256':'e'*64,
+        'predecessor_receipt_path':directory+'/prestate-receipt.json',
+        'predecessor_receipt_sha256':'f'*64,'candidate_path':directory+'/candidate.json',
+        'candidate_sha256':'1'*64,'current_selector_sha256':'2'*64,
+        'lkg_selector_sha256':'4'*64,'lkg_generation':'5'*64}
+    if defect == 'extra': plan['recovery']['automatic_fallback'] = True
+    elif defect == 'path': plan['recovery']['candidate_path'] = '/etc/serein/current.json'
+    elif defect == 'digest': plan['recovery']['current_selector_sha256'] = 'unknown'
+    elif defect == 'missing': plan['recovery'].pop('tree')
+    plan['signature'] = base64.urlsafe_b64encode(private.sign(canonical({k:v for k,v in plan.items() if k != 'signature'}))).decode().rstrip('=')
+    if defect == 'unsigned_change': plan['recovery']['commit'] = '3'*40
+    if defect:
+        with pytest.raises(TransactionError): generation._verify_plan_bytes(plan, public, sha(public))
+    else:
+        result = generation._verify_plan_bytes(plan, public, sha(public))
+        assert result.as_dict()['recovery'] == plan['recovery']
 
 
 def successor_fixture(root):
@@ -180,6 +210,155 @@ def private_prestate_record(tmp_path):
     selector = '/var/lib/serein/rollback/outpost-public-generation-20260929T020000Z-aaaaaaaaaaaa'
     (tmp_path/'var/lib/serein/rollback').mkdir(parents=True, mode=0o755)
     return body, raw, public, selector, evidence, release, material, capture
+
+
+@pytest.mark.parametrize('defect', [None, 'wrong_generation', 'candidate_changed', 'generation_changed', 'receipt_changed', 'candidate_symlink', 'oversized', 'late_generation', 'late_candidate'])
+def test_retained_predecessor_is_exact_signed_read_only_input(tmp_path, private_prestate_record, defect, monkeypatch):
+    body, raw, public, directory, *_ = private_prestate_record
+    receipt = generation.persist_prestate_receipt(tmp_path, directory, raw, body, public)
+    row = body['selector_pre']['current']
+    captured = base64.b64decode(row['content_b64'])
+    selector = json.loads(captured)
+    candidate_name = directory + '/candidate.json'
+    candidate = tmp_path / candidate_name.lstrip('/')
+    candidate.write_bytes(captured); candidate.chmod(0o600)
+    current = tmp_path / row['target'].lstrip('/')
+    current_before = current.read_bytes()
+    wanted = selector['generation']
+    if defect == 'wrong_generation': wanted = 'f' * 64
+    elif defect == 'candidate_changed': candidate.write_bytes(b'{}')
+    elif defect == 'generation_changed':
+        (tmp_path/'usr/share/serein/outpost-generations'/wanted/'foreign').write_bytes(b'foreign')
+    elif defect == 'receipt_changed':
+        (tmp_path/receipt['path'].lstrip('/')).write_bytes(raw + b' ')
+    elif defect == 'candidate_symlink': candidate.unlink(); candidate.symlink_to(current)
+    elif defect == 'oversized': candidate.write_bytes(captured + b' ' * 8192)
+    elif defect in {'late_generation', 'late_candidate'}:
+        from install import generation_launcher
+        original = generation_launcher.read_selector
+        calls = []
+        def changed_after_read(path, generation_root):
+            result = original(path, generation_root)
+            if not calls:
+                if defect == 'late_generation': (result[1] / 'foreign').write_bytes(b'late')
+                else:
+                    old = candidate.read_bytes(); candidate.unlink()
+                    candidate.write_bytes(old); candidate.chmod(0o600)
+            calls.append(1)
+            return result
+        monkeypatch.setattr(generation_launcher, 'read_selector', changed_after_read)
+    if defect:
+        with pytest.raises(TransactionError):
+            generation.retained_predecessor(tmp_path, receipt, body, public, candidate_name, wanted)
+    else:
+        result = generation.retained_predecessor(tmp_path, receipt, body, public, candidate_name, wanted)
+        assert result['selector'] == selector
+        assert result['captured_current'] == row
+        assert result['mutation_effect'] == 'NONE' and result['admission'] == 'UNPROVEN'
+    assert current.read_bytes() == current_before
+
+
+@pytest.fixture
+def retained_recovery_lkg_case(tmp_path, private_prestate_record, monkeypatch):
+    """Real selector inventory/custody; only receipt signature loading is synthetic."""
+    from install import public_installer_cli
+    from install import generation_launcher
+    body, _, _, directory, *_ = private_prestate_record
+    installed = generation.successor_generation_prestate(tmp_path)
+    selector = installed['selectors']['current']['selector']
+    candidate_name = directory + '/candidate.json'
+    candidate = tmp_path / candidate_name.lstrip('/')
+    candidate.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    candidate.write_bytes(canonical(selector)); candidate.chmod(0o600)
+    source = {'schema': 'SereinOutpostPublicSource/v1',
+              'repository': 'Kaotikking/sfos-public', 'commit': 'a' * 40,
+              'tree': 'b' * 40, 'archive_sha256': 'c' * 64,
+              'release_digest': 'sha256:' + selector['generation'],
+              'source_plan_sha256': selector['predecessor_receipt_sha256']}
+    record_path = directory + '/prestate-receipt.json'
+    record = dict(body, receipt_signature='fixture', receipt_digest='d' * 64)
+    fields = {
+        'repository': source['repository'],
+        'immutable_rows': [{'target': str(generation.CANONICAL_AUTHORITY_PATH),
+                            'bytes': 1, 'sha256': '0' * 64, 'mode': '0644', 'uid': 0, 'gid': 0}],
+        'recovery': {
+            'predecessor_receipt_path': record_path,
+            'predecessor_receipt_sha256': '1' * 64,
+            'candidate_path': candidate_name,
+            'candidate_sha256': '2' * 64,
+            'release_digest': source['release_digest'],
+            'source_plan_sha256': source['source_plan_sha256'],
+            'current_selector_sha256': installed['selectors']['current']['sha256'],
+            'lkg_selector_sha256': body['selector_pre']['lkg']['sha256'],
+            'lkg_generation': json.loads(base64.b64decode(body['selector_pre']['lkg']['content_b64']))['generation'],
+            **{key: source[key] for key in ('commit', 'tree', 'archive_sha256')},
+        },
+    }
+    private = Ed25519PrivateKey.generate()
+    public_pem = private.public_key().public_bytes(serialization.Encoding.PEM,
+                                                   serialization.PublicFormat.SubjectPublicKeyInfo)
+    def load(path, _digest):
+        return record if str(path).endswith('prestate-receipt.json') else selector
+    monkeypatch.setattr(public_installer_cli, '_load_plan', load)
+    monkeypatch.setattr(generation, '_read_target_fact', lambda *_args, **_kwargs: public_pem)
+    monkeypatch.setattr(generation, 'retained_predecessor',
+                        lambda *_args, **_kwargs: {
+                            'selector': selector,
+                            'captured_current': body['selector_pre']['current'],
+                            'predecessor_receipt': {'path': record_path},
+                            'candidate_path': candidate_name,
+                            'generation': selector['generation'],
+                            'mutation_effect': 'NONE', 'admission': 'UNPROVEN'})
+    original_read = generation_launcher._read_regular
+    monkeypatch.setattr(generation_launcher, '_read_regular',
+                        lambda path, mode: (canonical(source), SimpleNamespace())
+                        if path.name == 'public-source.json' else original_read(path, mode))
+    return SimpleNamespace(fields=fields, record=record, body=body, selector=selector,
+                           state=tmp_path / 'var/lib/serein-outpost/generation-state')
+
+
+def test_retained_recovery_authenticates_original_lkg_pair(tmp_path, retained_recovery_lkg_case):
+    case = retained_recovery_lkg_case
+    result = generation.retained_recovery_prestate(tmp_path, case.fields)
+    expected = generation.successor_generation_prestate(tmp_path)['selectors']['lkg']
+    assert result['preserved_lkg'] == expected
+    assert result['retained']['mutation_effect'] == 'NONE'
+
+
+@pytest.mark.parametrize('field', ['lkg_selector_sha256', 'lkg_generation'])
+def test_retained_recovery_denies_signed_wrong_lkg_identity(tmp_path, retained_recovery_lkg_case, field):
+    case = retained_recovery_lkg_case
+    case.fields['recovery'][field] = 'f' * 64
+    with pytest.raises(TransactionError, match='PUBLIC_RECOVERY_LKG_DENIED'):
+        generation.retained_recovery_prestate(tmp_path, case.fields)
+
+
+@pytest.mark.parametrize('defect', ['format', 'custody', 'selector'])
+def test_retained_recovery_denies_live_lkg_drift(tmp_path, retained_recovery_lkg_case, defect):
+    case = retained_recovery_lkg_case
+    path = case.state / 'lkg.json'
+    if defect == 'format':
+        path.write_bytes(path.read_bytes() + b'\n')
+    elif defect == 'custody':
+        path.chmod(0o600)
+    else:
+        value = json.loads(path.read_bytes()); value['generation'] = 'f' * 64
+        path.write_bytes(canonical(value) + b'\n')
+    with pytest.raises(TransactionError):
+        generation.retained_recovery_prestate(tmp_path, case.fields)
+
+
+@pytest.mark.parametrize('defect', ['missing', 'target', 'mode', 'bytes', 'content'])
+def test_retained_recovery_denies_invalid_historical_lkg_row(tmp_path, retained_recovery_lkg_case, defect):
+    case = retained_recovery_lkg_case
+    row = case.record['selector_pre']['lkg']
+    if defect == 'missing': case.record['selector_pre'].pop('lkg')
+    elif defect == 'target': row['target'] = '/etc/shadow'
+    elif defect == 'mode': row['mode'] = '0600'
+    elif defect == 'bytes': row['bytes'] += 1
+    else: row['content_b64'] = base64.b64encode(b'{}').decode()
+    with pytest.raises(TransactionError, match='PUBLIC_RECOVERY_LKG_DENIED'):
+        generation.retained_recovery_prestate(tmp_path, case.fields)
 
 
 def test_private_prestate_record_exact_durable_readback_and_collision(tmp_path, private_prestate_record):
@@ -370,19 +549,29 @@ def prepared_forward(tmp_path,private_prestate_record):
     return body,prestate,public,receipt,raw,private
 
 
-@pytest.mark.parametrize('failure',[None,'image','witness','restored_unit','disabled_target','vitals_absent','vitals_wrong_generation','vitals_inactive'])
-def test_complete_g0_promotion_native_files_and_exact_failure_compensation(tmp_path,private_prestate_record,failure):
+@pytest.mark.parametrize('retained_recovery', [False, True])
+@pytest.mark.parametrize('failure',[None,'image','witness','restored_unit','disabled_target','vitals_absent','vitals_wrong_generation','vitals_inactive','exit_stop','exit_image','exit_reload','exit_selector'])
+def test_complete_g0_promotion_native_files_and_exact_failure_compensation(tmp_path,private_prestate_record,failure,retained_recovery):
     """Real Linux file CAS/journal; synthetic systemd/witness, never VM proof."""
     body,_,_,directory,_,release,material,_=private_prestate_record
     body['unit_prestate']['serein-outpost.target']['UnitFileState']='disabled' if failure=='disabled_target' else 'enabled'
+    if failure == 'exit_stop':
+        body['unit_prestate']['serein-outpost.service'].update(ActiveState='active',SubState='running')
     private=Ed25519PrivateKey.generate();public=private.public_key()
     raw=generation.seal_prestate_receipt(body,private,public)
     receipt=generation.persist_prestate_receipt(tmp_path,directory,raw,body,public)
     forward=generation.seal_prepared_forward_state(raw,body,private,public)
     generation.prepared_forward_record(tmp_path,receipt,raw,body,public,create_raw=forward)
     selector=generation.prepared_generation_selector(release,material,body['source_plan_sha256'])
+    retained = None
+    if retained_recovery:
+        # Recovery keeps the retained selector's original source-plan binding.
+        selector = generation.prepared_generation_selector(release,material,'b'*64)
+        restored_row = generation._effect_row(body['selector_pre']['current']['target'], canonical(selector) + b'\n\n', '0644')
+        retained = {'selector':selector, 'generation':selector['generation'],
+                    'captured_current':restored_row, 'mutation_effect':'NONE'}
     precheck={'result':'G0_SOURCE_PREDICATES_PASS','selector':selector,
-              'source_plan_sha256':body['source_plan_sha256'],'constitution':{'status':'CANDIDATE_BOUND_UNADMITTED'}}
+              'source_plan_sha256':selector['predecessor_receipt_sha256'],'constitution':{'status':'CANDIDATE_BOUND_UNADMITTED'}}
     class FixtureIO(generation._GenerationFileIO):
         def __init__(self):
             super().__init__(tmp_path,directory)
@@ -398,10 +587,14 @@ def test_complete_g0_promotion_native_files_and_exact_failure_compensation(tmp_p
                     self.units['serein-https-gateway-adapter.service'].update(ActiveState='inactive',SubState='dead')
             if action=='stop':self.units[name].update(ActiveState='inactive',SubState='dead')
             if action in {'enable','disable'}:self.units[name]['UnitFileState']='enabled' if action=='enable' else 'disabled'
+            if not self.injected and ((failure=='exit_stop' and action=='stop') or (failure=='exit_reload' and action=='daemon-reload')):
+                self.injected=True;raise SystemExit('injected catchable interruption')
         def replace(self,path,before,after):
             super().replace(path,before,after)
             if failure=='image' and path==body['image_files'][1]['target'] and not self.injected:
                 self.injected=True;raise OSError('injected failure after durable image write')
+            if not self.injected and ((failure=='exit_image' and path==body['image_files'][0]['target']) or (failure=='exit_selector' and path==body['selector_pre']['current']['target'])):
+                self.injected=True;raise KeyboardInterrupt('injected catchable interruption')
     io=FixtureIO();boundaries=[]
     def invariant():boundaries.append('same-boot-identity-keys')
     def accept(expected,not_before):
@@ -423,20 +616,24 @@ def test_complete_g0_promotion_native_files_and_exact_failure_compensation(tmp_p
     if failure in {'disabled_target','restored_unit'}:
         match='PUBLIC_ENABLED_SUCCESSOR_TARGET_REQUIRED' if failure=='disabled_target' else 'PUBLIC_INSTALL_FAILED_RECOVERY_UNPROVEN'
         with pytest.raises(TransactionError,match=match):
-            generation._complete_bootstrap_promotion(io,{'candidate_selector':selector},body,raw,private,public,precheck,invariant,accept)
+            generation._complete_bootstrap_promotion(io,{'candidate_selector':selector},body,raw,private,public,precheck,invariant,accept,retained=retained)
         if failure=='disabled_target':assert io.calls==[]
         assert json.loads((tmp_path/directory.lstrip('/')/'forward-state.json').read_bytes())['phase']!='RESTORED_CAPTURED_PRESTATE'
         return
     if failure:
         with pytest.raises(TransactionError,match='PUBLIC_INSTALL_FAILED_CAPTURED_PRESTATE_RESTORED'):
-            generation._complete_bootstrap_promotion(io,{'candidate_selector':selector},body,raw,private,public,precheck,invariant,accept)
+            generation._complete_bootstrap_promotion(io,{'candidate_selector':selector},body,raw,private,public,precheck,invariant,accept,retained=retained)
         for row in body['image_files']:assert io.read(row['target'])==row['pre']
         assert io.read(body['selector_pre']['current']['target'])==body['selector_pre']['current']
         assert io.unit_state('serein-outpost.target')['UnitFileState']=='enabled'
         phase='RESTORED_CAPTURED_PRESTATE'
     else:
-        result=generation._complete_bootstrap_promotion(io,{'candidate_selector':selector},body,raw,private,public,precheck,invariant,accept)
-        assert result['result']=='INSTALLED_CURRENT_BOOT_OBSERVED'
+        result=generation._complete_bootstrap_promotion(io,{'candidate_selector':selector},body,raw,private,public,precheck,invariant,accept,retained=retained)
+        assert result['result']==('RESTORED_CURRENT_BOOT_OBSERVED' if retained_recovery else 'INSTALLED_CURRENT_BOOT_OBSERVED')
+        if retained_recovery:
+            assert io.read(body['selector_pre']['current']['target']) == retained['captured_current']
+            assert result['preserved_lkg_sha256'] == body['selector_pre']['lkg']['sha256']
+            assert result['preserved_lkg_selector'] == json.loads(base64.b64decode(body['selector_pre']['lkg']['content_b64']))
         assert result['stage1']==result['sfos_admission']==result['outpost_admission']=='UNPROVEN'
         assert result['downstream_activation']=='NONE'
         for row in body['image_files']:assert io.read(row['target'])==row['post']
