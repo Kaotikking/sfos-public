@@ -90,21 +90,7 @@ class VitalsRuntimeStore:
                         raise VitalsRuntimeError("VITALS_NATIVE_WITNESS_DENIED")
                 elif value["claim"] == "CHRONOLOGY_OBSERVED":
                     rows = VitalityChronology(watchdog_root / "chronology.jsonl").read()
-                    # The writer durably appends before publishing its producer
-                    # checkpoint. A valid append can therefore occur between
-                    # these reads. Bind the original checkpoint to the fully
-                    # verified chain, never relabel it as the current tail.
-                    count = value["payload"].get("event_count")
-                    if type(count) is not int or not 1 <= count <= len(rows):
-                        raise VitalsRuntimeError("VITALS_NATIVE_WITNESS_DENIED")
-                    checkpoint = rows[count - 1]
-                    if (value["payload"] != {"event_count": count, "latest_event": checkpoint}
-                            or value["evidence_ref"] != "chronology:" + checkpoint["event_hash"]
-                            or checkpoint["event_kind"] != "OUTPOST_WATCHDOG"
-                            or checkpoint["subject"] != self.expected_subject
-                            or value["boot_id"] != checkpoint["payload"].get("boot_id")
-                            or value["observed_at"] != checkpoint["observed_at"]
-                            or value["observed_at"] != checkpoint["payload"].get("observed_at")):
+                    if not rows or value["payload"] != {"event_count": len(rows), "latest_event": rows[-1]} or value["evidence_ref"] != "chronology:" + rows[-1]["event_hash"]:
                         raise VitalsRuntimeError("VITALS_NATIVE_WITNESS_DENIED")
                 elif value["claim"] != "CHRONOLOGY_UNAVAILABLE" or value["payload"] != {"status": "UNAVAILABLE"}:
                     raise VitalsRuntimeError("VITALS_NATIVE_WITNESS_DENIED")

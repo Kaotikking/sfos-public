@@ -121,8 +121,8 @@
     },
     {
       "path": "outpost/install/kernel_first_install_runner.py",
-      "bytes": 36263,
-      "sha256": "f843f4dde2cae488ca0ef4f0d2f377b9a18f9cc4c8c5c770cb6ff59ab59b5849"
+      "bytes": 19577,
+      "sha256": "7f7bb187e80e9894c7e579538dd7e6de37131bb92b9982adc523896509c94f06"
     },
     {
       "path": "outpost/install/public_generation_transaction.py",
@@ -175,11 +175,6 @@
       "sha256": "00a5e9d961fb1d039d217ba05a929deb3db295237f016be10e84ccd119c7325c"
     },
     {
-      "path": "outpost/outpost/kernel_direct_witness.py",
-      "bytes": 15570,
-      "sha256": "6161f97994ab783766a53088397e01d409d786fc7a7829459fbdd0de2ed95f79"
-    },
-    {
       "path": "outpost/outpost/presentation_service.py",
       "bytes": 4312,
       "sha256": "a27befa08644f3b7ab23766065d29c7cbbe7f0c6f6df4b26c07e35a08e87468e"
@@ -196,8 +191,8 @@
     },
     {
       "path": "outpost/outpost/service.py",
-      "bytes": 12368,
-      "sha256": "d4a2e91ed4633ad64b708b13b2ba241d4709657aead31e497f12707b0c997d18"
+      "bytes": 12145,
+      "sha256": "a924cababb0c5b3eead1e7a7edfbf5ab43b16260b9840be2db6e3a8d0252cc3a"
     },
     {
       "path": "outpost/outpost/vitals_aggregation.py",
@@ -211,18 +206,18 @@
     },
     {
       "path": "outpost/outpost/vitals_runtime.py",
-      "bytes": 13184,
-      "sha256": "ac237ebdc3569e7e49200d12c1565d006be00274cb6cd9da9101030ea9aceead"
+      "bytes": 12163,
+      "sha256": "6930eddb416d7efd44cde9c300c6cb56f056ae21f5c19e1f0dbd82f7f96f6e5b"
     },
     {
       "path": "outpost/outpost/watchdog.py",
-      "bytes": 7469,
-      "sha256": "fee4e5575a33de356c0f1eb7ee808cebf1abe400da491de96ae7de0012bb9d87"
+      "bytes": 7139,
+      "sha256": "7ce053df59626ae9aa630af86f589d8ad10a7424af78efd74caf169453c17be4"
     },
     {
       "path": "outpost/release-manifest.json",
-      "bytes": 9701,
-      "sha256": "427250d64747f09a364cf251ebffabc0af1d1ab3e5a17ae7c70ff76c58a1a96a"
+      "bytes": 9361,
+      "sha256": "038713c98e0bc01f8ef9274a6abad10bd003c0127b9790d53c220c8f6d67af89"
     },
     {
       "path": "outpost/systemd/serein-https-gateway-adapter.service",
@@ -310,14 +305,9 @@
       "sha256": "efb4e4750b4f32c2106ca172ac532763482997b2608fcf2ecb219e1ac69f61d1"
     },
     {
-      "path": "outpost/tests/test_kernel_direct_witness.py",
-      "bytes": 18957,
-      "sha256": "7e19f6fdd290b3579e33a7c652970d8058408c0ed9965e502da8a76b7e498c98"
-    },
-    {
       "path": "outpost/tests/test_kernel_first_install_runner.py",
-      "bytes": 35269,
-      "sha256": "de6173f3cd058e84d583a8cc280abcf16bf94b1c986f10f66d47310d5b26642e"
+      "bytes": 8755,
+      "sha256": "661710d2acdbf17a25f942f7657eb0ec1ab6f1bf8bf6c768dae886689a57be78"
     },
     {
       "path": "outpost/tests/test_media_build.py",
@@ -346,8 +336,8 @@
     },
     {
       "path": "outpost/tests/test_service.py",
-      "bytes": 22966,
-      "sha256": "f82a185364f27921f06427c07c1825cde2c08b7823b21c49837fc5810248697d"
+      "bytes": 21133,
+      "sha256": "14851e99dbbc14fdadba8f645bb237dedd9d5d0cb57fb6423a13f65d12437884"
     },
     {
       "path": "outpost/tests/test_vitals_aggregation.py",
@@ -361,13 +351,13 @@
     },
     {
       "path": "outpost/tests/test_vitals_runtime.py",
-      "bytes": 17568,
-      "sha256": "3804a09cbe366ff468515e25854a4309567c498e7531d68bd020827834a7f576"
+      "bytes": 14839,
+      "sha256": "c74ad61bd27b753e0b76c25afe87ef3364bfcf1c20c7a2fd1f2b2c524ac6e74a"
     },
     {
       "path": "outpost/tests/test_watchdog.py",
-      "bytes": 15186,
-      "sha256": "970d7818a2eed0e46473ec0e24265605425d7956017b82d465f4538eb32d73e8"
+      "bytes": 11445,
+      "sha256": "9ac46807e1c878441359b1d4a7a84ac2b0087db52d157dfbe8cd349cd44b67ed"
     },
     {
       "path": "outpost/verify_install_preflight.py",
@@ -375,5 +365,5 @@
       "sha256": "1f2c365c369b3fd3257044925e14b7a471bdcec4a9fafdadf0cfaad09346f8b7"
     }
   ],
-  "self_digest": "sha256:d6acd696362960cae1773c62b379ca03b722e1893bfedddef86b6a502d3cd2de"
+  "self_digest": "sha256:f6e54ba9595433a095af18380b50196103db3f16b2e2314124f5024d8933aee0"
 }

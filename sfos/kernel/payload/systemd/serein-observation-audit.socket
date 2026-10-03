@@ -1,9 +1,0 @@
-[Unit]
-Description=Serein observation audit socket
-[Socket]
-ListenStream=/run/serein/stage1/audit.sock
-SocketMode=0600
-SocketUser=serein-stage1
-SocketGroup=serein-stage1
-[Install]
-WantedBy=sockets.target

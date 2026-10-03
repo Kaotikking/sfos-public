@@ -11,49 +11,6 @@ from tests.test_host_vitality import observation
 BOOT="11111111-2222-4333-8444-555555555555"
 
 
-def test_main_enables_location_only_fatal_evidence_before_coordinator(monkeypatch):
-    import faulthandler
-    from outpost import service
-    calls = []
-    monkeypatch.setattr(faulthandler, "enable", lambda **kw: calls.append(("faults", kw)))
-    monkeypatch.setattr(service, "run_coordinator", lambda **kw: calls.append(("run", kw)))
-    service.main(["--host-vitality-root", "/synthetic/host"])
-    assert calls[0] == ("faults", {"all_threads": False})
-    assert calls[1][0] == "run"
-    assert len(calls) == 2
-
-
-def test_fatal_coordinator_signal_records_location_without_local_values(tmp_path):
-    """Child-only SIGABRT; no service, VM, core file or live state effect."""
-    import os
-    import subprocess
-    import sys
-    from pathlib import Path
-    if os.name != "posix":
-        pytest.skip("POSIX fatal-signal acceptance")
-    code = '''
-import os, resource, signal
-from outpost import service
-resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-def synthetic_coordinator_stall(**kwargs):
-    private_value = "SYNTHETIC_MUST_NOT_APPEAR_IN_CRASH_OUTPUT"
-    os.kill(os.getpid(), signal.SIGABRT)
-service.run_coordinator = synthetic_coordinator_stall
-service.main(["--host-vitality-root", "/synthetic/host"])
-'''
-    environment = dict(os.environ)
-    environment.pop("PYTHONFAULTHANDLER", None)
-    environment.pop("PYTHONDEVMODE", None)
-    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
-    result = subprocess.run([sys.executable, "-B", "-c", code], cwd=tmp_path,
-                            env=environment, capture_output=True, text=True, timeout=5)
-    assert result.returncode == -6
-    assert "synthetic_coordinator_stall" in result.stderr
-    assert "SYNTHETIC_MUST_NOT_APPEAR_IN_CRASH_OUTPUT" not in result.stderr
-    assert result.stdout == ""
-    assert list(tmp_path.iterdir()) == []
-
-
 def test_current_generation_identity_binds_running_module_and_exact_bytes(tmp_path):
     from outpost.service import current_generation_identity
     from tests.test_generation_launcher import native_generation
