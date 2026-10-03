@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G4-RECOVERY-ENTRY-1",
+  "generation": "G4-RECOVERY-ENTRY-2",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -20,8 +20,8 @@
     },
     {
       "path": "install/public_generation_transaction.py",
-      "bytes": 114178,
-      "sha256": "5554605a01659b75c41af251ced34593b374410e5c8df52a6f9b7c334b94a710"
+      "bytes": 114757,
+      "sha256": "6391eef0e8c90845ec09d25e8f6bd9b736942c40611cb962e14d705f8ee65b65"
     },
     {
       "path": "install/public_installer_cli.py",
@@ -212,8 +212,8 @@
     },
     {
       "path": "tests/test_public_generation_transaction.py",
-      "bytes": 81894,
-      "sha256": "2db0703d17dcc1c06d93da7dc8f9b6585cd35ad3457f82829bc169cb091197e9"
+      "bytes": 85121,
+      "sha256": "4af021b7165137fad8def0e1151d73473e64662f0c7f04cffa9be11bed73aa42"
     },
     {
       "path": "tests/test_public_installer_cli.py",
@@ -284,5 +284,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:b5d4c993bc0572823f070c0186462c6f54fdd1c79ddd95daa64be78389409a60"
+  "self_digest": "sha256:faf0227c2c7316171d6db1b872747eff8c0d5379b7f93b202cf01a5d38a0c09f"
 }

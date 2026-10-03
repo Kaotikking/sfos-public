@@ -843,7 +843,7 @@ def retained_recovery_prestate(root, fields, *, transitioning=False):
 
 def capture_retained_material(root, destination):
     """Read the already-indexed generation; do not stage, replace or delete it."""
-    from .generation_launcher import read_selector, _read_regular, LaunchDenied
+    from .generation_launcher import read_selector, _read_regular, _decode_json, LaunchDenied
     root = Path(os.path.abspath(root))
     retained = destination['retained']
     path = root / retained['candidate_path'].lstrip('/')
@@ -853,7 +853,15 @@ def capture_retained_material(root, destination):
         if selector != retained['selector'] or '/'+directory.relative_to(root).as_posix() != destination['target']:
             raise TransactionError('PUBLIC_RETAINED_CHANGED')
         raw, _ = _read_regular(directory/'generation-inventory.json', 0o644)
-        inventory = strict_json(raw)
+        inventory = _decode_json(raw)
+        if (not isinstance(inventory, list)
+                or sha(canonical(inventory)) != selector['inventory_digest']
+                or any(not isinstance(row, dict) or row.get('kind') not in {'file','directory'}
+                       or not isinstance(row.get('path'), str)
+                       or row['path'].startswith('/') or '\\' in row['path']
+                       or any(part in {'','.', '..'} for part in row['path'].split('/'))
+                       for row in inventory)):
+            raise TransactionError('PUBLIC_RETAINED_INVENTORY_DENIED')
         material = {}
         for row in inventory:
             if row['kind'] != 'file':

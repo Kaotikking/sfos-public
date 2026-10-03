@@ -1044,6 +1044,58 @@ def test_generated_public_source_is_exact_plan_bound_and_inventory_covered():
         generation.bind_generation_material(release,material,release['self_digest'])
 
 
+@pytest.mark.parametrize('defect', [None, 'payload', 'inventory', 'source', 'hardlink', 'late_inventory_swap'])
+def test_capture_retained_material_reads_real_inventory_list(tmp_path, defect, monkeypatch):
+    release, material = bootstrap_material()
+    source = {'schema':'SereinOutpostPublicSource/v1','repository':'Kaotikking/sfos-public',
+              'commit':'a'*40,'tree':'b'*40,'archive_sha256':'c'*64,
+              'release_digest':release['self_digest'],'source_plan_sha256':'d'*64}
+    material['public-source.json'] = canonical(source)
+    selector = generation.prepared_generation_selector(release, material, 'd'*64)
+    directory = tmp_path/'usr/share/serein/outpost-generations'/selector['generation']
+    directory.mkdir(parents=True); directory.chmod(0o755)
+    inventory = generation.generation_inventory(material)
+    for row in inventory:
+        path = directory/row['path']
+        if row['kind'] == 'directory':
+            path.mkdir(parents=True, exist_ok=True); path.chmod(int(row['mode'],8))
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(material[row['path']]); path.chmod(int(row['mode'],8))
+    index = directory/'generation-inventory.json'
+    index.write_bytes(canonical(inventory)+b'\n'); index.chmod(0o644)
+    candidate = tmp_path/'var/lib/serein/rollback/outpost-public-generation-20260930T080850Z-b43cfde96e65/candidate.json'
+    candidate.parent.mkdir(parents=True);candidate.parent.chmod(0o700)
+    candidate.write_bytes(canonical(selector)+b'\n');candidate.chmod(0o600)
+    destination = {'target':'/'+directory.relative_to(tmp_path).as_posix(),
+        'retained':{'selector':selector,'candidate_path':'/'+candidate.relative_to(tmp_path).as_posix()},
+        'source':dict(source)}
+    if defect == 'payload': (directory/'payload.py').write_bytes(b'changed')
+    elif defect == 'inventory': index.write_bytes(b'{}')
+    elif defect == 'source': destination['source']['commit'] = 'e'*40
+    elif defect == 'hardlink': os.link(directory/'payload.py', tmp_path/'foreign-link')
+    elif defect == 'late_inventory_swap':
+        from install import generation_launcher
+        original = generation_launcher._read_regular
+        calls = []
+        def swapped(path, mode=None):
+            assert '..' not in path.parts, 'External target must never be opened'
+            data, info = original(path, mode)
+            if path == index:
+                calls.append(1)
+                if len(calls) == 2:
+                    data = canonical([{'kind':'file','path':'../../external',
+                        'mode':'0644','bytes':0,'sha256':sha(b''),'uid':0,'gid':0}])
+            return data, info
+        monkeypatch.setattr(generation_launcher, '_read_regular', swapped)
+    before = {p.relative_to(directory).as_posix():p.read_bytes() for p in directory.rglob('*') if p.is_file()}
+    if defect:
+        with pytest.raises(TransactionError): generation.capture_retained_material(tmp_path, destination)
+    else:
+        assert generation.capture_retained_material(tmp_path, destination) == (release, material)
+    assert before == {p.relative_to(directory).as_posix():p.read_bytes() for p in directory.rglob('*') if p.is_file()}
+
+
 def complete_preparation_fixture(root):
     successor_fixture(root)
     units = bootstrap_fixture(root)
