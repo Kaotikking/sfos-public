@@ -1872,7 +1872,9 @@ def _compare_operations_lifecycle(plan,authority_observation,observations,contro
      'checks':{'scheduler':'ADVANCING_AT_OR_ABOVE_60_BPM','vitals':'CURRENT_SOURCE_BOUND',
          'queues_leases':'OBSERVED_WITH_EXPLICIT_UNKNOWNS','event_audit':'SOURCE_BOUND_ACK_CORRELATED',
          'continuity':'AUTHENTICATED_RETAINED_STATE_AND_RESTART_CONTROLS_AVAILABLE'},
-     'health_disposition':'IDLE' if last['queue_depth']==0 else 'HELD_REQUEST_MATERIAL_REQUIRED',
+     'health_disposition':('EXPIRED_REQUEST_OUTCOME_UNKNOWN'
+         if last['replay_continuity']['expired_reservations'] else
+         'IDLE' if last['queue_depth']==0 else 'HELD_REQUEST_MATERIAL_REQUIRED'),
      'recovery_execution':'NOT_TESTED','admission':'UNADMITTED','stage1':'NOT_READY','authority_effect':'NONE'}
 
 

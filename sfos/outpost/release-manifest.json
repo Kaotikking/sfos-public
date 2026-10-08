@@ -15,8 +15,8 @@
     },
     {
       "path": "install/kernel_first_install_runner.py",
-      "bytes": 188155,
-      "sha256": "9c109efb0f6d0b7cdac8e7a77f38330f56aec132c77e1b88037fd0aac3f74ca8"
+      "bytes": 188267,
+      "sha256": "e3e5fe3b43e4c7ddbb96e4f52c49669cc26c0b0fcaa7a1a622f2db637aff0ac3"
     },
     {
       "path": "install/public_generation_transaction.py",
@@ -70,8 +70,8 @@
     },
     {
       "path": "outpost/kernel_direct_witness.py",
-      "bytes": 69574,
-      "sha256": "9f018b934bb04a0aa3d17250c5ab7fb80bc21bac04ced18a3a2454a9b8467ab1"
+      "bytes": 69673,
+      "sha256": "f354a75ecabf4e66074082b1bac2c6e100d3533d87302d6239acdf2a662a5f09"
     },
     {
       "path": "outpost/presentation_service.py",
@@ -173,5 +173,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:f2355d1544c4b40dd34a5988dba7033298f78ef217296597bcaf34073ef16983"
+  "self_digest": "sha256:894ffbcb05a09d69cefe5f6fbf8d1627e554ff2e653f8734294e84f629f1738b"
 }

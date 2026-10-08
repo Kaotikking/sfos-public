@@ -126,10 +126,11 @@ def compare_operations_response(raw, *, request, source, boot_id,
                     and continuity['chains']<=continuity['receipts']<=3*continuity['chains']
                     and sum(continuity[key] for key in counts[2:])<=continuity['chains']
                     and continuity['active_reservations']==event['active_leases']
-                    and continuity['expired_reservations']==0
                     and continuity['integrity']==('AUTHENTICATED_REPLAY_HISTORY' if continuity['chains'] else 'EMPTY_NO_AUTHENTICATED_RECEIPTS')
                     and continuity['authority_effect']=='NONE' and continuity['work_proof'] is False,
                     'KERNEL_OPERATIONS_CONTINUITY_DENIED')
+            # Expired reservations are retained evidence, not executable work.
+            # Correlate their truthful count without granting recovery/admission.
         require(all(type(event[key]) is int and event[key]>=(1 if key=='sequence' else 0)
                     for key in ('sequence','monotonic_ns','queue_depth','active_leases'))
                 and all(isinstance(event[key],str) and re.fullmatch('[0-9a-f]{64}',event[key])

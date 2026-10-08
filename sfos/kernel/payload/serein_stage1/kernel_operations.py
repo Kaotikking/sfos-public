@@ -1237,8 +1237,10 @@ def observe(*, boot_id_path: Path, descriptor_path: Path, key_path: Path,
             'reserved': sum(len(chains[nonce]) == 2 for nonce in bindings),
             'completed_results': sum(len(chains[nonce]) == 3 for nonce in bindings),
             'authority_effect':'NONE', 'physical_effect':'UNVERIFIED'}
-        if replay_history['expired_reservations']:
-            raise OperationsDenied("EXPIRED_REPLAY_LEASE_DENIED")
+        # Authenticated expired attempts remain recovery evidence, not active
+        # work. Their immutable RESERVED heads never authorize retry/consume.
+        # Keep the observer alive: unrelated lease expiry must not stop the
+        # scheduler's cadence or conceal its truthful recovery/UNKNOWN state.
         active_leases = replay_history['active_reservations']
     except (UnicodeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
         raise OperationsDenied("REPLAY_LEASE_STATE_DENIED") from exc

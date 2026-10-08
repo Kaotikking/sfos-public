@@ -54,10 +54,12 @@ def _validate_operations_event(event):
                 or not continuity['chains']<=continuity['receipts']<=3*continuity['chains']
                 or sum(continuity[key] for key in counts[2:])>continuity['chains']
                 or continuity['active_reservations']!=event['active_leases']
-                or continuity['expired_reservations']!=0
                 or continuity['integrity']!=('AUTHENTICATED_REPLAY_HISTORY' if continuity['chains'] else 'EMPTY_NO_AUTHENTICATED_RECEIPTS')
                 or continuity['authority_effect']!='NONE' or continuity['work_proof'] is not False):
             raise ValueError('invalid_operations_continuity')
+        # Expired reservations are authenticated historical evidence. Record
+        # their separate count; never turn it into active work, recovery success
+        # or admission, and never stop Audit merely because work timed out.
     try:
         if str(UUID(event['boot_id'])) != event['boot_id']:
             raise ValueError('invalid_boot')
