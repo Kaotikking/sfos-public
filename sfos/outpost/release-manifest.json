@@ -15,18 +15,18 @@
     },
     {
       "path": "install/kernel_first_install_runner.py",
-      "bytes": 19577,
-      "sha256": "7f7bb187e80e9894c7e579538dd7e6de37131bb92b9982adc523896509c94f06"
+      "bytes": 153387,
+      "sha256": "d170ecdaf07632a0730051a93835c2c6b95acbb4819febf5792d249bea0ec99e"
     },
     {
       "path": "install/public_generation_transaction.py",
-      "bytes": 114757,
-      "sha256": "6391eef0e8c90845ec09d25e8f6bd9b736942c40611cb962e14d705f8ee65b65"
+      "bytes": 115302,
+      "sha256": "d5e3a26c1bf5191a197d6c358d0a4b9ca0b38b609c1cad23d8175b392e1d68c6"
     },
     {
       "path": "install/public_installer_cli.py",
-      "bytes": 32981,
-      "sha256": "0905b2ed3761b5987b79f34eb0bf4c30beefe15c5cfca7e643cfde1cfbe52c11"
+      "bytes": 33033,
+      "sha256": "bacb6209ab579f731ef89e3673f18c1f7c87925f866c0b721f855b06ebf3783c"
     },
     {
       "path": "install/transaction.py",
@@ -69,6 +69,11 @@
       "sha256": "00a5e9d961fb1d039d217ba05a929deb3db295237f016be10e84ccd119c7325c"
     },
     {
+      "path": "outpost/kernel_direct_witness.py",
+      "bytes": 67278,
+      "sha256": "4b9e3e2e948d5aea8f866a960537f1b3098d7e677b258e70d025418a141f0737"
+    },
+    {
       "path": "outpost/presentation_service.py",
       "bytes": 4312,
       "sha256": "a27befa08644f3b7ab23766065d29c7cbbe7f0c6f6df4b26c07e35a08e87468e"
@@ -80,13 +85,13 @@
     },
     {
       "path": "outpost/reboot_vitality.py",
-      "bytes": 15927,
-      "sha256": "24a02958c2e690919547b710fbdc0ed3d67e379aa3d46f54c479b279f01ce69a"
+      "bytes": 16352,
+      "sha256": "18b0fe73e182fb9ba115dab0dec2a8d705288530d9e9bf9c1ec0e7f22fc55e20"
     },
     {
       "path": "outpost/service.py",
-      "bytes": 12145,
-      "sha256": "a924cababb0c5b3eead1e7a7edfbf5ab43b16260b9840be2db6e3a8d0252cc3a"
+      "bytes": 12538,
+      "sha256": "3fe787766337e515f4f6ae431d9f9ae568d4bde05b3a0f8460b287d92e25b055"
     },
     {
       "path": "outpost/vitals_aggregation.py",
@@ -95,8 +100,8 @@
     },
     {
       "path": "outpost/vitals_edge.py",
-      "bytes": 8496,
-      "sha256": "c35db34b54fdb35e84ad22d8463746c52499d3f517e8bdf7d2d6aebf2b30e176"
+      "bytes": 21880,
+      "sha256": "0911d768aa55df2308c35b0489a74f82ed9e2c6c9b901bac815e636dadb4be8d"
     },
     {
       "path": "outpost/vitals_runtime.py",
@@ -105,8 +110,8 @@
     },
     {
       "path": "outpost/watchdog.py",
-      "bytes": 7139,
-      "sha256": "7ce053df59626ae9aa630af86f589d8ad10a7424af78efd74caf169453c17be4"
+      "bytes": 7330,
+      "sha256": "1a832efdc3d8a658e15782836645416949925fbe1d739f5ab34478a3db770f9f"
     },
     {
       "path": "systemd/serein-https-gateway-adapter.service",
@@ -139,123 +144,7 @@
       "sha256": "1f2c365c369b3fd3257044925e14b7a471bdcec4a9fafdadf0cfaad09346f8b7"
     }
   ],
-  "source_only_files": [
-    {
-      "path": "tests/active_host.py",
-      "bytes": 1575,
-      "sha256": "f7b3691978db55f0ccb989878f974237a652362b8f09244fd51b0c0949f4ec56"
-    },
-    {
-      "path": "tests/donor_kernel_first_install.py",
-      "bytes": 15425,
-      "sha256": "03bbecf3eaa5e270513f9ba685729b67025fd4a0209fd3314b0f0638375569f3"
-    },
-    {
-      "path": "tests/test_base_entry_contract.py",
-      "bytes": 20156,
-      "sha256": "43ca4fb3fd64154cee05daee061e024afaee57c02fcb707196ac8258570faa78"
-    },
-    {
-      "path": "tests/test_base_policy.py",
-      "bytes": 2327,
-      "sha256": "4c5f03aa7160e67369d539b525825a020a6db3aae0db3117d484bb18cef81e4a"
-    },
-    {
-      "path": "tests/test_base_source_road.py",
-      "bytes": 8562,
-      "sha256": "6623a01f41128570d6a92b1acff3ece404677632083b7346502c172483d476cc"
-    },
-    {
-      "path": "tests/test_constitutional_registry.py",
-      "bytes": 2696,
-      "sha256": "1c7df1f7dab7f5fef3c2eb9e0d2a732fda3488ae7f7f3b473753c7ea14c1e1d7"
-    },
-    {
-      "path": "tests/test_debian_host_collector.py",
-      "bytes": 19370,
-      "sha256": "db65f40ef3256b0b6675822c9247a8370d98495c0d3a1e661e8444b70212fcee"
-    },
-    {
-      "path": "tests/test_generation_launcher.py",
-      "bytes": 4868,
-      "sha256": "13aef363ac6a6a7360f5bbe317515fb164e0ce7891e3f85d1c41bdd990a940d5"
-    },
-    {
-      "path": "tests/test_host_vitality.py",
-      "bytes": 15211,
-      "sha256": "d4b2869f81382d26387c730b3fc71cfb7678e1801eeafe9ac972466b039fea9a"
-    },
-    {
-      "path": "tests/test_host_witness_runner.py",
-      "bytes": 13630,
-      "sha256": "24483eddb64197d6cdbab4a2bf84db363cd8ce4f8d12c0dc20f9ec528fa21d0a"
-    },
-    {
-      "path": "tests/test_http_readonly.py",
-      "bytes": 5714,
-      "sha256": "73a5c59bd416d80302b0448596d3ab31a664b7093996202ab2e1f66bb6cf3bca"
-    },
-    {
-      "path": "tests/test_install_source_preflight.py",
-      "bytes": 11413,
-      "sha256": "efb4e4750b4f32c2106ca172ac532763482997b2608fcf2ecb219e1ac69f61d1"
-    },
-    {
-      "path": "tests/test_kernel_first_install_runner.py",
-      "bytes": 8755,
-      "sha256": "661710d2acdbf17a25f942f7657eb0ec1ab6f1bf8bf6c768dae886689a57be78"
-    },
-    {
-      "path": "tests/test_media_build.py",
-      "bytes": 16945,
-      "sha256": "995a4d25e6220574e4c832faccb7b27a475468a43a353e3cedc81e3e250eaf15"
-    },
-    {
-      "path": "tests/test_public_generation_transaction.py",
-      "bytes": 85121,
-      "sha256": "4af021b7165137fad8def0e1151d73473e64662f0c7f04cffa9be11bed73aa42"
-    },
-    {
-      "path": "tests/test_public_installer_cli.py",
-      "bytes": 53737,
-      "sha256": "62d0e4f6b1060ce2b376eac9845315d261f431712c241561c88676d9bfc8a7d8"
-    },
-    {
-      "path": "tests/test_public_tree_host.py",
-      "bytes": 18222,
-      "sha256": "eea3b43f5d3951e72137dad944fef80c6f0b9f6f79896c494c31254266a73c16"
-    },
-    {
-      "path": "tests/test_reboot_vitality.py",
-      "bytes": 12800,
-      "sha256": "4e4f27f6221de3e4f90aad51f19b26c4bdc26810812ff62c3d88f3811f8ba160"
-    },
-    {
-      "path": "tests/test_service.py",
-      "bytes": 21133,
-      "sha256": "14851e99dbbc14fdadba8f645bb237dedd9d5d0cb57fb6423a13f65d12437884"
-    },
-    {
-      "path": "tests/test_vitals_aggregation.py",
-      "bytes": 6866,
-      "sha256": "ee4fd438e3b12b8050f1782736a3fe147128de141f6681894426cd884eee709e"
-    },
-    {
-      "path": "tests/test_vitals_edge.py",
-      "bytes": 18882,
-      "sha256": "793e828563862cd345ee8b919ef96a3882394366133907840d85b7a4af563e44"
-    },
-    {
-      "path": "tests/test_vitals_runtime.py",
-      "bytes": 14839,
-      "sha256": "c74ad61bd27b753e0b76c25afe87ef3364bfcf1c20c7a2fd1f2b2c524ac6e74a"
-    },
-    {
-      "path": "tests/test_watchdog.py",
-      "bytes": 11445,
-      "sha256": "9ac46807e1c878441359b1d4a7a84ac2b0087db52d157dfbe8cd349cd44b67ed"
-    }
-  ],
+  "source_only_files": [],
   "runtime_dependencies": [
     {
       "python_module": "cryptography",
@@ -284,5 +173,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:faf0227c2c7316171d6db1b872747eff8c0d5379b7f93b202cf01a5d38a0c09f"
+  "self_digest": "sha256:f1916ec3737f4194a09fd24750cc713ba0baa3e08c300e0a4165de8181f17833"
 }

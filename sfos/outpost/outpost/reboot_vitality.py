@@ -227,6 +227,11 @@ class VitalityChronology:
         self._check_names(fd, directories)
 
     def append(self, event_id: str, event_kind: str, subject: str, observed_at: float, payload: Mapping[str, Any]) -> dict[str, Any]:
+        event, _ = self.append_with_snapshot(event_id, event_kind, subject, observed_at, payload)
+        return event
+
+    def append_with_snapshot(self, event_id: str, event_kind: str, subject: str, observed_at: float, payload: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Return the durable event and full history validated under its write lock."""
         if not all(_text(v) for v in (event_id, event_kind, subject)) or not _timestamp(observed_at) or not isinstance(payload, Mapping): raise RebootVitalityError("VITALITY_CHRONOLOGY_INPUT_DENIED")
         candidate = json.loads(canonical(dict(payload)))
         if self.path.parent.is_symlink() or any(parent.is_symlink() for parent in self.path.parents):
@@ -238,7 +243,7 @@ class VitalityChronology:
             if prior:
                 if prior["event_kind"] == event_kind and prior["subject"] == subject and prior["observed_at"] == observed_at and prior["payload"] == candidate:
                     self._sync_locked(fd, directories)
-                    return {**prior, "append_disposition": "IDEMPOTENT_REPLAY"}
+                    return {**prior, "append_disposition": "IDEMPOTENT_REPLAY"}, rows
                 raise RebootVitalityError("VITALITY_CHRONOLOGY_CONTRADICTION_HOLD")
             body = {"schema": "SereinVitalityChronologyEvent/v1", "sequence": len(rows) + 1, "event_id": event_id, "event_kind": event_kind, "subject": subject, "observed_at": observed_at, "payload": candidate, "previous_hash": rows[-1]["event_hash"] if rows else "GENESIS"}
             record = {**body, "event_hash": _digest(body)}
@@ -253,4 +258,5 @@ class VitalityChronology:
         finally:
             os.close(fd)
             for directory, _, _ in reversed(directories): os.close(directory)
-        return {**record, "append_disposition": "APPENDED"}
+        rows.append(record)
+        return {**record, "append_disposition": "APPENDED"}, rows

@@ -1450,7 +1450,7 @@ def bind_generation_material(release, material, release_digest):
     return material
 
 
-def bootstrap_candidate_precheck(release, material, source_plan_sha256):
+def bootstrap_candidate_precheck(release, material, source_plan_sha256, *, retained_selector=None):
     """Independent Outpost source predicate, not installed Vitals acceptance.
 
     Native target/transaction checks still run separately under the lock.
@@ -1467,7 +1467,13 @@ def bootstrap_candidate_precheck(release, material, source_plan_sha256):
     except ConstitutionalRegistryError as error:
         raise TransactionError(str(error)) from None
     selector=prepared_generation_selector(release,material,source_plan_sha256)
+    # Recovery is bound by its caller to an already captured, signed-plan
+    # selected predecessor. Never impose a successor-only capability on that
+    # generation, or let a mismatched selector relax the candidate check.
+    if retained_selector is not None and retained_selector != selector:
+        raise TransactionError('PUBLIC_RETAINED_SOURCE_DENIED')
     runtime = {'outpost/service.py','outpost/host_witness_runner.py',
+               'outpost/watchdog.py','outpost/reboot_vitality.py',
                'outpost/constitutional_registry.py','outpost/host_vitality.py',
                'outpost/vitals_aggregation.py','outpost/debian_host_collector.py',
                'outpost/presentation_service.py','outpost/vitals_edge.py',
@@ -1476,6 +1482,8 @@ def bootstrap_candidate_precheck(release, material, source_plan_sha256):
                'install/public_installer_cli.py','install/public_generation_transaction.py',
                'install/transaction.py','install/kernel_first_install_runner.py',
                'verify_install_preflight.py'}
+    if retained_selector is None:
+        runtime.add('outpost/kernel_direct_witness.py')
     if any(source not in material for source in set(IMAGE_FILES)|runtime):
         raise TransactionError('PUBLIC_IMAGE_PAYLOAD_MISSING')
     return {'result':'G0_SOURCE_PREDICATES_PASS','release_digest':release['self_digest'],

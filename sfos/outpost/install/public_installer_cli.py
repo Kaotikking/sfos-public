@@ -532,7 +532,8 @@ def restore_install_request(arguments):
         retained = destination['retained']
         release, material = transaction.capture_retained_material(Path('/'), destination)
         precheck = transaction.bootstrap_candidate_precheck(release, material,
-            retained['selector']['predecessor_receipt_sha256'])
+            retained['selector']['predecessor_receipt_sha256'],
+            retained_selector=retained['selector'])
         if precheck['selector'] != retained['selector']:
             raise TransactionError('PUBLIC_RETAINED_SOURCE_DENIED')
         capture = {

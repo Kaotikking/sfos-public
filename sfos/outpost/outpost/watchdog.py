@@ -80,7 +80,10 @@ def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, 
     producer_root = state_root.parent / "vitals-producers"
     chronology = VitalityChronology(state_root / "chronology.jsonl")
     try:
-        prior_rows = chronology.read()
+        event, rows = chronology.append_with_snapshot("watchdog:" + digest(state), "OUTPOST_WATCHDOG", "SEREIN_HOST", now, state)
+        # Derive prior-boot evidence from the same locked, validated history.
+        # Exclude this tick; a replay still retains the complete current tail.
+        prior_rows = [row for row in rows if row["event_id"] != event["event_id"]]
         previous, first_post_boot_at = None, now
         for row in reversed(prior_rows):
             prior = row["payload"]
@@ -107,11 +110,9 @@ def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, 
             }
             recovery = classify_reboot({**observation, "evidence_digest": digest(observation)})
             _write_atomic(state_root.parent / "recovery" / "current.json", recovery)
-        event = chronology.append("watchdog:" + digest(state), "OUTPOST_WATCHDOG", "SEREIN_HOST", now, state)
-        rows = chronology.read()
         history_claim = "CHRONOLOGY_OBSERVED"
         history_payload = {"event_count": len(rows), "latest_event": rows[-1]}
-        history_ref = "chronology:" + event["event_hash"]
+        history_ref = "chronology:" + rows[-1]["event_hash"]
     except (OSError, ValueError, TypeError, AttributeError, KeyError):
         state["watchdog_state"] = "DEGRADED"
         history_claim = "CHRONOLOGY_UNAVAILABLE"

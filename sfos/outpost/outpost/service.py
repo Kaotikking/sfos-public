@@ -7,6 +7,7 @@ installer. An unbound observer is evidence, never generation acceptance.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import math
 import os
@@ -190,6 +191,9 @@ def _notify(message: str) -> None:
     if address.startswith("@"):
         address = "\0" + address[1:]
     with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
+        # A blocked notification receiver must not strand the witness loop.
+        # Preserve failure propagation: no retry, false readiness or admission.
+        client.settimeout(2.0)
         client.connect(address)
         client.sendall(message.encode("utf-8"))
 
@@ -217,6 +221,9 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host-vitality-root", required=True)
     args = parser.parse_args(argv)
+    # Preserve bounded Python stack evidence on a watchdog SIGABRT. This emits
+    # no local values, starts no timer, and changes no restart/admission policy.
+    faulthandler.enable()
     run_coordinator(host_root=Path(args.host_vitality_root),
                     state_path=Path("/var/lib/serein-outpost/coordinator/current.json"),
                     boot_id_path=Path("/proc/sys/kernel/random/boot_id"))
