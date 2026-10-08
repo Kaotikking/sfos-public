@@ -904,6 +904,13 @@ def prepare_authority_observation(plan,receipt,request,*,root=Path('/'),source=S
  registry=strict_json(registry_raw)
  deny(canonical(registry)!=registry_raw,'KERNEL_NATIVE_IDENTITY_BINDING_DENIED')
  identity_binding={'binding':plan.get('native_identity'),'registry':registry}
+ if 'installation_origin' in plan:
+  # verify_install above authenticated this exact installed policy projection.
+  # Keep immutable birth identity separate from this successor's source binding.
+  policy_evidence=read_json(Path(root)/'var/lib/serein/kernel/authority/installed-policy-evidence.json')
+  origin=policy_evidence.get('body',{}).get('installation_origin')
+  deny(not isinstance(origin,dict),'KERNEL_OBSERVATION_ORIGIN_DENIED')
+  identity_binding['installation_origin']=strict_json(canonical(origin))
  expected_identity(identity_binding,anchor,source_binding)
  fresh=current_host_gate(host_path,boot)
  facts=lambda value:canonical({k:v for k,v in value['latest'].items() if k not in {'observed_at','evidence_digest'}})
@@ -2589,8 +2596,10 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
   deny(row['LoadState']!='loaded' or row['NeedDaemonReload']!='no'
        or not (_unit_active(name,row) or (row['ActiveState'],row['SubState'])==('inactive','dead')),
        'KERNEL_SUCCESSOR_UNIT_PRESTATE_DENIED')
- original=strict_json(canonical(prestate));attempted=False
- def read():return {**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()}
+ original=strict_json(canonical(prestate));attempted=False;restart_errors=[]
+ def read(*,cleanup=False):
+  if cleanup:return {**read_authority_unit_prestate(cleanup=True),**read_other_kernel_unit_prestate(cleanup=True)}
+  return {**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()}
  def definitions(current):
   deny(set(current)!=names or any(any(current[name][key]!=original[name][key] for key in
        ('Id','LoadState','FragmentPath','DropInPaths','UnitFileState','NeedDaemonReload')) for name in names),
@@ -2602,6 +2611,22 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
       '--job-mode=replace' if action=='stop' else '--job-mode=fail',action,*units],
       check=True,timeout=90,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
       close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
+  except subprocess.CalledProcessError as exc:
+   if action!='start':raise RunnerDenied('KERNEL_SUCCESSOR_QUIESCE_COMMAND_FAILED') from exc
+   # systemctl aggregates per-unit job errors. Observe the same requested
+   # predecessor, without retrying a start or replacing a conflicting job.
+   # This is compensation evidence only; construction still fails below.
+   import time
+   restart_errors.append(exc)
+   deadline=time.monotonic()+10.0
+   while True:
+    guard();current=read(cleanup=True);definitions(current)
+    settled=all(_unit_active(name,row) or (row['ActiveState'],row['SubState'])==('inactive','dead')
+                for name,row in current.items())
+    if settled and all(_unit_active(name,current[name]) for name in units):break
+    if time.monotonic()>=deadline:
+     raise RunnerDenied('KERNEL_SUCCESSOR_PREDECESSOR_RESTART_UNPROVEN') from exc
+    time.sleep(0.1)
   except (OSError,subprocess.SubprocessError) as exc:raise RunnerDenied('KERNEL_SUCCESSOR_QUIESCE_COMMAND_FAILED') from exc
   guard()
  guard();verify_predecessor()
@@ -2624,9 +2649,13 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
     for units in groups:
      command('start',tuple(name for name in units if _unit_active(name,original[name])))
     current=read();definitions(current)
-    deny(any(not _unit_active(name,current[name]) for name in names if _unit_active(name,original[name])),
+    deny(any((_unit_active(name,current[name]) if _unit_active(name,original[name]) else
+              (current[name]['ActiveState'],current[name]['SubState'])==('inactive','dead')) is not True
+             for name in names),
          'KERNEL_SUCCESSOR_PREDECESSOR_RESTART_UNPROVEN')
     guard();verify_predecessor()
+    for restart_error in restart_errors:
+     exc.add_note('Predecessor restart command failed but bounded independent state readback verified restoration: '+str(restart_error))
    except BaseException as recovery_error:
     raise RunnerDenied('KERNEL_SUCCESSOR_COMPENSATION_UNPROVEN') from recovery_error
   raise

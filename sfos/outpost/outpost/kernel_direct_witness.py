@@ -600,11 +600,17 @@ def compare_compute_response(raw, *, request, host_state, boot_id, observed_at,
 
 
 def expected_identity(identity, anchor, source):
-    """Independently verify initial registry signatures; never execute Kernel code."""
+    """Verify birth registry signatures without confusing them with payload source.
+
+    The installer-owned caller authenticates the optional public origin against
+    its signed current plan/projection. Never derive that expectation from the
+    subject registry. Current source/policy and possession checks stay separate.
+    """
     try:
         require(hashlib.sha256(anchor).hexdigest() == CANONICAL_AUTHORITY_SHA256,
                 "KERNEL_INSTALLER_ANCHOR_DENIED")
-        require(isinstance(identity, dict) and set(identity) == {"binding", "registry"},
+        require(isinstance(identity, dict) and set(identity) in (
+                    {"binding", "registry"}, {"binding", "registry", "installation_origin"}),
                 "KERNEL_EXPECTED_IDENTITY_DENIED")
         binding, registry = identity["binding"], identity["registry"]
         require(isinstance(binding, dict) and set(binding) == {
@@ -628,11 +634,38 @@ def expected_identity(identity, anchor, source):
                 and all(re.fullmatch(r"[0-9a-f]{64}", binding[key]) for key in (
                     "checkpoint", "registry_sha256", "private_sha256", "public_key", "transaction_context")),
                 "KERNEL_EXPECTED_IDENTITY_DENIED")
+        birth_commit = source['source_commit']
+        if 'installation_origin' in identity:
+            origin = identity['installation_origin']
+            require(isinstance(origin, dict) and set(origin) == {
+                        'plan_sha256','source_generation','native_identity','host_identity_file','boot_id'}
+                    and isinstance(origin['plan_sha256'],str)
+                    and re.fullmatch(r'[0-9a-f]{64}',origin['plan_sha256'])
+                    and origin['native_identity'] == {key:binding[key] for key in
+                        ('instance_id','checkpoint','registry_sha256','transaction_context')}
+                    and isinstance(origin['source_generation'],dict)
+                    and set(origin['source_generation']) == {'parent','commit','tree'}
+                    and all(isinstance(value,str) and re.fullmatch(r'[0-9a-f]{40}',value)
+                            for value in origin['source_generation'].values())
+                    and isinstance(origin['boot_id'],str)
+                    and re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}',origin['boot_id']),
+                    'KERNEL_EXPECTED_ORIGIN_DENIED')
+            host = origin['host_identity_file']
+            require(isinstance(host,dict) and set(host) == {
+                        'target','state','bytes','sha256','mode','uid','gid','device','inode','nlink'}
+                    and host['target']=='/etc/machine-id' and host['state']=='PRESENT_PRESERVED'
+                    and host['mode'] in ('0444','0644')
+                    and isinstance(host['sha256'],str) and re.fullmatch(r'[0-9a-f]{64}',host['sha256'])
+                    and all(type(host[key]) is int and host[key]>=0 for key in
+                            ('bytes','uid','gid','device','inode','nlink'))
+                    and host['uid']==host['gid']==0 and host['nlink']==1,
+                    'KERNEL_EXPECTED_ORIGIN_DENIED')
+            birth_commit = origin['source_generation']['commit']
         expected = {"schema": "SereinDomainIdentityRecord/v1", "domain": "KERNEL",
                     "instance_id": binding["instance_id"], "operation": "INSTALL", "revision": 0,
                     "prior_record": None, "replaces_instance_id": None, "public_key": binding["public_key"],
                     "key_fingerprint": hashlib.sha256(bytes.fromhex(binding["public_key"])).hexdigest(),
-                    "source_commit": source["source_commit"], "governance_receipt": binding["transaction_context"],
+                    "source_commit": birth_commit, "governance_receipt": binding["transaction_context"],
                     "authority_effect": "NONE", "admission_effect": "NONE"}
         require(body == expected and type(body["revision"]) is int, "KERNEL_EXPECTED_RECORD_DENIED")
         load_pem_public_key(anchor).verify(bytes.fromhex(record["installer_signature"]), record_bytes(body))
