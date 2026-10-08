@@ -1072,6 +1072,49 @@ def read_other_kernel_unit_prestate(*,cleanup=False):
  return _read_kernel_units(OTHER_KERNEL_UNITS,allow_transitional=cleanup)
 
 
+def read_kernel_enablement_prestate(root):
+ """Retain existing Kernel dependency links; never enable/disable a unit.
+
+ A missing unit has no manager UnitFileState even when its old .wants link
+ remains. Placing its exact file can reveal enabled without an enable call.
+ Only an unchanged, root-owned canonical dependency link explains that state.
+ """
+ root=Path(root);names=set(AUTHORITY_UNITS+OTHER_KERNEL_UNITS);rows=[]
+ for relative in ('etc/systemd/system','run/systemd/system'):
+  base=root/relative
+  if not os.path.lexists(base):continue
+  cursor=root
+  for part in Path(relative).parts:
+   cursor/=part;info=cursor.lstat()
+   deny(not stat.S_ISDIR(info.st_mode) or info.st_uid!=0 or info.st_gid!=0
+        or stat.S_IMODE(info.st_mode)&0o022,'KERNEL_ENABLEMENT_CUSTODY_DENIED')
+  def walk_error(error):raise RunnerDenied('KERNEL_ENABLEMENT_READ_DENIED') from error
+  for directory,dirs,files in os.walk(base,followlinks=False,onerror=walk_error):
+   for name in sorted(dirs+files):
+    path=Path(directory)/name;info=path.lstat()
+    if not stat.S_ISLNK(info.st_mode):continue
+    target=os.readlink(path)
+    if name not in names and Path(target).name not in names:continue
+    logical='/'+path.relative_to(root).as_posix()
+    normalized=os.path.normpath(os.path.join(os.path.dirname(logical),target))
+    deny(name not in names or path.parent.parent!=base
+         or normalized!='/etc/systemd/system/'+name
+         or not path.parent.name.endswith(('.wants','.requires')),
+         'KERNEL_ENABLEMENT_LINK_DENIED')
+    cursor=base
+    for part in path.parent.relative_to(base).parts:
+     cursor/=part;parent=cursor.lstat()
+     deny(not stat.S_ISDIR(parent.st_mode) or parent.st_uid!=0 or parent.st_gid!=0
+          or stat.S_IMODE(parent.st_mode)&0o022,'KERNEL_ENABLEMENT_CUSTODY_DENIED')
+    deny(info.st_uid!=0 or info.st_gid!=0 or info.st_nlink!=1,'KERNEL_ENABLEMENT_CUSTODY_DENIED')
+    fresh=path.lstat()
+    fields=lambda value:(value.st_dev,value.st_ino,value.st_uid,value.st_gid,
+                         value.st_mode,value.st_nlink,value.st_mtime_ns,value.st_ctime_ns)
+    deny(fields(info)!=fields(fresh) or os.readlink(path)!=target,'KERNEL_ENABLEMENT_CHANGED')
+    rows.append({'unit':name,'path':logical,'target':target,'fact':list(fields(info))})
+ return sorted(rows,key=lambda row:row['path'])
+
+
 def read_operations_service_controls():
  """Read existing manager identity/restart facts; not a recovery verdict.
 
@@ -2200,6 +2243,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
          'KERNEL_AUTHORITY_NOT_INACTIVE' if name in AUTHORITY_UNITS else 'KERNEL_DOMAIN_NOT_INACTIVE')
    return units
   unit_prestate=inactive_kernel_units()
+  enablement_prestate=read_kernel_enablement_prestate(root) if complete else None
   if complete:
    deny(any(row['NeedDaemonReload']!='no' for row in unit_prestate.values()),
         'KERNEL_UNIT_PRESTATE_RELOAD_REQUIRED')
@@ -2219,9 +2263,13 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
   # The signed projection names the exact initial observation. Independent
   # Host sampling continues during installation; only its time/digest may
   # advance, never the machine, Base/source, GPU or other observed facts.
-  material_boundary=_kernel_material_boundary(plan,host_prestate,request_raw,
+  check_material=_kernel_material_boundary(plan,host_prestate,request_raw,
       root=root,source=source,request_path=request_path,host_path=host_path,check_parent=check_parent,
       preserved_runtime=prepared['preserved_runtime'])
+  def material_boundary():
+   check_material()
+   if complete:
+    deny(read_kernel_enablement_prestate(root)!=enablement_prestate,'KERNEL_ENABLEMENT_CHANGED')
   deny(sha(regular(verify_path))!=CANONICAL_AUTHORITY_SHA256,"KERNEL_CANONICAL_ANCHOR_DENIED")
   private=load_pem_private_key(regular(signing_path),password=None)
   module=load_installer(source,read_json(source/'release-manifest.json'),expected_release=plan['release_digest'])
@@ -2276,9 +2324,12 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
          'KERNEL_INSTALL_RECEIPT_CHANGED')
     for name,row in unit_poststate.items():
      before=unit_prestate[name]
+     retained_enabled=any(link['unit']==name and link['path'].startswith('/etc/')
+                          for link in enablement_prestate)
      deny(row['LoadState']!='loaded' or row['NeedDaemonReload']!='no'
           or (row['UnitFileState']!=before['UnitFileState'] if before['LoadState']=='loaded'
-              else row['UnitFileState'] not in {'static','disabled'}),
+              else row['UnitFileState'] not in ({'static','disabled','enabled'}
+                    if retained_enabled else {'static','disabled'})),
           'KERNEL_UNIT_REFRESH_READBACK_DENIED')
     def finalize(observations,verify_lifecycle):
      material_boundary()
@@ -2295,6 +2346,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
      witness.update(authority_unit_prestate={name:unit_prestate[name] for name in AUTHORITY_UNITS},
          authority_unit_poststate={name:current[name] for name in AUTHORITY_UNITS},
          kernel_unit_prestate=unit_prestate,kernel_unit_poststate=current)
+     witness['kernel_enablement_prestate']=enablement_prestate
      def publication_boundary():
       material_boundary()
       verify_lifecycle()
