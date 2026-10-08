@@ -574,6 +574,12 @@ def build_plan(source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,verify_pa
  return plan,host
 def verify_install(root,plan,receipt,*,source):
  deny(capture_outpost_generation(root)!=plan['outpost_generation'],'KERNEL_OUTPOST_GENERATION_CHANGED')
+ return _verify_install_material(root,plan,receipt,source=source)
+
+
+def _verify_install_material(root,plan,receipt,*,source):
+ # Read-only signed material verification, also used by exact failed-attempt
+ # recovery. Normal construction separately requires its original Outpost.
  receipt_path=Path(root).joinpath(*Path(receipt["receipt"]).parts[1:]);value=read_json(receipt_path);required={"schema","plan_sha256","boot_id","branch_order","prestate","replacements","rollback_selector","rollback_auth_sha256","receipt_signature","receipt_digest"};deny(set(value)!=required or value.get("schema")!="SereinPublicKernelFirstInstallReceipt/v1","KERNEL_INSTALL_RECEIPT_SCHEMA_DENIED");digest=value.pop("receipt_digest",None);deny(digest!=sha(canonical(value)) or value.get("plan_sha256")!=sha(canonical(plan)) or value.get("boot_id")!=plan["current_boot_id"] or value.get("rollback_selector")!=plan["rollback_selector"] or value.get("branch_order")!=list(ORDER),"KERNEL_INSTALL_RECEIPT_DENIED")
  signature=value.pop("receipt_signature",None);auth=regular(receipt_path.parent/"rollback-auth.key");deny(sha(auth)!=value.get("rollback_auth_sha256") or not hmac.compare_digest(base64.urlsafe_b64encode(hmac.new(auth,canonical(value),hashlib.sha256).digest()).decode().rstrip("="),str(signature)),"KERNEL_INSTALL_RECEIPT_SIGNATURE_DENIED")
  replacements=value.get("replacements");generated={"/var/lib/serein/kernel/authority/replay.key","/var/lib/serein/kernel/authority/replay-descriptor.json","/etc/serein/kernel/replay-peer.env"}
@@ -1127,6 +1133,149 @@ def read_operations_service_controls():
  return _read_kernel_units(OPERATIONS_SERVICES,service_controls=True)
 
 
+def recover_failed_construction(root,source,receipt_path,expected):
+ """Exact failed-attempt compensation owned by the current Outpost successor.
+
+ No restart, continuation, admission or arbitrary service action. The failed
+ signed plan keeps its original Outpost identity; the executing generation is
+ bound separately. Only a completely placed, never-witnessed attempt is in
+ scope. An incomplete stop prevents all ACL/file compensation.
+ """
+ import subprocess
+ root=Path(root);source=Path(source);receipt_path=Path(receipt_path)
+ fields={'plan_sha256','receipt_sha256','journal_sha256','witness_sha256','request_sha256',
+         'current_outpost_generation','preserved_runtime'}
+ deny(os.geteuid()!=0 or not isinstance(expected,dict) or set(expected)!=fields
+      or any(not HEX64.fullmatch(str(expected[k])) for k in
+             ('plan_sha256','receipt_sha256','journal_sha256','witness_sha256','request_sha256')),
+      'KERNEL_RECOVERY_PACKET_DENIED')
+ expected=strict_json(canonical(expected));directory=receipt_path.parent
+ deny(receipt_path.name!='receipt.json' or directory.parent!=root/'var/lib/serein/rollback'
+      or not re.fullmatch(r'kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',directory.name),
+      'KERNEL_RECOVERY_SELECTOR_DENIED')
+ def read(path):return regular(path,expected_custody=(0,0,0o600))
+ plan_raw=read(directory/'plan.json');receipt_raw=read(receipt_path)
+ journal_raw=read(directory/'phase-journal.json')
+ deny((sha(plan_raw),sha(receipt_raw),sha(journal_raw))!=tuple(expected[k] for k in
+      ('plan_sha256','receipt_sha256','journal_sha256')),'KERNEL_RECOVERY_RECORD_CHANGED')
+ plan=strict_json(plan_raw);receipt=strict_json(receipt_raw);journal=strict_json(journal_raw)
+ anchor=regular(root/'usr/share/serein/outpost/cognition-verification.pem',expected_custody=(0,0,0o644))
+ deny(sha(anchor)!=CANONICAL_AUTHORITY_SHA256 or plan.get('authority_sha256')!=sha(anchor),
+      'KERNEL_RECOVERY_ANCHOR_DENIED')
+ try:load_pem_public_key(anchor).verify(decode(plan['signature']),canonical({k:v for k,v in plan.items() if k!='signature'}))
+ except Exception as exc:raise RunnerDenied('KERNEL_RECOVERY_SIGNATURE_DENIED') from exc
+ deny(plan.get('schema')!='SereinPublicKernelFirstInstallPlan/v1'
+      or plan.get('target_vm_id')!='VM4010' or plan.get('current_boot_id')!=current_boot()
+      or plan.get('rollback_selector')!='/'+directory.relative_to(root).as_posix(),
+      'KERNEL_RECOVERY_TARGET_DENIED')
+ boot=plan['current_boot_id'];witness=root/'var/lib/serein-outpost/kernel/kernel-install-witness.json'
+ request_path=root/'var/lib/serein-outpost/kernel/install-request.json'
+ request_raw=read(request_path);request=install_request(request_path)
+ # Both request versions produce a v1 Kernel plan; bind the original request
+ # too. A v2 offline replacement has a separate recovery transaction.
+ deny(sha(request_raw)!=expected['request_sha256']
+      or request.get('schema')!='SereinOutpostKernelInstallRequest/v1'
+      or 'offline_companion' in request
+      or any(request.get(k)!=plan.get(k) for k in
+             ('target_vm_id','source_parent','source_commit','source_tree','archive_sha256','rollback_selector')),
+      'KERNEL_RECOVERY_REQUEST_DENIED')
+ witness_raw=read(witness)
+ deny(sha(witness_raw)!=expected['witness_sha256'] or
+      strict_json(witness_raw).get('rollback_selector')==plan['rollback_selector'],
+      'KERNEL_RECOVERY_VISIBLE_WITNESS_DENIED')
+ manifest=read_json(source/'release-manifest.json')
+ module=load_installer(source,manifest,expected_release=plan['release_digest'])
+ runtime_module=load_offline_installer(source,manifest,expected_release=plan['release_digest'])
+ runtime=runtime_module.OfflineOllamaRealAdapter()
+ deny(Path(runtime.root)!=root or runtime.boot_id!=boot,'KERNEL_RECOVERY_RUNTIME_DENIED')
+ immutable={path:regular(root/path.lstrip('/'),fact=True) for path in IMMUTABLE_POLICY}
+ links=read_kernel_enablement_prestate(root)
+ def material_boundary():
+  runtime.observe_runtime(expected=expected['preserved_runtime'])
+  deny(current_boot()!=boot or capture_outpost_generation(root)!=expected['current_outpost_generation'],
+       'KERNEL_RECOVERY_CURRENTNESS_CHANGED')
+  module.verify_host_identity(root,plan)
+  deny(read(directory/'plan.json')!=plan_raw or read(receipt_path)!=receipt_raw or read(request_path)!=request_raw
+       or read(witness)!=witness_raw or regular(root/'usr/share/serein/outpost/cognition-verification.pem',expected_custody=(0,0,0o644))!=anchor,
+       'KERNEL_RECOVERY_RECORD_CHANGED')
+  deny(any(regular(root/path.lstrip('/'),fact=True)!=fact for path,fact in immutable.items())
+       or read_kernel_enablement_prestate(root)!=links,'KERNEL_RECOVERY_PRESERVED_STATE_CHANGED')
+  deny('sha256:'+sha(canonical(safe_tree(source)))!=plan['source_inventory_digest'],
+       'KERNEL_RECOVERY_SOURCE_CHANGED')
+ with public_generation_lock(root,expected['receipt_sha256'],boot):
+  def installed_boundary():
+   material_boundary()
+   # Validate selector custody before any service effect, not during cleanup.
+   checked=module.journal_read(directory,receipt['receipt_digest'])
+   deny(checked!=journal or read(directory/'phase-journal.json')!=journal_raw,
+        'KERNEL_RECOVERY_RECORD_CHANGED')
+   _verify_install_material(root,plan,{'receipt':plan['rollback_selector']+'/receipt.json'},source=source)
+   # Recheck write-ahead ownership before each service group and compensation.
+   deny(not isinstance(journal.get('ownership'),list) or
+        [row.get('target') for row in journal['ownership']]!=journal['completed'],
+        'KERNEL_RECOVERY_OWNERSHIP_DENIED')
+   for row in journal['ownership']:
+    path=root/row['target'].lstrip('/');info=path.lstat()
+    deny((info.st_dev,info.st_ino)!=(row['device'],row['inode']),
+         'KERNEL_RECOVERY_FOREIGN_TARGET')
+  installed_boundary()
+  before={**read_authority_unit_prestate(cleanup=True),**read_other_kernel_unit_prestate(cleanup=True)}
+  stopped=set()
+  def units_boundary():
+   installed_boundary()
+   now={**read_authority_unit_prestate(cleanup=True),**read_other_kernel_unit_prestate(cleanup=True)}
+   deny(set(now)!=set(before),'KERNEL_UNIT_SET_DENIED')
+   for name,row in now.items():
+    deny(any(row[k]!=before[name][k] for k in ('Id','LoadState','UnitFileState','FragmentPath','DropInPaths','NeedDaemonReload')),
+         'KERNEL_RECOVERY_DEFINITION_CHANGED')
+    if name in stopped:deny((row['ActiveState'],row['SubState'])!=('inactive','dead'),
+                           'KERNEL_RECOVERY_STOP_UNPROVEN')
+  for names in (INTERFACE_UNITS,OPERATIONS_UNITS,(AUTHORITY_UNITS[1],AUTHORITY_UNITS[0])):
+   units_boundary()
+   subprocess.run(['/usr/bin/systemctl','--no-ask-password','--job-mode=replace','stop',*names],
+       check=True,timeout=90,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+       stderr=subprocess.DEVNULL,close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
+   stopped.update(names);units_boundary()
+  def inactive_boundary():
+   material_boundary()
+   units={**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()}
+   deny(any((row['ActiveState'],row['SubState'])!=('inactive','dead') for row in units.values()),
+        'KERNEL_RECOVERY_STOP_UNPROVEN')
+  # File compensation legitimately changes the manager's definition cache;
+  # retain quiescence, not the pre-removal FragmentPath/NeedDaemonReload tuple.
+  installed_boundary()
+  result=module.rollback(root,receipt_path,boundary=inactive_boundary)
+  deny(result.get('status')!='ROLLBACK_COMPLETE' or result.get('foreign_targets_preserved'),
+       'KERNEL_RECOVERY_COMPENSATION_UNPROVEN')
+  material_boundary()
+  subprocess.run(['/usr/bin/systemctl','--no-ask-password','daemon-reload'],check=True,timeout=90,
+      stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+      close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
+  material_boundary()
+  units={**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()}
+  deny(any((row['ActiveState'],row['SubState'])!=('inactive','dead') or row['NeedDaemonReload']!='no'
+           for row in units.values()),'KERNEL_RECOVERY_STOP_UNPROVEN')
+  for row in receipt['prestate']:
+   observed=module.target_prestate(root,row,generated=row['state']=='ABSENT')
+   deny(observed!=(row if row['state']=='ABSENT' else {**row,'state':'PRESENT_PRESERVED'}),
+        'KERNEL_RECOVERY_PRESTATE_UNPROVEN')
+  deny(module.capture_runtime_access(root,plan)!=plan['runtime_access_prestate'],
+       'KERNEL_RECOVERY_ACCESS_UNPROVEN')
+  return {'result':'FAILED_CONSTRUCTION_RECOVERED','boot_id':boot,'rollback_selector':plan['rollback_selector'],
+      'failed_outpost_generation':plan['outpost_generation'],
+      'executing_outpost_generation':expected['current_outpost_generation'],
+      'journal_sha256':sha(read(directory/'phase-journal.json')),
+      'runtime_access_restored':True,'historical_witness_preserved':True,
+      'kernel_admission':'UNADMITTED','authority_effect':'NONE','stage1':'NOT_READY'}
+
+
+def _unit_active(name,row):
+ # systemd keeps a socket active/running while its service owns the listener.
+ # This is manager state only, never a domain verification/admission verdict.
+ return row['ActiveState']=='active' and row['SubState'] in (
+     {'listening','running'} if name.endswith('.socket') else {'running'})
+
+
 def _read_kernel_units(names,*,service_controls=False,allow_transitional=False):
  import subprocess
  deny(type(service_controls) is not bool or type(allow_transitional) is not bool
@@ -1167,9 +1316,8 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False):
              if name=='serein-kernel-client-gateway@haos.service' else name)
    deny(value['FragmentPath']!='/etc/systemd/system/'+fragment or not value['UnitFileState'],
         'KERNEL_AUTHORITY_UNIT_PRESTATE_DENIED')
-   active_substate='listening' if name.endswith('.socket') else 'running'
-   settled=(value['ActiveState'],value['SubState']) in {
-           ('inactive','dead'),('active',active_substate),('failed','failed')}
+   settled=_unit_active(name,value) or (value['ActiveState'],value['SubState']) in {
+           ('inactive','dead'),('failed','failed')}
    # Cleanup must be able to cancel this attempt's still-pending start/stop.
    # This is NOT a ready state; only exception cleanup opts into this read.
    transitional=(allow_transitional and value['ActiveState'] in {'activating','deactivating','reloading'}
@@ -1297,8 +1445,8 @@ def _authority_lifecycle(plan,receipt,request,*,boundary,owner=None):
   boundary()
   deny(current_boot()!=boot,'KERNEL_AUTHORITY_LIFECYCLE_BOOT_CHANGED')
   final=read_authority_unit_prestate();unchanged_definitions(final)
-  deny((final[AUTHORITY_UNITS[1]]['ActiveState'],final[AUTHORITY_UNITS[1]]['SubState'])
-       !=('active','listening') or final[AUTHORITY_UNITS[0]]['ActiveState']=='failed',
+  deny(not _unit_active(AUTHORITY_UNITS[1],final[AUTHORITY_UNITS[1]])
+       or final[AUTHORITY_UNITS[0]]['ActiveState']=='failed',
        'KERNEL_AUTHORITY_LIFECYCLE_CONTINUITY_UNPROVEN')
  if owner is not None:owner.retain(stop_owned,verify_owned)
  try:
@@ -1306,8 +1454,8 @@ def _authority_lifecycle(plan,receipt,request,*,boundary,owner=None):
   after=read_authority_unit_prestate();unchanged_definitions(after)
   deny(current_boot()!=boot or read_other_kernel_unit_prestate()!=other
        or after[AUTHORITY_UNITS[0]]['ActiveState']=='failed'
-       or (after[AUTHORITY_UNITS[1]]['ActiveState'],after[AUTHORITY_UNITS[1]]['SubState'])
-          !=('active','listening'),'KERNEL_AUTHORITY_LIFECYCLE_START_UNPROVEN')
+       or not _unit_active(AUTHORITY_UNITS[1],after[AUTHORITY_UNITS[1]]),
+          'KERNEL_AUTHORITY_LIFECYCLE_START_UNPROVEN')
   boundary()
   observation=observe_installed_authority(plan,receipt,request)
   if observation.get('result')!='AUTHORITY_PHASE_A_OBSERVED':
@@ -1318,8 +1466,8 @@ def _authority_lifecycle(plan,receipt,request,*,boundary,owner=None):
   current=read_authority_unit_prestate();unchanged_definitions(current)
   deny(current_boot()!=boot or read_other_kernel_unit_prestate()!=other
        or current[AUTHORITY_UNITS[0]]['ActiveState']=='failed'
-       or (current[AUTHORITY_UNITS[1]]['ActiveState'],current[AUTHORITY_UNITS[1]]['SubState'])
-          !=('active','listening'),'KERNEL_AUTHORITY_LIFECYCLE_OBSERVATION_CHANGED')
+       or not _unit_active(AUTHORITY_UNITS[1],current[AUTHORITY_UNITS[1]]),
+          'KERNEL_AUTHORITY_LIFECYCLE_OBSERVATION_CHANGED')
   # A slow owner-boundary read must not renew an earlier signed observation.
   deny(regular(VERIFY_KEY)!=anchor,'KERNEL_CANONICAL_ANCHOR_CHANGED')
   validate_authority_observation(canonical(observation),**envelope,boot_id=boot,
@@ -1355,8 +1503,8 @@ def _operations_lifecycle(plan,receipt,authority_observation,*,boundary,owner=No
       'KERNEL_UNIT_SET_DENIED')
  deny(any(row['LoadState']!='loaded' or row['NeedDaemonReload']!='no'
           for row in authority.values()),'KERNEL_OPERATIONS_AUTHORITY_UNAVAILABLE')
- deny((authority[AUTHORITY_UNITS[1]]['ActiveState'],authority[AUTHORITY_UNITS[1]]['SubState'])
-      !=('active','listening'),'KERNEL_OPERATIONS_AUTHORITY_UNAVAILABLE')
+ deny(not _unit_active(AUTHORITY_UNITS[1],authority[AUTHORITY_UNITS[1]]),
+      'KERNEL_OPERATIONS_AUTHORITY_UNAVAILABLE')
  for row in before.values():
   deny(row['LoadState']!='loaded' or row['NeedDaemonReload']!='no'
        or (row['ActiveState'],row['SubState'])!=('inactive','dead'),
@@ -1371,14 +1519,14 @@ def _operations_lifecycle(plan,receipt,authority_observation,*,boundary,owner=No
  def phase_boundary():
   boundary();deny(current_boot()!=boot,'KERNEL_OPERATIONS_LIFECYCLE_BOOT_CHANGED')
   current_authority=read_authority_unit_prestate();definitions(current_authority,authority)
-  deny((current_authority[AUTHORITY_UNITS[1]]['ActiveState'],current_authority[AUTHORITY_UNITS[1]]['SubState'])
-       !=('active','listening') or current_authority[AUTHORITY_UNITS[0]]['ActiveState']=='failed',
+  deny(not _unit_active(AUTHORITY_UNITS[1],current_authority[AUTHORITY_UNITS[1]])
+       or current_authority[AUTHORITY_UNITS[0]]['ActiveState']=='failed',
        'KERNEL_OPERATIONS_AUTHORITY_UNAVAILABLE')
   current=read_other_kernel_unit_prestate();definitions(current,before)
   for name,row in current.items():
    state=(row['ActiveState'],row['SubState'])
    if name in started:
-    deny(state!=('active','listening' if name.endswith('.socket') else 'running'),
+    deny(not _unit_active(name,row),
          'KERNEL_OPERATIONS_LIFECYCLE_START_UNPROVEN')
    elif name=='serein-kernel-operations-api.service' and 'serein-kernel-operations-api.socket' in started:
     deny(state not in {('inactive','dead'),('active','running')},
@@ -1600,8 +1748,8 @@ def _interface_lifecycle(plan,receipt,authority_observation,operations,*,boundar
  def current_boundary():
   boundary();deny(current_boot()!=boot,'KERNEL_INTERFACE_LIFECYCLE_BOOT_CHANGED')
   a=read_authority_unit_prestate();definitions(a,authority)
-  deny((a[AUTHORITY_UNITS[1]]['ActiveState'],a[AUTHORITY_UNITS[1]]['SubState'])
-       !=('active','listening') or a[AUTHORITY_UNITS[0]]['ActiveState']=='failed',
+  deny(not _unit_active(AUTHORITY_UNITS[1],a[AUTHORITY_UNITS[1]])
+       or a[AUTHORITY_UNITS[0]]['ActiveState']=='failed',
        'KERNEL_INTERFACE_AUTHORITY_UNAVAILABLE')
   rows=read_other_kernel_unit_prestate();definitions(rows,before)
   deny(read_operations_service_controls()!=operations['service_controls'],
@@ -1609,7 +1757,7 @@ def _interface_lifecycle(plan,receipt,authority_observation,operations,*,boundar
   for name,row in rows.items():
    state=(row['ActiveState'],row['SubState'])
    if name in started:
-    deny(state!=('active','listening' if name.endswith('.socket') else 'running'),
+    deny(not _unit_active(name,row),
          'KERNEL_INTERFACE_LIFECYCLE_START_UNPROVEN')
    elif (name=='serein-conversation-runtime.service' and next_constituent
          and 'serein-conversation-runtime.socket' in started):
@@ -1618,7 +1766,7 @@ def _interface_lifecycle(plan,receipt,authority_observation,operations,*,boundar
    elif name in INTERFACE_UNITS:
     deny(state!=('inactive','dead'),'KERNEL_INTERFACE_EARLY_CONSTITUENT_DENIED')
    elif name.endswith('.socket'):
-    deny(state!=('active','listening'),'KERNEL_INTERFACE_OPERATIONS_UNAVAILABLE')
+    deny(not _unit_active(name,row),'KERNEL_INTERFACE_OPERATIONS_UNAVAILABLE')
  def command(action,names):
   try:
    subprocess.run(['/usr/bin/systemctl','--no-ask-password',
