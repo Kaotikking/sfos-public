@@ -94,23 +94,87 @@ def _validate_operations_event(event):
 
 
 def append_event(path: Path, event: dict[str, Any]) -> None:
-    missing=[]
-    ancestor=path.parent
-    while not ancestor.exists():
-        missing.append(ancestor)
-        ancestor=ancestor.parent
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8", newline="\n") as stream:
-        stream.write(json.dumps(event, sort_keys=True, separators=(",", ":")) + "\n")
-        stream.flush()
-        os.fsync(stream.fileno())
-    # File fsync alone does not make its first directory entry durable.
-    for directory in (path.parent, *(created.parent for created in missing)):
-        descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    """Append privately, adopting only this writer's exact legacy 0644 inode.
+
+    Never replace, truncate, rotate or chmod a pathname. Descriptor-anchored
+    custody checks precede adoption and append; failed persistence gets no ACK.
+    """
+    path=Path(path)
+    if not path.is_absolute() or '..' in path.parts:
+        raise ValueError('audit_write_path_denied')
+    raw=(json.dumps(event,sort_keys=True,separators=(',',':'))+'\n').encode('utf-8')
+    uid,gid=os.geteuid(),os.getegid()
+    def directory(info):
+        return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid)
+    def identity(info):
+        return (*directory(info),info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+    handles=[];created_parents=[];file_fd=None;created=False
+    try:
+        fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        handles.append((fd,None,None,directory(os.fstat(fd))))
+        for part in path.parts[1:-1]:
+            try:child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            except FileNotFoundError:
+                os.mkdir(part,0o700,dir_fd=fd);created_parents.append(fd)
+                child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+            handles.append((child,fd,part,directory(os.fstat(child))));fd=child
+        parent=os.fstat(fd)
+        if (parent.st_uid,parent.st_gid,stat.S_IMODE(parent.st_mode))!=(uid,gid,0o700):
+            raise ValueError('audit_parent_custody_denied')
+        def stable_parents():
+            for child,parent,name,captured in handles:
+                named=os.stat('/',follow_symlinks=False) if parent is None else os.stat(name,dir_fd=parent,follow_symlinks=False)
+                if directory(os.fstat(child))!=captured or directory(named)!=captured:
+                    raise ValueError('audit_parent_changed')
+        stable_parents()
+        flags=os.O_WRONLY|os.O_APPEND|os.O_NOFOLLOW|os.O_NONBLOCK
+        try:file_fd=os.open(path.name,flags,dir_fd=fd)
+        except FileNotFoundError:
+            file_fd=os.open(path.name,flags|os.O_CREAT|os.O_EXCL,0o600,dir_fd=fd)
+            created=True
+        before=os.fstat(file_fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink!=1
+                or (before.st_uid,before.st_gid)!=(uid,gid)
+                or (stat.S_IMODE(before.st_mode)&~0o600 if created else
+                    stat.S_IMODE(before.st_mode) not in (0o600,0o644))):
+            raise ValueError('audit_file_custody_denied')
+        def stable_file(expected):
+            stable_parents()
+            if (identity(os.fstat(file_fd))!=identity(expected)
+                    or identity(os.stat(path.name,dir_fd=fd,follow_symlinks=False))!=identity(expected)):
+                raise ValueError('audit_file_changed')
+        stable_file(before)
+        if stat.S_IMODE(before.st_mode)!=0o600:
+            # Only the verified owner inode is tightened, preserving all log
+            # bytes and inode identity; no blanket permission repair.
+            os.fchmod(file_fd,0o600)
+            after=os.fstat(file_fd)
+            if ((after.st_dev,after.st_ino,after.st_uid,after.st_gid,after.st_nlink,
+                    after.st_size,after.st_mtime_ns)!=(before.st_dev,before.st_ino,
+                    before.st_uid,before.st_gid,before.st_nlink,before.st_size,before.st_mtime_ns)
+                    or stat.S_IMODE(after.st_mode)!=0o600):
+                raise ValueError('audit_adoption_changed')
+            before=after
+        stable_file(before)
+        remaining=memoryview(raw)
+        while remaining:
+            count=os.write(file_fd,remaining)
+            if count<=0:raise OSError('audit_append_incomplete')
+            remaining=remaining[count:]
+        os.fsync(file_fd)
+        after=os.fstat(file_fd)
+        if (directory(after)!=directory(before) or after.st_nlink!=1
+                or after.st_size!=before.st_size+len(raw)):
+            raise ValueError('audit_append_changed')
+        stable_file(after)
+        # File fsync alone does not make its first directory entry durable.
+        for directory_fd in (fd,*reversed(created_parents)):os.fsync(directory_fd)
+        stable_file(after)
+    finally:
         try:
-            os.fsync(descriptor)
+            if file_fd is not None:os.close(file_fd)
         finally:
-            os.close(descriptor)
+            for handle,_,_,_ in reversed(handles):os.close(handle)
 
 
 def decode_event(payload: bytes) -> dict[str, Any]:

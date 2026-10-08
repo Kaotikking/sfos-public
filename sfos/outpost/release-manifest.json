@@ -100,8 +100,8 @@
     },
     {
       "path": "outpost/vitals_edge.py",
-      "bytes": 21880,
-      "sha256": "0911d768aa55df2308c35b0489a74f82ed9e2c6c9b901bac815e636dadb4be8d"
+      "bytes": 22815,
+      "sha256": "14a7b5bb68505bf4ca37dd6eeb4597b90f58caf375a21cb27083a4cf07ab2bb6"
     },
     {
       "path": "outpost/vitals_runtime.py",
@@ -173,5 +173,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:ce1331287789194e687b2874156f7648b39c7c32d5861b17edf44c8372209399"
+  "self_digest": "sha256:f2355d1544c4b40dd34a5988dba7033298f78ef217296597bcaf34073ef16983"
 }

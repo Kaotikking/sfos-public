@@ -75,8 +75,8 @@
     ],
     [
       "payload/serein_stage1/audit.py",
-      12570,
-      "8bba578b313e5e03006d080e9265ed94f21ad89bdd81e08bd1af3e72b6627fac",
+      16194,
+      "fec3bf8a7b5d8d2249adf236e1f4359ebbfd70f927f6f2287115f4b5edb4cc74",
       "0644"
     ],
     [
@@ -183,8 +183,8 @@
     ],
     [
       "payload/serein_stage1/outpost_evidence/vitals_edge.py",
-      21880,
-      "0911d768aa55df2308c35b0489a74f82ed9e2c6c9b901bac815e636dadb4be8d",
+      22815,
+      "14a7b5bb68505bf4ca37dd6eeb4597b90f58caf375a21cb27083a4cf07ab2bb6",
       "0644"
     ],
     [
@@ -272,8 +272,8 @@
       "0644"
     ]
   ],
-  "payload_digest": "sha256:4a069a2ca500d5b3fd844412843fad04e9f87a61607f5f0b14f2d5cd32118d04",
-  "install_denominator_digest": "sha256:d272458787b34ba2eeba69e99c740aef19fbafcf2c099ad1b404b6be87fc5521",
+  "payload_digest": "sha256:a3ed5792c534443a5229d4f4a2600bc372927cdf2801582acbc0712ad988c819",
+  "install_denominator_digest": "sha256:81667f5a19d5a698299c3931a3b7c3a4010f4ad7eae468dab19f83845095451d",
   "generated_secrets": [
     "/var/lib/serein/kernel/authority/replay.key",
     "/var/lib/serein/kernel/authority/domain-identity.pem"
@@ -315,5 +315,5 @@
   ],
   "activation": "OUTPOST_ONLY_AFTER_INACTIVE_PROOF",
   "admission_effect": "NONE",
-  "self_digest": "sha256:99f222695cb6bb66b85dd77aedb3d5bed9f8386ecea19ffd8f90eeb2a849dae2"
+  "self_digest": "sha256:e030eed839c228cfb1507c1e50ad43ccae854a99e5d487e97484ca2d10c2632a"
 }

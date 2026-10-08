@@ -190,7 +190,7 @@ def _surface_ready(body: bytes) -> bool:
         return False
 
 
-def _ready(body: bytes) -> bool:
+def _ready(body: bytes, *, expected_generation: dict | None = None) -> bool:
     """Healthy Host-gate acceptance, stronger than Outpost availability."""
     if not _surface_ready(body):
         return False
@@ -201,7 +201,19 @@ def _ready(body: bytes) -> bool:
         if state.get("schema") != "SereinVitalsAggregation/v1" or host.get("state") != "OBSERVED" or len(witnesses) != 1:
             return False
         witness = witnesses[0]
-        host_state = validate_state(witness["payload"], active=True)
+        host_state = validate_state(witness["payload"], active=expected_generation is None)
+        if expected_generation is not None:
+            # An authenticated API consumer cannot read Outpost's private
+            # selector. Bind the complete v4 recipe to the independently
+            # installer-signed generation instead. The owning edge keeps its
+            # existing local active-source check above.
+            latest = host_state['latest']
+            if latest['schema'] != 'SereinOutpostHostVitalityObservation/v4':
+                return False
+            source = latest['recipe']['source']
+            if (source['release_digest'] != expected_generation['release_digest']
+                    or source['source_plan_sha256'] != expected_generation['predecessor_receipt_sha256']):
+                return False
         return (
             host["claim"] in {"FIRST_BOOT_OBSERVED", "CURRENT_BOOT_STABLE", "RECOVERED_AFTER_BOOT_CHANGE"}
             and witness.get("claim") == host["claim"]
@@ -235,13 +247,14 @@ def current_host_evidence(body: bytes, *, current_boot_id: str, expected_generat
         raise ValueError('nonfinite value')
 
     try:
-        if (type(body) is not bytes or not 0 < len(body) <= MAX_RESPONSE_BYTES
+        if (not isinstance(expected_generation, dict) or not expected_generation
+                or type(body) is not bytes or not 0 < len(body) <= MAX_RESPONSE_BYTES
                 or any(type(at) not in (int, float) or not math.isfinite(at)
                        for at in (requested_at, received_at))
                 or not 0 <= requested_at <= received_at):
             raise ValueError('invalid request interval')
         state = json.loads(body, object_pairs_hook=pairs, parse_constant=constant)
-        if (not _ready(body) or state['current_boot_id'] != current_boot_id
+        if (not _ready(body, expected_generation=expected_generation) or state['current_boot_id'] != current_boot_id
                 or not requested_at <= state['generated_at'] <= received_at):
             raise ValueError('Host evidence unavailable or outside this read')
         host = next(item for item in state['sections']['host']['perspectives']
