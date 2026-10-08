@@ -19,6 +19,7 @@ LATER_CORES=("PLATFORM","ROOT","MEMORY","KNOWLEDGE","UI","AUDIO","PERSONALITY","
 # Mechanical closure of the existing private Companion destination. These
 # paths do not prove authenticated Gateway ingress or whole-Kernel readiness.
 COMPANION_PACKAGE={
+ "payload/runtime/kernel-observer-access.conf":("AUTHORITY","/usr/lib/serein/kernel/kernel-observer-access.conf","0644"),
  "payload/runtime/replay_store.py":("OPERATIONS","/usr/lib/serein/kernel/replay_store.py","0644"),
  "payload/runtime/persistent_replay_store.py":("OPERATIONS","/usr/lib/serein/kernel/persistent_replay_store.py","0644"),
  "payload/serein_stage1/kernel_operations.py":("OPERATIONS","/usr/lib/python3/dist-packages/serein_stage1/kernel_operations.py","0644"),
@@ -61,6 +62,130 @@ ROLLBACK_AUTH="rollback-auth.key"
 ROLLBACK_JOURNAL="phase-journal.json"
 ROOTS=("/usr/lib/serein/kernel/","/usr/lib/python3/dist-packages/serein_stage1/","/usr/libexec/serein/serein-kernel-","/etc/systemd/system/serein-kernel-","/usr/libexec/serein/serein-observation-audit","/etc/systemd/system/serein-observation-audit.","/usr/libexec/serein/serein-conversation-runtime","/etc/systemd/system/serein-conversation-runtime.")
 class Denied(RuntimeError):pass
+
+RUNTIME_DIRECTORY='/run/serein/stage1'
+RUNTIME_ACCESS_SOURCE='payload/runtime/kernel-observer-access.conf'
+RUNTIME_ACCESS_TARGET='/usr/lib/serein/kernel/kernel-observer-access.conf'
+RUNTIME_ACCESS_RULE=(b'# Whole Kernel construction: only Outpost may traverse to its private sockets.\n'
+ b'# Preserve the Base directory owner/group/mode; no listing, write or default ACL.\n'
+ b'a+ /run/serein/stage1 - - - - u:serein-outpost:--x\n')
+
+
+def observer_access_acl(uid):
+ """Exact Linux UAPI access ACL: owner rwx, named observer x, group rx."""
+ import struct
+ deny(type(uid) is not int or not 0<uid<2**32-1,'KERNEL_RUNTIME_ACCESS_IDENTITY_DENIED')
+ return (struct.pack('<I',2)+b''.join(struct.pack('<HHI',tag,perm,who) for tag,perm,who in
+     ((1,7,2**32-1),(2,1,uid),(4,5,2**32-1),(16,5,2**32-1),(32,0,2**32-1))))
+
+
+def _runtime_access_read(root,plan):
+ """No-follow, inode-bound read of the single pre-existing Base directory."""
+ import errno
+ root=Path(root);descriptors=[]
+ try:
+  parent=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+  descriptors.append((parent,None,None))
+  for part in ('run','serein','stage1'):
+   prior=os.fstat(parent)
+   deny(prior.st_uid!=0 or stat.S_IMODE(prior.st_mode)&0o022,
+        'KERNEL_RUNTIME_ACCESS_ANCESTOR_DENIED')
+   child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+   descriptors.append((child,parent,part));parent=child
+  before=os.fstat(parent)
+  replay=plan['replay_identity'];observer=plan['outpost_identity']
+  deny(before.st_uid!=replay['uid'] or before.st_gid!=replay['gid']
+       or replay['uid']==observer['uid'] or stat.S_IMODE(before.st_mode)!=0o750,
+       'KERNEL_RUNTIME_ACCESS_CUSTODY_DENIED')
+  values={}
+  for kind in ('access','default'):
+   try:raw=os.getxattr(parent,'system.posix_acl_'+kind)
+   except OSError as exc:
+    if exc.errno!=errno.ENODATA:raise
+    raw=None
+   values[kind]=raw
+  deny(values['default'] is not None or values['access'] not in (None,observer_access_acl(observer['uid'])),
+       'KERNEL_RUNTIME_ACCESS_ACL_DENIED')
+  for fd,parent_fd,name in descriptors[1:]:
+   opened=os.fstat(fd);named=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
+   deny((opened.st_dev,opened.st_ino,opened.st_mode,opened.st_uid,opened.st_gid)!=
+        (named.st_dev,named.st_ino,named.st_mode,named.st_uid,named.st_gid),
+        'KERNEL_RUNTIME_ACCESS_CHANGED')
+  after=os.fstat(parent)
+  deny((before.st_dev,before.st_ino,before.st_mode,before.st_uid,before.st_gid,before.st_ctime_ns)!=
+       (after.st_dev,after.st_ino,after.st_mode,after.st_uid,after.st_gid,after.st_ctime_ns),
+       'KERNEL_RUNTIME_ACCESS_CHANGED')
+  return {'path':RUNTIME_DIRECTORY,'dev':before.st_dev,'ino':before.st_ino,
+      'uid':before.st_uid,'gid':before.st_gid,'mode':'0750',
+      'access_acl_hex':None if values['access'] is None else values['access'].hex(),
+      'default_acl_hex':None}
+ except (OSError,KeyError,TypeError) as exc:
+  raise Denied('KERNEL_RUNTIME_ACCESS_READ_DENIED') from exc
+ finally:
+  for fd,_,_ in reversed(descriptors):os.close(fd)
+
+
+def capture_runtime_access(root,plan):
+ return _runtime_access_read(root,plan)
+
+
+def apply_runtime_access(root,plan,boundary=lambda:None):
+ """Only called by the complete Outpost owner before its first socket start."""
+ import subprocess
+ before=plan['runtime_access_prestate'];boundary()
+ deny(capture_runtime_access(root,plan)!=before,'KERNEL_RUNTIME_ACCESS_PRESTATE_CHANGED')
+ rule=target(Path(root),RUNTIME_ACCESS_TARGET)
+ deny(rule.is_symlink() or rule.read_bytes()!=RUNTIME_ACCESS_RULE
+      or (rule.stat().st_uid,rule.stat().st_gid,stat.S_IMODE(rule.stat().st_mode))!=(0,0,0o644),
+      'KERNEL_RUNTIME_ACCESS_RULE_DENIED')
+ # Native tmpfiles applies this one exact additive entry, never the full host
+ # configuration. No recursive/default ACL, chmod, group or service change.
+ argv=['/usr/bin/systemd-tmpfiles','--create']
+ if Path(root)!=Path('/'):argv.append('--root='+str(root))
+ argv.append(str(rule))
+ try:
+  subprocess.run(argv,check=True,timeout=15,stdin=subprocess.DEVNULL,
+      stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,
+      env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
+ except (OSError,subprocess.SubprocessError) as exc:
+  raise Denied('KERNEL_RUNTIME_ACCESS_APPLY_DENIED') from exc
+ expected={**before,'access_acl_hex':observer_access_acl(plan['outpost_identity']['uid']).hex()}
+ deny(capture_runtime_access(root,plan)!=expected,'KERNEL_RUNTIME_ACCESS_POSTSTATE_DENIED')
+ boundary()
+ return expected
+
+
+def restore_runtime_access(root,plan,boundary=lambda:None):
+ """Restore only the exact ACL delta after all transaction-owned units stop."""
+ before=plan['runtime_access_prestate'];boundary()
+ observed=capture_runtime_access(root,plan)
+ expected={**before,'access_acl_hex':observer_access_acl(plan['outpost_identity']['uid']).hex()}
+ deny(observed not in (before,expected),'KERNEL_RUNTIME_ACCESS_COMPENSATION_DENIED')
+ if observed!=before:
+  path=target(Path(root),RUNTIME_DIRECTORY)
+  fd=os.open(path,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+  try:
+   info=os.fstat(fd)
+   deny((info.st_dev,info.st_ino,info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode))!=
+        (observed['dev'],observed['ino'],observed['uid'],observed['gid'],int(observed['mode'],8)),
+        'KERNEL_RUNTIME_ACCESS_CHANGED')
+   deny(capture_runtime_access(root,plan)!=observed,'KERNEL_RUNTIME_ACCESS_CHANGED')
+   import errno
+   for kind in ('access','default'):
+    try:current=os.getxattr(fd,'system.posix_acl_'+kind).hex()
+    except OSError as exc:
+     if exc.errno!=errno.ENODATA:raise
+     current=None
+    deny(current!=observed[kind+'_acl_hex'],'KERNEL_RUNTIME_ACCESS_CHANGED')
+   named=path.lstat();final=os.fstat(fd)
+   fingerprint=lambda i:(i.st_dev,i.st_ino,i.st_mode,i.st_uid,i.st_gid,i.st_ctime_ns)
+   deny(fingerprint(info)!=fingerprint(final) or fingerprint(final)!=fingerprint(named),
+        'KERNEL_RUNTIME_ACCESS_CHANGED')
+   if before['access_acl_hex'] is None:os.removexattr(fd,'system.posix_acl_access')
+   else:os.setxattr(fd,'system.posix_acl_access',bytes.fromhex(before['access_acl_hex']))
+  finally:os.close(fd)
+ deny(capture_runtime_access(root,plan)!=before,'KERNEL_RUNTIME_ACCESS_RESTORATION_UNPROVEN')
+ boundary()
 def canonical(v):return (json.dumps(v,sort_keys=True,separators=(",",":"))+"\n").encode()
 def sha(v):return hashlib.sha256(v).hexdigest()
 def deny(c,m):
@@ -312,6 +437,7 @@ def validate(source,root,plan,identity_lookup=None):
  identity_lookup=identity_lookup or system_identity
  required={"schema","target_vm_id","source_parent","source_commit","source_tree","release_digest","current_boot_id","outpost_identity","replay_identity","payload","target_prestate","rollback_selector","authority_sha256","archive_sha256","source_receipt_sha256","source_inventory_digest","reserved_domain_ids","native_identity","signature"}
  required|={"host_identity","host_projection_digest","outpost_generation"}
+ if isinstance(plan,dict) and 'runtime_access_prestate' in plan:required.add('runtime_access_prestate')
  if isinstance(plan,dict) and 'recovered_predecessor' in plan:
   required.add('recovered_predecessor')
   prior=plan['recovered_predecessor']
@@ -556,7 +682,7 @@ def rollback_transaction(root,receipt_path,boundary=lambda:None):
  rows={row['target']:row for row in receipt['replacements']}
  prestate=receipt.get('prestate');deny(not isinstance(prestate,list) or any(not isinstance(row,dict) for row in prestate) or [row.get('target') for row in prestate]!=list(rows) or any(row.get('state') not in {'ABSENT','PRESENT_PRESERVED','PRESENT_REPLACE'} for row in prestate),"KERNEL_RECEIPT_PRESTATE_DENIED")
  replacing={r['target']:r for r in prestate if r['state']=='PRESENT_REPLACE'}
- if replacing:
+ if replacing or any(row['target']==RUNTIME_ACCESS_TARGET for row in receipt['replacements']):
   # Authenticate the signed preimage set, not merely an editable restore label.
   plan_path=rollback_dir/'plan.json';plan_info=plan_path.lstat()
   deny(plan_path.is_symlink() or not stat.S_ISREG(plan_info.st_mode)
@@ -564,12 +690,17 @@ def rollback_transaction(root,receipt_path,boundary=lambda:None):
        'KERNEL_COMPENSATION_PLAN_DENIED')
   plan_raw=plan_path.read_bytes();plan=json.loads(plan_raw)
   deny(canonical(plan)!=plan_raw or sha(plan_raw)!=receipt['plan_sha256']
-       or plan.get('target_prestate')!=prestate or not isinstance(plan.get('recovered_predecessor'),dict),
+       or plan.get('target_prestate')!=prestate
+       or (replacing and not isinstance(plan.get('recovered_predecessor'),dict)),
        'KERNEL_COMPENSATION_PLAN_DENIED')
   anchor=target(root,AUTHORITY).read_bytes()
   deny(sha(anchor)!=plan.get('authority_sha256'),'KERNEL_COMPENSATION_ANCHOR_DENIED')
   try:load_pem_public_key(anchor).verify(base64.urlsafe_b64decode(plan['signature']+'='*(-len(plan['signature'])%4)),canonical({k:v for k,v in plan.items() if k!='signature'}))
   except Exception as exc:raise Denied('KERNEL_COMPENSATION_PLAN_DENIED') from exc
+  if 'runtime_access_prestate' in plan:
+   # Durable signed prestate also covers interruption after ACL application.
+   # The caller's quiescence/boot guard must pass before removing any files.
+   restore_runtime_access(root,plan,boundary)
  for before in prestate:
   if before['state']=='ABSENT':deny(set(before)!={'target','state'},"KERNEL_RECEIPT_PRESTATE_DENIED")
   else:

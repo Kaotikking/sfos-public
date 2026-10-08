@@ -552,6 +552,7 @@ def build_plan(source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,verify_pa
  plan['host_identity']={'machine_id':machine_id,'file':module.target_prestate(Path(root),machine_row,include_bytes=True)[0]}
  plan['host_projection_digest']=host['projection_digest'];plan['reserved_domain_ids']=list(reserved)
  plan['outpost_generation']=capture_outpost_generation(root)
+ plan['runtime_access_prestate']=module.capture_runtime_access(root,plan)
  if 'recovered_predecessor' in request:
   recovered=capture_recovered_kernel_prestate(root,module,request['recovered_predecessor'],verify_path=verify_path,
       witness_path=STATE/'kernel-install-witness.json')
@@ -2296,6 +2297,8 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
   boundary()
   receipt=installer(root,source,plan,boundary=boundary,native_material=native_material,policy_evidence=policy_evidence);canonical_receipt=Path(root).joinpath(*Path(plan["rollback_selector"]+"/receipt.json").parts[1:])
   runtime_disposition={'attempted':False,'restored':False}
+  runtime_access_attempted=False
+  runtime_access_poststate=None
   definitions_refresh_attempted=False
   def refresh_definitions(guard):
    # Existing Outpost bootstrap's manager-refresh road, inside this complete
@@ -2347,6 +2350,8 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
          authority_unit_poststate={name:current[name] for name in AUTHORITY_UNITS},
          kernel_unit_prestate=unit_prestate,kernel_unit_poststate=current)
      witness['kernel_enablement_prestate']=enablement_prestate
+     witness['runtime_access_prestate']=plan['runtime_access_prestate']
+     witness['runtime_access_poststate']=runtime_access_poststate
      def publication_boundary():
       material_boundary()
       verify_lifecycle()
@@ -2362,8 +2367,14 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
       raise
      publication['completed']=True
      return witness
+    runtime_access_attempted=True
+    runtime_access_poststate=module.apply_runtime_access(root,plan,boundary)
+    def construction_boundary():
+     material_boundary()
+     deny(module.capture_runtime_access(root,plan)!=runtime_access_poststate,
+          'KERNEL_RUNTIME_ACCESS_CHANGED')
     return _complete_kernel_lifecycle(plan,receipt,request,prepared,compute_expectation,
-        boundary=material_boundary,read_compute_expectation=read_compute_expectation,
+        boundary=construction_boundary,read_compute_expectation=read_compute_expectation,
         signed_runtime_plan=signed_runtime_plan,runtime_disposition=runtime_disposition,
         finalize=finalize,
         **({'read_public_response':read_public_response} if read_public_response is not None else {}),
@@ -2413,6 +2424,10 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
      except Exception as restoration_error:
       raise RuntimeCompensationUncertain('KERNEL_RUNTIME_COMPENSATION_UNPROVEN') from restoration_error
    compensation_boundary()
+   if runtime_access_attempted:
+    # Lifecycle cleanup has quiesced all owned units. Do not compensate files
+    # under an unresolved permission effect, including a tmpfiles timeout.
+    module.restore_runtime_access(root,plan,compensation_boundary)
    deny(rollback_installer is None,"KERNEL_POSTINSTALL_ROLLBACK_UNAVAILABLE")
    rollback_installer(root,canonical_receipt,boundary=compensation_boundary)
    if definitions_refresh_attempted:

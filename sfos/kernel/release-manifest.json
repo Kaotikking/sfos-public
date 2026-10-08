@@ -50,6 +50,12 @@
       "0755"
     ],
     [
+      "payload/runtime/kernel-observer-access.conf",
+      212,
+      "36991d56eadcc987a14ba75e463b749d1b4dad48fa33923ef7c674ba56876d30",
+      "0644"
+    ],
+    [
       "payload/runtime/persistent_replay_store.py",
       25153,
       "e39115df989c565d9c6d55a04ad93bcb6f3603457512a14a90f5c7ec5e26cc2f",
@@ -266,8 +272,8 @@
       "0644"
     ]
   ],
-  "payload_digest": "sha256:196fc4ced590bfd7c9ddbf271fa5d3d9632e23d8d62c69440d82058727472c6f",
-  "install_denominator_digest": "sha256:793307cf0a4ae47a47306db33eade45ba86261f39fc958944b31a69d75d9aa10",
+  "payload_digest": "sha256:ad69bcb9b798e101d1e23f2f0327e67a9a09cb8f0aa032efd5e98dfcf523a033",
+  "install_denominator_digest": "sha256:394ac300f31ce2283a3c433b4f335b4fffa7f82d6b4c78100e2ac8d861aab734",
   "generated_secrets": [
     "/var/lib/serein/kernel/authority/replay.key",
     "/var/lib/serein/kernel/authority/domain-identity.pem"
@@ -276,8 +282,8 @@
   "installer_files": [
     [
       "install/kernel_first_install.py",
-      51861,
-      "119cf220fe9e02d7ba587cf1675df4e4a7f683974ba34cbb0a4359ff79e430e2",
+      58653,
+      "9fe391a85ffb0cc2f876b8732b4359e7ff686e18b2ea6d4bede582836d532218",
       "0755"
     ],
     [
@@ -309,5 +315,5 @@
   ],
   "activation": "OUTPOST_ONLY_AFTER_INACTIVE_PROOF",
   "admission_effect": "NONE",
-  "self_digest": "sha256:9766f4adb849d121217b9bde4630f2c50364adcffe0214cbd84fad3188af8bfa"
+  "self_digest": "sha256:7d0d7424d36dbf0b92c05a12f5176813a6678ec171b77acc62accd8d062fdb85"
 }

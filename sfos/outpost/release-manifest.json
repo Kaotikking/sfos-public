@@ -15,8 +15,8 @@
     },
     {
       "path": "install/kernel_first_install_runner.py",
-      "bytes": 156237,
-      "sha256": "32afe503e2670942cfdbbfc8046c970de1df011f8f43e492b916636aee43e751"
+      "bytes": 157060,
+      "sha256": "7a88bbc801bba56709596b65477d5e1206e107fab41a11d86e3d4eeaeb1063bf"
     },
     {
       "path": "install/public_generation_transaction.py",
@@ -173,5 +173,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:ce5f90c3aa66242b30d67f09eab327dc26abe86118112eaa6cce589b6e965ccb"
+  "self_digest": "sha256:367b9d2d74589f9b71e9452fda5f716bc562143ba1b04638db61052eb1472885"
 }

@@ -76,6 +76,7 @@
     "payload/systemd": "/etc/systemd/system"
   },
   "payload_branches": {
+    "payload/runtime/kernel-observer-access.conf": "AUTHORITY",
     "payload/serein_stage1/outpost_evidence/__init__.py": "OPERATIONS",
     "payload/serein_stage1/outpost_evidence/host_vitality.py": "OPERATIONS",
     "payload/serein_stage1/outpost_evidence/vitals_aggregation.py": "OPERATIONS",
