@@ -2584,7 +2584,7 @@ def _restore_kernel_source_inputs(*,root,source,receipt_path,prior_source,prior_
 
 
 @contextmanager
-def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restored,publication):
+def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restored,publication,retain_prestate=None):
  """Whole-successor owner: stop only the exact installed Kernel units.
 
  No host, Outpost, runtime/model or enablement effect. On failure the old
@@ -2596,7 +2596,8 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
  deny(set(prestate)!=names,'KERNEL_SUCCESSOR_UNIT_SET_DENIED')
  for name,row in prestate.items():
   deny(row['LoadState']!='loaded' or row['NeedDaemonReload']!='no'
-       or not (_unit_active(name,row) or (row['ActiveState'],row['SubState'])==('inactive','dead')),
+       or not (_unit_active(name,row) or (row['ActiveState'],row['SubState'])==('inactive','dead')
+               or (name in OPERATIONS_SERVICES and (row['ActiveState'],row['SubState'])==('failed','failed'))),
        'KERNEL_SUCCESSOR_UNIT_PRESTATE_DENIED')
  original=strict_json(canonical(prestate));attempted=False;restart_errors=[]
  def read(*,cleanup=False):
@@ -2633,10 +2634,26 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
   guard()
  guard();verify_predecessor()
  deny(read()!=original,'KERNEL_SUCCESSOR_UNIT_PRESTATE_CHANGED')
+ failed=tuple(name for name in OPERATIONS_SERVICES if original[name]['ActiveState']=='failed')
+ if failed:
+  deny(not callable(retain_prestate),'KERNEL_SUCCESSOR_FAILURE_EVIDENCE_REQUIRED')
+  retain_prestate(original)
+  guard();verify_predecessor()
+  deny(read()!=original,'KERNEL_SUCCESSOR_UNIT_PRESTATE_CHANGED')
  try:
   for units in reversed(groups):
    definitions(read());attempted=True;command('stop',units)
    observed=read();definitions(observed)
+   # systemd stop leaves an already-failed unit failed. Preserve its exact
+   # original evidence first, then clear only that owned predecessor's latch.
+   # This never starts it or clears replay/application history. Compensation
+   # below restarts only originally active units, never a failed predecessor.
+   reset=tuple(name for name in failed if name in units)
+   if reset:
+    deny(any((observed[name]['ActiveState'],observed[name]['SubState'])!=('failed','failed')
+             for name in reset),'KERNEL_SUCCESSOR_FAILED_PRESTATE_CHANGED')
+    command('reset-failed',reset)
+    observed=read();definitions(observed)
    deny(any((observed[name]['ActiveState'],observed[name]['SubState'])!=('inactive','dead') for name in units),
         'KERNEL_SUCCESSOR_QUIESCENCE_UNPROVEN')
   guard();verify_predecessor()
@@ -2791,8 +2808,25 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
          'KERNEL_SUCCESSOR_RUNTIME_SOURCE_NOT_RESTORED')
     restored_guard()
     return restored_guard
+   def retain_prestate(rows):
+    controls=read_operations_service_controls()
+    failed=[name for name in OPERATIONS_SERVICES if rows[name]['ActiveState']=='failed']
+    deny(any(controls[name]['MainPID']!='0' or any(controls[name][key]!=rows[name][key]
+             for key in rows[name]) for name in failed),'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
+    evidence={'schema':'SereinKernelSuccessorQuiescence/v1','boot_id':boot,
+        'request_sha256':sha(request_raw),'plan_sha256':sha(canonical(plan)),
+        'rollback_selector':plan['rollback_selector'],'unit_prestate':rows,
+        'operations_service_controls':controls,'failed_predecessors':failed,
+        'failed_predecessor_compensation':'REMAIN_INACTIVE_NEVER_RESTART'}
+    evidence['evidence_digest']=sha(canonical(evidence))
+    def evidence_boundary():
+     material_boundary();verify_predecessor()
+     deny(read_operations_service_controls()!=controls,'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
+    atomic(STATE/('kernel-successor-quiescence-'+sha(request_raw)+'.json'),
+        evidence,witness_fd,evidence_boundary)
    successor_scope.enter_context(_quiesce_installed_kernel(unit_prestate,guard=material_boundary,
-       verify_predecessor=verify_predecessor,verify_restored=verify_restored,publication=publication))
+       verify_predecessor=verify_predecessor,verify_restored=verify_restored,publication=publication,
+       retain_prestate=retain_prestate))
    successor_unit_prestate=unit_prestate
    unit_prestate=inactive_kernel_units()
   def boundary():
