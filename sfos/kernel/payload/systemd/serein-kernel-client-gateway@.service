@@ -1,0 +1,27 @@
+# ADAPT donor 0dca6bd7 service1d013d73 to actual installed replay owner.
+# No generic replay service/env, privileged startup or downstream dependency.
+[Unit]
+Description=Serein isolated Kernel Gateway function %i
+After=serein-kernel-operations-heartbeat.service serein-observation-audit.service serein-conversation-runtime.socket
+Requires=serein-kernel-operations-heartbeat.service serein-observation-audit.service serein-conversation-runtime.socket
+
+[Service]
+Type=notify
+User=serein-stage1
+Group=serein-stage1
+StateDirectory=serein/kernel/replay
+StateDirectoryMode=0700
+UMask=0077
+# ADAPT project-serein 92e3ba23 unit47e74be3: the existing immutable HAOS
+# credential is delivered only to Kernel, never the independent Vitals edge.
+LoadCredential=haos-companion-token:/etc/serein/haos-companion-token
+ExecStart=/usr/libexec/serein/serein-kernel-client-gateway %i
+Restart=on-failure
+RestartSec=1s
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+# Private ingress/runtime/Audit use Unix sockets. The fixed, read-only Host
+# witness uses canonical HTTPS/DNS; this does not expose a network listener.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

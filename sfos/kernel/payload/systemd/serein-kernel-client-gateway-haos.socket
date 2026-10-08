@@ -1,0 +1,6 @@
+# KEEP donor 0dca6bd7 socket4cd03bc5. Inactive until Outpost orders Kernel.
+[Socket]
+ListenStream=/run/serein/kernel/gateway-haos.sock
+Service=serein-kernel-client-gateway@haos.service
+SocketMode=0660
+SocketGroup=serein-stage1

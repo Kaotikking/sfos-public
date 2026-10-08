@@ -1,0 +1,10 @@
+[Unit]
+Description=Serein Kernel Operations private observation API
+Requires=serein-kernel-operations-heartbeat.service
+After=serein-kernel-operations-heartbeat.service
+[Socket]
+ListenStream=/run/serein/stage1/kernel-operations-v1.sock
+SocketUser=serein-outpost
+SocketGroup=serein-outpost
+SocketMode=0600
+RemoveOnStop=yes

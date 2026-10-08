@@ -1,0 +1,8 @@
+#!/usr/bin/python3
+"""ADAPT sfos-public 0dca6bd7 launcher7a3574e6: installed HAOS only."""
+import sys
+from serein_stage1.kernel import serve_installed_haos
+
+if sys.argv[1:] != ['haos']:
+    raise SystemExit('gateway_client_denied')
+serve_installed_haos()

@@ -1,0 +1,27 @@
+{
+  "schema": "SereinStage1ConversationPolicy/v2",
+  "owner": "KERNEL_AUTHORITY",
+  "default_decision": "DENY",
+  "caller": "HAOS",
+  "plane": "COGNITIVE",
+  "requested_operation": "conversation_only",
+  "public_path": "/v1/voice/conversation",
+  "gateway_socket": "/run/serein/kernel/gateway-haos.sock",
+  "runtime_socket": "/run/serein/kernel/conversation.sock",
+  "provider": "http://127.0.0.1:11434/api/generate",
+  "model": "qwen3:4b-instruct",
+  "model_digest": "0edcdef34593eac1aa2be9c7d06c432dcf81945adca5eca2f27662c18f168ba0",
+  "tools": "DENY",
+  "readonly_chat": {
+    "requested_operation": "conversation_tools",
+    "provider": "http://127.0.0.1:11434/api/chat",
+    "tools": ["GetDateTime", "GetLiveContext"],
+    "tool_execution": "DENY",
+    "external_actions": "DENY"
+  },
+  "external_actions": "DENY",
+  "alternate_routes": "DENY",
+  "authority_effect": "NONE",
+  "admission_effect": "NONE",
+  "effects": []
+}

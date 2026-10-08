@@ -1,0 +1,19 @@
+# ADAPT sfos-public 0dca6bd7 blob aee8811606276893781cd556e1acd541a42bd26a.
+# Inactive package definition. No enablement or admission is implied.
+# Own socket supplies fd3; the provider uses only fixed IPv4 loopback Ollama.
+[Unit]
+Description=Serein Kernel companion conversation runtime
+Requires=serein-conversation-runtime.socket
+After=serein-conversation-runtime.socket
+[Service]
+Type=notify
+User=serein-stage1
+Group=serein-stage1
+ExecStart=/usr/libexec/serein/serein-conversation-runtime
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+RestrictAddressFamilies=AF_UNIX AF_INET
+IPAddressDeny=any
+IPAddressAllow=127.0.0.1/32

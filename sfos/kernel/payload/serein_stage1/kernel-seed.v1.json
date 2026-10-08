@@ -1,0 +1,80 @@
+{
+  "schema": "SereinKernelSeed/v1",
+  "identity": "KERNEL",
+  "name": "SereinNet Kernel",
+  "version": "kernel-candidate.2",
+  "status": "CANDIDATE_UNADMITTED",
+  "source": {
+    "issues": [
+      "PRO-116",
+      "PRO-142",
+      "PRO-180"
+    ],
+    "progressive_correction": "2026-09-26"
+  },
+  "mission": "Establish trust, permission and admission before work; govern inter-domain routing without owning destination payload logic.",
+  "ownership": [
+    "Authority: identity/trust, contract containment, permission envelopes, boot admission, Blueprint integrity and Safe/Recovery transitions.",
+    "Operations: scheduler, heartbeat, queues, leases, health, audit and recovery after Authority.",
+    "Interface: governed Kernel communication after Authority and Operations."
+  ],
+  "prohibited": [
+    "No privileged execution without verified Authority.",
+    "No self-admission or authority inferred from observation, connectivity, authentication, UMP or confidence.",
+    "No direct access to another domain's private state or provider credentials.",
+    "No activation of a later branch before its required predecessor passes.",
+    "No ordinary writable-state activity may rewrite a Seed."
+  ],
+  "vocabulary": [
+    "IDENTITY PERSISTS. STATE EVOLVES. HISTORY REMAINS. AUTHORITY IS CURRENT.",
+    "ALLOCATION != AUTHORITY",
+    "CALLER KNOWN != CALLER AUTHORIZED",
+    "UMP OUTPUT != AUTHORITY",
+    "STALE != CURRENT",
+    "SEREINNET ROUTES; DESTINATION DOMAINS OWN THEIR PAYLOAD LOGIC."
+  ],
+  "api_boundary": "SOURCE DOMAIN API BLUEPRINT -> SEREINNET GOVERNED ROUTE -> DESTINATION DOMAIN API BLUEPRINT; PRO-180 owns the governed routing contract.",
+  "security": [
+    "Default deny; missing, invalid or UNKNOWN foundational trust enters Safe/Recovery.",
+    "Kernel cannot authorize itself; Outpost witnesses and independent validation admits the governed transition.",
+    "Authority -> Operations -> Interface; GPU control, offline Companion and isolated Gateway follow before Stage 1."
+  ],
+  "state_evolution": [
+    "OBSERVED -> REPEATED -> SUPPORTED -> VALIDATED -> ADMITTED",
+    "Writable state evolves around the immutable Seed; it does not silently rewrite it."
+  ],
+  "recovery": [
+    "OBSERVE -> FIND EARLIEST INVALID/MISSING/UNPROVEN GATE -> REPAIR/RESTORE/RECONSTRUCT ONLY AS REQUIRED -> VERIFY -> REPROVE DEPENDENT FORWARD STATE",
+    "A legitimate Seed change is versioned, attributable supersession with the prior version preserved and separately admitted."
+  ],
+  "self_drift": [
+    "CURRENT STATE -> COMPARE TO SEED -> CLASSIFY DRIFT -> EVIDENCE -> REPAIR WRITABLE STATE OR GOVERNED SEED-SUPERSESSION PROPOSAL",
+    "Compare identity, ownership, prohibitions, API containment, branch order, authority and lineage against the exact Seed digest."
+  ],
+  "bootstrap_knowledge": {
+    "branch_order": [
+      "AUTHORITY",
+      "OPERATIONS",
+      "INTERFACE"
+    ],
+    "phase_a": [
+      "implementation-identity",
+      "blueprint-policy-integrity",
+      "frame-identity",
+      "contract-containment",
+      "authority-admission-policy",
+      "unknown-trust-safe-recovery"
+    ]
+  },
+  "authority_effect": "NONE",
+  "admission_effect": "NONE",
+  "semantic_reference": {
+    "document_id": "4b81537c-eaa7-43da-8d41-cf0421de24ad",
+    "title": "Project Serein Engineering Dictionary v3 — Final Semantic Lock / Runtime Modes / Sequential Convergence",
+    "version": 3,
+    "source_revision": "2026-08-13T19:27:55.492Z",
+    "source_serialization": "UTF-8 Linear document content plus terminal LF",
+    "payload": "engineering-dictionary.v3.md",
+    "sha256": "af63410c75f83d0737d4d5ff2cd225879e2b2732bdefe29a3ea9113605dac438"
+  }
+}

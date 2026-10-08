@@ -1,0 +1,13 @@
+#!/usr/bin/python3
+"""Operations owner; adapted from sfos-public 0dca6bd7 launcher32c210d2."""
+from datetime import datetime, timezone
+from pathlib import Path
+from serein_stage1.kernel_operations import serve_installed
+
+serve_installed(
+    root=Path('/'),
+    output_path=Path('/var/lib/serein/kernel/replay/lifecycle-heartbeat.json'),
+    database_path=Path('/var/lib/serein/kernel/replay/receipts.sqlite3'),
+    queue_path=Path('/var/lib/serein/kernel/replay/pending.sqlite3'),
+    clock=lambda: datetime.now(timezone.utc),
+)

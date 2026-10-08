@@ -1,0 +1,10 @@
+[Unit]
+Description=Serein Kernel Operations private observation service
+[Service]
+ExecStart=/usr/libexec/serein/serein-kernel-branch-api --branch OPERATIONS
+User=serein-stage1
+Group=serein-stage1
+NoNewPrivileges=yes
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=yes
