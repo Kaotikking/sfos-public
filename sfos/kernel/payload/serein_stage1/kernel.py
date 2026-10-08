@@ -433,7 +433,12 @@ def exchange_private_service(channel, payload, *, timeout_seconds, root=Path('/'
             handles.append(fd)
             parents.append(identity(os.fstat(fd)))
         parent=os.fstat(fd)
-        if parent.st_uid!=0 or stat.S_IMODE(parent.st_mode)&0o022:
+        # The admitted Base owns this private Audit directory as stage1/0750.
+        # Only this exact final directory has service custody; every ancestor
+        # and the other roads remain root-owned and non-writable by peers.
+        audit_parent=(parent.st_uid,parent.st_gid,stat.S_IMODE(parent.st_mode))
+        if ((audit_parent!=(account.pw_uid,group.gr_gid,0o750)) if channel=='AUDIT'
+                else (parent.st_uid!=0 or stat.S_IMODE(parent.st_mode)&0o022)):
             raise ValueError('private_service_parent_custody_denied')
         before=os.stat(parts[-1],dir_fd=fd,follow_symlinks=False)
         if (not stat.S_ISSOCK(before.st_mode) or before.st_nlink!=1
