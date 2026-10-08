@@ -8,6 +8,7 @@ The caller supplies governed installer/domain keys and installation-only entropy
 from __future__ import annotations
 
 import hashlib
+import base64
 import json
 import re
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -65,6 +66,62 @@ def installation_id(used_ids, random_bytes):
         if value not in used_ids:
             return value
     raise IdentityDenied("IDENTITY_COLLISION_DENIED")
+
+
+def verify_installation_origin(plan, *, installer_public, native_identity,
+                               host_identity_file, boot_id):
+    """Authenticate the unchanged identity/replay birth plan across updates.
+
+    An update has new payload provenance, not a new identity or replay store.
+    The governing successor must already have independently verified current
+    installed state before retaining this signed original plan. This pure
+    reader creates no key, installation, authority or admission.
+    """
+    try:
+        require(isinstance(plan,dict) and len(canonical(plan))<=1024*1024
+                and plan.get('schema')=='SereinPublicKernelFirstInstallPlan/v1'
+                and plan.get('target_vm_id')=='VM4010'
+                and 'installation_origin' not in plan
+                and plan.get('current_boot_id')==boot_id,
+                'IDENTITY_ORIGIN_PLAN_DENIED')
+        signature=plan['signature']
+        require(isinstance(signature,str) and re.fullmatch(r'[A-Za-z0-9_-]{86}',signature),
+                'IDENTITY_ORIGIN_SIGNATURE_DENIED')
+        raw_signature=base64.b64decode(signature+'==',altchars=b'-_',validate=True)
+        require(base64.urlsafe_b64encode(raw_signature).decode().rstrip('=')==signature,
+                'IDENTITY_ORIGIN_SIGNATURE_DENIED')
+        verify_signature(installer_public,raw_signature.hex(),
+                         canonical({k:v for k,v in plan.items() if k!='signature'}))
+        binding=plan['native_identity']
+        require(isinstance(binding,dict) and set(binding)=={
+            'schema','instance_id','checkpoint','registry_sha256','private_sha256',
+            'public_key','transaction_context'}
+            and binding['schema']=='SereinKernelNativeIdentityMaterial/v1'
+            and isinstance(native_identity,dict)
+            and set(native_identity) in ({'instance_id','checkpoint','registry_sha256','transaction_context'},set(binding))
+            and all(binding[k]==v for k,v in native_identity.items())
+            and HEX16.fullmatch(binding['instance_id'])
+            and all(HEX64.fullmatch(binding[k]) for k in
+                ('checkpoint','registry_sha256','private_sha256','public_key','transaction_context')),
+                'IDENTITY_ORIGIN_NATIVE_DENIED')
+        context=digest({k:v for k,v in plan.items() if k not in {'signature','native_identity'}})
+        require(context==binding['transaction_context']
+                and plan['host_identity']['file']==host_identity_file,
+                'IDENTITY_ORIGIN_CONTEXT_DENIED')
+        generation={name:plan['source_'+name] for name in ('parent','commit','tree')}
+        reserved=plan['reserved_domain_ids']
+        require(all(isinstance(v,str) and HEX40.fullmatch(v) for v in generation.values())
+                and isinstance(reserved,list) and reserved==sorted(set(reserved))
+                and all(isinstance(v,str) and HEX16.fullmatch(v) for v in reserved)
+                and binding['instance_id'] not in reserved,
+                'IDENTITY_ORIGIN_LINEAGE_DENIED')
+        return {'plan_sha256':digest(plan),'source_generation':generation,
+                'transaction_context':context,'reserved_domain_ids':list(reserved),
+                'authority_effect':'NONE','admission_effect':'NONE'}
+    except IdentityDenied:
+        raise
+    except Exception as exc:
+        raise IdentityDenied('IDENTITY_ORIGIN_DENIED') from exc
 
 
 def _record(body, installer_key, domain_key, previous_key=None):

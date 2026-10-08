@@ -116,6 +116,7 @@ def read_consumer_installed_policy_evidence(*, root):
         fields={'schema','target','boot_id','source_generation','release_digest','plan_sha256','manifest_sha256',
             'source_receipt_sha256','source_inventory_digest','native_identity','host_identity_sha256','host_identity_file',
             'host_projection_digest','outpost_generation','conversation_policy','payload','state','authority_effect','admission_effect'}
+        if isinstance(body,dict) and 'installation_origin' in body:fields.add('installation_origin')
         if (not isinstance(body,dict) or set(body)!=fields
                 or body['schema']!='SereinKernelInstalledPolicyEvidence/v1'
                 or body['target']!='VM4010' or body['state']!='MATERIAL_BINDING_ONLY'
@@ -178,8 +179,26 @@ def read_consumer_installed_policy_evidence(*, root):
         identity=verify_lineage(registry['records'],
             installer_public=public.public_bytes(Encoding.Raw,PublicFormat.Raw).hex(),
             expected_checkpoint=native['checkpoint'],expected_domain='KERNEL')
+        origin=None
+        if 'installation_origin' in body:
+            # The already-verified installer envelope signs this narrow
+            # projection. The private signed birth plan stays root-only.
+            origin=body['installation_origin']
+            if (not isinstance(origin,dict) or set(origin)!={'plan_sha256',
+                    'source_generation','native_identity','host_identity_file','boot_id'}
+                    or not isinstance(origin['plan_sha256'],str)
+                    or not HEX64.fullmatch(origin['plan_sha256'])
+                    or origin['native_identity']!=native
+                    or origin['host_identity_file']!=host_file
+                    or origin['boot_id']!=body['boot_id']
+                    or not isinstance(origin['source_generation'],dict)
+                    or set(origin['source_generation'])!={'parent','commit','tree'}
+                    or any(not isinstance(v,str) or not HEX40.fullmatch(v)
+                           for v in origin['source_generation'].values())):
+                raise ValueError('invalid signed public identity origin')
         if (identity['instance_id']!=native['instance_id'] or len(registry['records'])!=1
-                or registry['records'][0]['body']['source_commit']!=generation['commit']
+                or registry['records'][0]['body']['source_commit']!=(
+                    origin['source_generation']['commit'] if origin else generation['commit'])
                 or registry['records'][0]['body']['governance_receipt']!=native['transaction_context']):
             raise ValueError('native source context changed')
         rows=body['payload'];seen=set();policies=[]
@@ -233,6 +252,8 @@ def read_consumer_installed_policy_evidence(*, root):
                 'source_commit':generation['commit'],'source_tree':generation['tree'],
                 'boot_id':body['boot_id'],'canonical_manifest_digest':body['manifest_sha256'],
                 'plan_sha256':body['plan_sha256'],
+                **({'replay_origin':{'plan_sha256':origin['plan_sha256'],
+                     'source_generation':origin['source_generation']}} if origin else {}),
                 'native_identity':{**identity,'registry_integrity':'VERIFIED','private_key_possession':'UNKNOWN'},
                 'authority_effect':'NONE','admission_effect':'NONE','dispatch_effect':'NONE'}
     except Exception as exc:

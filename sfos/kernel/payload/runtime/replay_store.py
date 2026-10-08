@@ -292,7 +292,7 @@ CONVERSATION_BINDING_FIELDS = frozenset({'schema','request_id','conversation_id'
     'authority_effect','admission_effect'})
 
 
-def verify_conversation_binding(binding, chain_id, *, descriptor):
+def verify_conversation_binding(binding, chain_id, *, descriptor, expected_generation=None):
     """Closed attempt record for installed policy, never an execution grant.
 
     No generic route contract, UMP, lease or capacity evidence is fabricated.
@@ -324,10 +324,16 @@ def verify_conversation_binding(binding, chain_id, *, descriptor):
     if (not isinstance(binding['kernel_instance'], str)
             or not re.fullmatch('[0-9a-f]{16}', binding['kernel_instance'])):
         raise ValueError('conversation replay identity denied')
+    generation = binding['source_generation']
+    if (not isinstance(generation,dict) or set(generation)!={'commit','tree'}
+            or any(not isinstance(v,str) or not re.fullmatch(r'[0-9a-f]{40}',v)
+                   for v in generation.values())):
+        raise ValueError('conversation replay generation denied')
     expected = descriptor['body']
+    generation_scope = (expected_generation if expected_generation is not None else
+                        {k: expected['source_generation'][k] for k in ('commit','tree')})
     if (binding['boot_id'] != expected['target']['boot_id']
-            or binding['source_generation'] !=
-               {k: expected['source_generation'][k] for k in ('commit','tree')}):
+            or generation != generation_scope):
         raise ValueError('conversation replay generation denied')
     utc(binding['observed_at'])
     return binding
@@ -361,7 +367,7 @@ def verify_dispatch_binding(binding, chain_id, *, descriptor):
         raise ValueError('dispatch binding scope denied')
     return binding
 
-def verify_dispatch_bindings(rows, chains, *, descriptor, key):
+def verify_dispatch_bindings(rows, chains, *, descriptor, key, allow_conversation_history=False):
     """Verify a coherent read-only snapshot after its replay lifecycle checks."""
     if len(rows) >= 4096:
         raise ValueError('dispatch binding capacity exceeded')
@@ -376,7 +382,15 @@ def verify_dispatch_bindings(rows, chains, *, descriptor, key):
                 or body['schema'] != 'SereinKernelDispatchBinding/v1'
                 or body['chain_id'] != chain_id or body['authority_effect'] != 'NONE'):
             raise ValueError('dispatch binding integrity denied')
-        bindings[chain_id] = verify_dispatch_binding(body['binding'], chain_id, descriptor=descriptor)
+        if (allow_conversation_history
+                and isinstance(body['binding'],dict)
+                and body['binding'].get('schema') == CONVERSATION_BINDING_SCHEMA):
+            # Historical source is authenticated by the existing MAC and
+            # receipt anchor below, not asserted as current installation.
+            bindings[chain_id] = verify_conversation_binding(body['binding'], chain_id,
+                descriptor=descriptor, expected_generation=body['binding'].get('source_generation'))
+        else:
+            bindings[chain_id] = verify_dispatch_binding(body['binding'], chain_id, descriptor=descriptor)
         values = chains.get(chain_id, [])
         if (len(values) not in (2,3) or values[0]['body']['run_id'] !=
                 str(uuid5(NAMESPACE_URL, f"{body['binding']['request_id']}:run"))):

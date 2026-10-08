@@ -2,8 +2,8 @@
   "schema": "SereinPortableKernelRelease/v1",
   "classification": "PUBLIC_KERNEL_COMPANION_FOUNDATION_INACTIVE",
   "source_basis": {
-    "public_parent": "b43cfde96e65658da1bc651a0eb3659dc5c860bb",
-    "public_tree": "09a3263d46c6ba5e7659f2d71fc42a5196e1bb6a",
+    "public_parent": "d63060065cadd8c581523a570b615f1dd7f6770f",
+    "public_tree": "ad04de281048c787ee04c6b5fa5cca58b892e8bc",
     "donor_commit": "0dca6bd7a22b83b04ddf353df901d2c7ea15c294",
     "definition": [
       "PRO-132",
@@ -57,14 +57,14 @@
     ],
     [
       "payload/runtime/persistent_replay_store.py",
-      25153,
-      "e39115df989c565d9c6d55a04ad93bcb6f3603457512a14a90f5c7ec5e26cc2f",
+      26407,
+      "df5b5fa9f08c9e3f800f2f0d9b656e89765f5476889049a3a49bebff0d7db8d6",
       "0644"
     ],
     [
       "payload/runtime/replay_store.py",
-      26862,
-      "bda7942812d8402f38f776366d830d47d36a0dd7ca14317239fa4de2fe9330e2",
+      27865,
+      "ddb9a320bb5955f648c18b6c2a5c445ab4f10d5f79f544ce4f3eccbcee40c48f",
       "0644"
     ],
     [
@@ -87,14 +87,14 @@
     ],
     [
       "payload/serein_stage1/authority_boot.py",
-      41368,
-      "aaa9ed1e54e0699a377224a482ad6d620bd4a633cfd3fd1d1051d9e603caf03f",
+      43357,
+      "4ae194b83bfc70df962223162194208ca7a538a7f63a37e2b4c9e57217ee02d8",
       "0644"
     ],
     [
       "payload/serein_stage1/authority_contract.py",
-      52206,
-      "ef7c0dd9c7f4f63e7c7bf7050d0dc10eec45906f0bdba2ee59b2aa6cc9e75bf2",
+      53658,
+      "3f0bd33ec72255ed5325f999c38d7fb98f9b59e0decd1dc9203ef59c3ec05857",
       "0644"
     ],
     [
@@ -117,8 +117,8 @@
     ],
     [
       "payload/serein_stage1/domain_identity.py",
-      10104,
-      "71198c02b1138987b530c0dad920bb9c355557d0d88140b7f14ab4214831b5ea",
+      13517,
+      "0cc857a437b951ed5631217d2c529bd63b442bceeac7663b60d0a9de05f3884c",
       "0644"
     ],
     [
@@ -159,8 +159,8 @@
     ],
     [
       "payload/serein_stage1/kernel_operations.py",
-      83861,
-      "b02523814191f950978121e76fc7dc430a4f1a0b2f2fd57bb6078f8680337abd",
+      85834,
+      "9f002a4cdc6970cd4a9b530507b9c3f410a97c15bd4bb1e1a8c3bbf433ca3b8a",
       "0644"
     ],
     [
@@ -189,8 +189,8 @@
     ],
     [
       "payload/serein_stage1/serein_https_gateway_adapter.py",
-      22240,
-      "276be40fd7074cb83de0ab297b699419f719d87380d1a4f8fb937c7e3b61bc2f",
+      23448,
+      "8713eb4513b8415e1db04b333eda48ec5012116bb140478ff5445d0b3611e2d1",
       "0644"
     ],
     [
@@ -272,8 +272,8 @@
       "0644"
     ]
   ],
-  "payload_digest": "sha256:273716598da1a7c547d56087d061beaac678dd90fb0d54f86c150b7fe40dbbdd",
-  "install_denominator_digest": "sha256:e9c9da18651b6549d9ff4203f440aad0cc65a646064d6928a25a3365ec7db090",
+  "payload_digest": "sha256:4a069a2ca500d5b3fd844412843fad04e9f87a61607f5f0b14f2d5cd32118d04",
+  "install_denominator_digest": "sha256:d272458787b34ba2eeba69e99c740aef19fbafcf2c099ad1b404b6be87fc5521",
   "generated_secrets": [
     "/var/lib/serein/kernel/authority/replay.key",
     "/var/lib/serein/kernel/authority/domain-identity.pem"
@@ -282,8 +282,8 @@
   "installer_files": [
     [
       "install/kernel_first_install.py",
-      60833,
-      "a0dc5d16e4f282e9b08c9b4a6436042b2885fbf74387c74ffc3a79ac699938fc",
+      65607,
+      "b43c6413fd2881a7e9484ec7e0d23a5ddf55523b0df1eb3bffd9736961bc6491",
       "0755"
     ],
     [
@@ -315,5 +315,5 @@
   ],
   "activation": "OUTPOST_ONLY_AFTER_INACTIVE_PROOF",
   "admission_effect": "NONE",
-  "self_digest": "sha256:af5a7c44166fd871b415a9459c13b2e298cc5d81ad6b11618487bc777115f9cf"
+  "self_digest": "sha256:99f222695cb6bb66b85dd77aedb3d5bed9f8386ecea19ffd8f90eeb2a849dae2"
 }

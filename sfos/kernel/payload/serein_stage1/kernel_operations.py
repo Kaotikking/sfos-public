@@ -33,7 +33,7 @@ INTERVAL_SECONDS = 0.5
 HEARTBEAT_FLOOR_SECONDS = 1.0
 MAX_RECEIPTS = 4096
 REPLAY_CONTRACT = Path('/usr/lib/serein/kernel/replay_store.py')
-REPLAY_CONTRACT_SHA256 = 'bda7942812d8402f38f776366d830d47d36a0dd7ca14317239fa4de2fe9330e2'
+REPLAY_CONTRACT_SHA256 = 'ddb9a320bb5955f648c18b6c2a5c445ab4f10d5f79f544ce4f3eccbcee40c48f'
 VITALS_HOST = 'serein.sardonyxsapphire.us'
 VITALS_PATH = '/v1/runtime/status'
 VITALS_MAX_BYTES = 2 * 1024 * 1024
@@ -295,7 +295,10 @@ def installed_replay_owner(*, root, database_path, clock, read_only=False):
         modules[name]=raw
     # Installer derives these identities from the exact signed plan bytes.
     # A different, still MAC-valid descriptor is not this installation.
-    body=descriptor['body'];plan_digest=installed['plan_sha256']
+    body=descriptor['body']
+    origin=installed.get('replay_origin',{'plan_sha256':installed['plan_sha256'],
+        'source_generation':installed['evidence']['source_generation']})
+    plan_digest=origin['plan_sha256']
     if (body['store_id']!=str(uuid5(NAMESPACE_URL,'serein-kernel-store:'+plan_digest))
             or body['trusted_key_receipt']!=str(uuid5(NAMESPACE_URL,'serein-kernel-key:'+plan_digest))):
         raise OperationsDenied('REPLAY_OWNER_INSTALL_BINDING_DENIED')
@@ -311,7 +314,13 @@ def installed_replay_owner(*, root, database_path, clock, read_only=False):
             raise OperationsDenied('REPLAY_OWNER_INPUT_CHANGED')
     store=module.PersistentReplayStore(database_path,descriptor=descriptor,key=key,
         expected_target={'vm_id':'VM4010','boot_id':installed['boot_id']},
-        expected_generation=installed['evidence']['source_generation'],input_guard=unchanged)
+        expected_generation=origin['source_generation'],input_guard=unchanged,
+        conversation_context={
+            'source_generation':{'commit':installed['source_commit'],'tree':installed['source_tree']},
+            'policy_sha256':installed['policy_sha256'],'plan_sha256':installed['plan_sha256'],
+            'canonical_manifest_digest':installed['canonical_manifest_digest'],
+            'kernel_instance':installed['native_identity']['instance_id'],
+            'identity_checkpoint':installed['native_identity']['checkpoint'],'boot_id':installed['boot_id']})
     opened=False
     try:
         unchanged()
@@ -487,10 +496,12 @@ def reserve_installed_conversation(payload, *, authenticated_caller, root, repla
         authenticated_caller=authenticated_caller, root=root, now=observed())
     binding = matched['replay_binding']
     descriptor = replay_store.descriptor['body']
+    installed = matched['installed_policy']
+    origin = installed.get('replay_origin',{'source_generation':installed['evidence']['source_generation']})
     if (descriptor['target'].get('vm_id') != 'VM4010'
             or descriptor['target']['boot_id'] != binding['boot_id']
             or {key: descriptor['source_generation'][key] for key in ('commit','tree')}
-               != binding['source_generation']):
+               != {key:origin['source_generation'][key] for key in ('commit','tree')}):
         raise OperationsDenied('CONVERSATION_REPLAY_SCOPE_DENIED')
     def host_observation(policy):
         host = read_current_host_evidence(root=root)
@@ -1116,7 +1127,7 @@ def _strict_json(raw):
 def observe(*, boot_id_path: Path, descriptor_path: Path, key_path: Path,
             database_path: Path, sequence: int, monotonic_ns: int | None = None,
             observed_at: str | None = None, previous: dict[str, object] | None = None,
-            queue: OperationsQueue | None = None) -> dict[str, object]:
+            queue: OperationsQueue | None = None, installed_root: Path | None = None) -> dict[str, object]:
     if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
         raise OperationsDenied("HEARTBEAT_SEQUENCE_DENIED")
     # The owning process supplies its existing durable queue, never ingress
@@ -1138,6 +1149,17 @@ def observe(*, boot_id_path: Path, descriptor_path: Path, key_path: Path,
         raise OperationsDenied("IMMUTABLE_REPLAY_INPUT_DENIED") from exc
     if not isinstance(trusted_key_receipt, str) or not trusted_key_receipt:
         raise OperationsDenied("IMMUTABLE_REPLAY_INPUT_DENIED")
+    installed = None
+    if installed_root is not None:
+        from .authority_contract import read_consumer_installed_policy_evidence, canonical
+        installed = read_consumer_installed_policy_evidence(root=installed_root)
+        origin = installed.get('replay_origin',{'plan_sha256':installed['plan_sha256'],
+            'source_generation':installed['evidence']['source_generation']})
+        body = descriptor['body']
+        if (installed['boot_id']!=boot_id or body['source_generation']!=origin['source_generation']
+                or body['store_id']!=str(uuid5(NAMESPACE_URL,'serein-kernel-store:'+origin['plan_sha256']))
+                or body['trusted_key_receipt']!=str(uuid5(NAMESPACE_URL,'serein-kernel-key:'+origin['plan_sha256']))):
+            raise OperationsDenied('REPLAY_OWNER_INSTALL_BINDING_DENIED')
     contract,contract_raw,contract_fact = _replay_contract()
     try:
         body = descriptor['body']
@@ -1205,7 +1227,8 @@ def observe(*, boot_id_path: Path, descriptor_path: Path, key_path: Path,
         replay_history = contract.verify_stored_history(list(chains.values()), descriptor=descriptor,
                                                        key=key, current_time=effective_observed_at)
         bindings, binding_bytes = contract.verify_dispatch_bindings(
-            binding_rows, chains, descriptor=descriptor, key=key)
+            binding_rows, chains, descriptor=descriptor, key=key,
+            allow_conversation_history=installed is not None)
         if binding_bytes + sum(len(row[2]) for row in records) > 1048576:
             raise ValueError('replay observation capacity exceeded')
         dispatch_history = {
@@ -1256,6 +1279,8 @@ def observe(*, boot_id_path: Path, descriptor_path: Path, key_path: Path,
                 last_missed = effective_observed_at
         except (KeyError, TypeError, ValueError) as exc:
             raise OperationsDenied("HEARTBEAT_PREDECESSOR_DENIED") from exc
+    if installed is not None and canonical(read_consumer_installed_policy_evidence(root=installed_root))!=canonical(installed):
+        raise OperationsDenied('REPLAY_OWNER_INPUT_CHANGED')
     result = {
         "schema": SCHEMA,
         "boot_id": boot_id,
@@ -1476,7 +1501,7 @@ def serve(*, output_path: Path, boot_id_path: Path, descriptor_path: Path,
         value=observe(
             boot_id_path=boot_id_path, descriptor_path=descriptor_path,
             key_path=key_path, database_path=database_path, sequence=next_sequence,
-            previous=previous, queue=queue,
+            previous=previous, queue=queue, installed_root=installed_root,
         )
         if previous is not None:
             _replay_progression(previous['replay_history'],value['replay_history'])

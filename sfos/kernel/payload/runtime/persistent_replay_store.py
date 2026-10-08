@@ -19,7 +19,7 @@ from datetime import timedelta
 from uuid import NAMESPACE_URL, uuid5
 
 CONTRACT_PATH = Path('/usr/lib/serein/kernel/replay_store.py')
-CONTRACT_SHA256 = 'bda7942812d8402f38f776366d830d47d36a0dd7ca14317239fa4de2fe9330e2'
+CONTRACT_SHA256 = 'ddb9a320bb5955f648c18b6c2a5c445ab4f10d5f79f544ce4f3eccbcee40c48f'
 
 
 def canonical_request_id(value):
@@ -70,13 +70,21 @@ class PersistentReplayStore:
         'chain_id TEXT PRIMARY KEY NOT NULL,binding BLOB NOT NULL,outcome BLOB)')
 
     def __init__(self, path, *, descriptor, key, expected_target, expected_generation,
-                 input_guard=None):
+                 input_guard=None, conversation_context=None):
         self.path = Path(path)
         self.connection = None
         self._parent_fd = None
         if input_guard is not None and not callable(input_guard):
             raise ValueError('replay input guard denied')
         self._input_guard = input_guard
+        self._conversation_context = None
+        if conversation_context is not None:
+            fields={'source_generation','policy_sha256','plan_sha256','canonical_manifest_digest',
+                    'kernel_instance','identity_checkpoint','boot_id'}
+            if (not callable(input_guard) or not isinstance(conversation_context,dict)
+                    or set(conversation_context)!=fields):
+                raise ValueError('installed conversation context denied')
+            self._conversation_context=json.loads(json.dumps(conversation_context,allow_nan=False))
         if not self.path.is_absolute() or '..' in self.path.parts:
             raise ValueError('replay path denied')
         if not isinstance(key, bytes) or len(key) != 32:
@@ -263,11 +271,20 @@ class PersistentReplayStore:
         return chains, summary
 
     def _binding(self, binding, chain_id):
+        if (isinstance(binding,dict) and binding.get('schema') == self.contract.CONVERSATION_BINDING_SCHEMA
+                and self._conversation_context is not None):
+            self._inputs_current()
+            if any(binding.get(k)!=v for k,v in self._conversation_context.items()):
+                raise ValueError('installed conversation context denied')
+            return self.contract.verify_conversation_binding(binding,chain_id,
+                descriptor=self.descriptor,
+                expected_generation=self._conversation_context['source_generation'])
         return self.contract.verify_dispatch_binding(binding, chain_id, descriptor=self.descriptor)
 
     def _bindings(self, chains):
         rows = self.connection.execute('SELECT chain_id,binding,outcome FROM dispatches LIMIT 4096').fetchall()
-        return self.contract.verify_dispatch_bindings(rows, chains, descriptor=self.descriptor, key=self.key)
+        return self.contract.verify_dispatch_bindings(rows, chains, descriptor=self.descriptor, key=self.key,
+            allow_conversation_history=self._conversation_context is not None)
 
     def recover(self, *, current_time=None, clock=None):
         if ((clock is None) == (current_time is None)

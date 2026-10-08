@@ -21,6 +21,7 @@ import os
 from pathlib import Path
 import ssl
 import stat
+import struct
 import time
 from uuid import UUID
 
@@ -137,6 +138,14 @@ def load_companion_token(credentials_directory):
         return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,info.st_nlink)
     def file_identity(info):
         return (*identity(info),info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+    def systemd_acl(handle,permission):
+        # systemd v257 exec-credential.c uses a root-owned file plus a
+        # named service-user ACL. Its ACL mask appears as group mode bits;
+        # group:: itself remains empty. Accept only that exact projection.
+        expected=struct.pack('<I',2)+b''.join(struct.pack('<HHI',*row) for row in (
+            (1,permission,0xffffffff),(2,permission,os.geteuid()),
+            (4,0,0xffffffff),(16,permission,0xffffffff),(32,0,0xffffffff)))
+        return os.getxattr(handle,'system.posix_acl_access')==expected
     try:
         fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
         handles.append(fd);parents.append((None,'/',fd,identity(os.fstat(fd))))
@@ -147,9 +156,17 @@ def load_companion_token(credentials_directory):
         name='haos-companion-token'
         opened=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC|os.O_NONBLOCK,dir_fd=fd)
         handles.append(opened);info=os.fstat(opened);before=file_identity(info)
+        projected=stat.S_IMODE(info.st_mode)==0o440
+        if projected:
+            parent_info=os.fstat(fd)
+            if (os.geteuid()==0 or (info.st_uid,info.st_gid)!=(0,0)
+                    or (parent_info.st_uid,parent_info.st_gid,
+                        stat.S_IMODE(parent_info.st_mode))!=(0,0,0o550)
+                    or not systemd_acl(fd,5) or not systemd_acl(opened,4)):
+                raise RuntimeError('companion_credential_custody_invalid')
         if (not stat.S_ISREG(info.st_mode) or info.st_nlink!=1
                 or not 32<=info.st_size<=4096 or info.st_uid not in (0,os.geteuid())
-                or stat.S_IMODE(info.st_mode)&0o077):
+                or (stat.S_IMODE(info.st_mode)&0o077 and not projected)):
             raise RuntimeError('companion_credential_custody_invalid')
         key=bytearray()
         while len(key)<=4096:
@@ -161,6 +178,8 @@ def load_companion_token(credentials_directory):
         if (file_identity(os.fstat(opened))!=before
                 or file_identity(os.stat(name,dir_fd=fd,follow_symlinks=False))!=before):
             raise RuntimeError('companion_credential_changed')
+        if projected and (not systemd_acl(fd,5) or not systemd_acl(opened,4)):
+            raise RuntimeError('companion_credential_custody_invalid')
         for parent,name,opened,before in parents:
             if (identity(os.fstat(opened))!=before
                     or identity(os.stat(name,dir_fd=parent,follow_symlinks=False))!=before):

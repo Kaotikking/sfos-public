@@ -316,14 +316,21 @@ def verify_native_binding(plan, registry_raw, anchor, witness, *, identity_sourc
             and reserved == sorted(set(reserved)), "AUTHORITY_NATIVE_RESERVED_DENIED")
         from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
         public = load_pem_public_key(anchor).public_bytes(Encoding.Raw, PublicFormat.Raw).hex()
+        origin=None
+        if 'installation_origin' in plan:
+            origin=identity_module.verify_installation_origin(plan['installation_origin'],
+                installer_public=public,native_identity=binding,
+                host_identity_file=plan['host_identity']['file'],boot_id=plan['current_boot_id'])
+            require(reserved==origin['reserved_domain_ids'],'AUTHORITY_NATIVE_RESERVED_DENIED')
         verified = identity_module.verify_lineage(
             registry["records"], installer_public=public,
             expected_checkpoint=binding["checkpoint"], expected_domain="KERNEL",
             reserved_ids=set(reserved))
-        context = sha(canonical({k: v for k, v in plan.items()
-                                 if k not in {"signature", "native_identity"}}))
+        context = (origin['transaction_context'] if origin else sha(canonical({k: v for k, v in plan.items()
+                                 if k not in {"signature", "native_identity"}})))
         require(len(registry["records"]) == 1
-                and registry["records"][0]["body"]["source_commit"] == plan["source_commit"]
+                and registry["records"][0]["body"]["source_commit"] == (
+                    origin['source_generation']['commit'] if origin else plan["source_commit"])
                 and registry["records"][0]["body"]["governance_receipt"] == context
                 and binding["transaction_context"] == context
                 and verified["instance_id"] == binding["instance_id"]
@@ -355,6 +362,7 @@ def _construction_material(read_bytes, rooted, receipt, anchor, boot, manifest_r
             'AUTHORITY_CONSTRUCTION_REQUEST_DENIED')
     if request['schema'].endswith('/v2'):fields.add('offline_companion')
     if 'recovered_predecessor' in request:fields.add('recovered_predecessor')
+    if 'installed_predecessor' in request:fields.add('installed_predecessor')
     require(set(request)==fields and request['target_vm_id']=='VM4010'
             and request['repository']==receipt['repository']
             and all(request.get(k)==receipt[k] for k in
@@ -405,12 +413,21 @@ def _construction_material(read_bytes, rooted, receipt, anchor, boot, manifest_r
             and plan.get('source_receipt_sha256')==sha(canonical(receipt))
             and plan.get('source_inventory_digest')==receipt['inventory_digest'],
             'AUTHORITY_CONSTRUCTION_PLAN_DENIED')
-    if 'recovered_predecessor' in request:
+    previous=None
+    if 'installed_predecessor' in request:
+        previous=plan.get('installed_predecessor')
+        locator=request['installed_predecessor']
+        require('recovered_predecessor' not in request and isinstance(previous,dict)
+                and isinstance(locator,dict) and set(locator)==set(previous)|{'source_root','source_receipt'}
+                and {k:v for k,v in locator.items() if k not in {'source_root','source_receipt'}}==previous
+                and 'installation_origin' in plan,'AUTHORITY_SUCCESSOR_BINDING_DENIED')
+    elif 'recovered_predecessor' in request:
         previous=plan.get('recovered_predecessor')
         require(isinstance(previous,dict) and
                 {k:v for k,v in previous.items() if k!='reserved_domain_id'}==request['recovered_predecessor']
                 and previous.get('reserved_domain_id') in plan['reserved_domain_ids'],
                 'AUTHORITY_RECOVERED_BINDING_DENIED')
+    if previous is not None:
         historical=read_bytes(rooted(STATE+'/kernel-install-witness.json'),expected_custody=(0,0,0o600))
         archived=read_bytes(rooted(selector+'/predecessor-witness.json'),expected_custody=(0,0,0o600))
         require(historical==archived and sha(historical)==previous.get('witness_sha256'),
@@ -440,6 +457,14 @@ def _construction_material(read_bytes, rooted, receipt, anchor, boot, manifest_r
         'outpost_generation':plan['outpost_generation'],'conversation_policy':policies[0],
         'payload':sorted(rows,key=lambda r:('AUTHORITY','OPERATIONS','INTERFACE').index(r['branch'])),
         'state':'MATERIAL_BINDING_ONLY','authority_effect':'NONE','admission_effect':'NONE'}
+    if 'installation_origin' in plan:
+        origin=plan['installation_origin']
+        expected['installation_origin']={'plan_sha256':sha(canonical(origin)),
+            'source_generation':{k:origin['source_'+k] for k in ('parent','commit','tree')},
+            'native_identity':{k:origin['native_identity'][k] for k in
+                ('instance_id','checkpoint','registry_sha256','transaction_context')},
+            'host_identity_file':dict(origin['host_identity']['file']),
+            'boot_id':origin['current_boot_id']}
     require(isinstance(projection,dict) and set(projection)=={'body','signature'}
             and canonical(projection)==projection_raw and projection['body']==expected,
             'AUTHORITY_CONSTRUCTION_PROJECTION_DENIED')
@@ -576,7 +601,9 @@ def collect_authority_facts(root=Path("/")):
     current_request=read(STATE+'/install-request.json') if had_witness and not terminal_current else None
     recovered=(isinstance(current_request,dict) and isinstance(current_request.get('recovered_predecessor'),dict)
                and current_request['recovered_predecessor'].get('witness_sha256')==sha(historical_witness)) if had_witness else False
-    if not had_witness or recovered:
+    successor=(isinstance(current_request,dict) and isinstance(current_request.get('installed_predecessor'),dict)
+               and current_request['installed_predecessor'].get('witness_sha256')==sha(historical_witness)) if had_witness else False
+    if not had_witness or recovered or successor:
         plan,plan_raw,witness=_construction_material(read_bytes,rooted,receipt,anchor,boot,
             read_bytes(source/'release-manifest.json'))
     else:

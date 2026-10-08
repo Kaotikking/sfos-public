@@ -250,10 +250,12 @@ def source_data(source,row):
  return data
 
 
-def target_prestate(root, row, *, generated=False, include_bytes=False,expected_nlink=1):
+def target_prestate(root, row, *, generated=False, include_bytes=False,expected_nlink=1,expected_owner=(0,0)):
  """Capture exact retained bytes/custody without following links or writing."""
  name=row["target"];relative=Path(name)
  deny(expected_nlink not in (1,2),'KERNEL_TARGET_LINK_COUNT_DENIED')
+ deny(not isinstance(expected_owner,tuple) or len(expected_owner)!=2
+      or any(type(value) is not int or value<0 for value in expected_owner),'KERNEL_TARGET_OWNER_DENIED')
  deny(not relative.is_absolute() or ".." in relative.parts,"KERNEL_TARGET_PRESTATE_PATH_DENIED")
  path=Path(root).joinpath(*relative.parts[1:]);handles=[]
  fingerprint=lambda s:(s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gid,s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
@@ -268,7 +270,7 @@ def target_prestate(root, row, *, generated=False, include_bytes=False,expected_
   with os.fdopen(fd,"rb") as stream:
    before=os.fstat(stream.fileno())
    deny(generated,"KERNEL_GENERATED_PRESTATE_COLLISION_DENIED")
-   deny(not stat.S_ISREG(before.st_mode) or before.st_nlink!=expected_nlink or (before.st_uid,before.st_gid)!=(0,0)
+   deny(not stat.S_ISREG(before.st_mode) or before.st_nlink!=expected_nlink or (before.st_uid,before.st_gid)!=expected_owner
         or stat.S_IMODE(before.st_mode)!=int(row["mode"],8) or before.st_size!=row["bytes"],
         "KERNEL_TARGET_PRESTATE_CUSTODY_DENIED")
    data=stream.read(row["bytes"]+1);stream.seek(0);second=stream.read(row["bytes"]+1)
@@ -293,7 +295,7 @@ def capture_target_prestate(root, rows):
  deny(len({row["target"] for row in rows})!=len(rows),"KERNEL_TARGET_PRESTATE_DUPLICATE")
  return [target_prestate(root,{"target":name},generated=True) for name in GENERATED]+[target_prestate(root,row) for row in ordered]
 
-def capture_install_prestate(root,rows,prior=None):
+def capture_install_prestate(root,rows,prior=None,*,preserve_generated=False):
  """Exact signed recovered public preimages; generated identity stays absent."""
  if prior is None:return capture_target_prestate(root,rows)
  ordered=[r for branch in ORDER for r in rows if r['branch']==branch]
@@ -303,6 +305,16 @@ def capture_install_prestate(root,rows,prior=None):
  result=[]
  for previous in prior:
   name=previous['target']
+  if preserve_generated and name in GENERATED:
+   deny(set(previous)!={'target','state','bytes','sha256','mode','uid','gid','device','inode','nlink'}
+        or previous['state']!=('PRESENT_REPLACE' if name==POLICY_EVIDENCE else 'PRESENT_PRESERVED')
+        or previous['mode']!=('0600' if name in {KEY,PEER_ENV,NATIVE_KEY} else '0644')
+        or type(previous['bytes']) is not int or not 0<previous['bytes']<=1024*1024
+        or not isinstance(previous['sha256'],str) or not re.fullmatch(r'[0-9a-f]{64}',previous['sha256'])
+        or previous['nlink']!=1,'KERNEL_SUCCESSOR_GENERATED_PRESTATE_DENIED')
+   observed=target_prestate(root,previous,expected_owner=(previous['uid'],previous['gid']))
+   deny(observed!={**previous,'state':'PRESENT_PRESERVED'},'KERNEL_SUCCESSOR_GENERATED_PRESTATE_CHANGED')
+   result.append(dict(previous));continue
   if previous.get('state')=='PRESENT_REPLACE':
    deny(name in GENERATED or set(previous)!={'target','state','bytes','sha256','mode','uid','gid','device','inode','nlink'},
         'KERNEL_RECOVERED_PRESTATE_DENIED')
@@ -426,8 +438,14 @@ def verify_native_identity_material(source,plan,material,installer_public,*,rese
   deny(not isinstance(document,dict) or set(document)!={'schema','records'} or document['schema']!='SereinDomainIdentityRegistry/v1' or canonical(document)!=material['registry'],"KERNEL_NATIVE_IDENTITY_REGISTRY_DENIED")
   result=module.verify_lineage(document['records'],installer_public=installer_public,
                                expected_checkpoint=binding['checkpoint'],expected_domain='KERNEL',reserved_ids=reserved_ids)
-  context=sha(canonical({k:v for k,v in plan.items() if k not in {'signature','native_identity'}}))
-  deny(len(document['records'])!=1 or document['records'][0]['body']['source_commit']!=plan['source_commit'] or document['records'][0]['body']['governance_receipt']!=context or binding['transaction_context']!=context,"KERNEL_NATIVE_IDENTITY_CONTEXT_DENIED")
+  origin=None
+  if 'installation_origin' in plan:
+   origin=module.verify_installation_origin(plan['installation_origin'],installer_public=installer_public,
+       native_identity=binding,host_identity_file=plan['host_identity']['file'],boot_id=plan['current_boot_id'])
+   deny(set(origin['reserved_domain_ids'])!=reserved_ids,'KERNEL_NATIVE_IDENTITY_RESERVED_DENIED')
+  context=origin['transaction_context'] if origin else sha(canonical({k:v for k,v in plan.items() if k not in {'signature','native_identity'}}))
+  birth_source=origin['source_generation']['commit'] if origin else plan['source_commit']
+  deny(len(document['records'])!=1 or document['records'][0]['body']['source_commit']!=birth_source or document['records'][0]['body']['governance_receipt']!=context or binding['transaction_context']!=context,"KERNEL_NATIVE_IDENTITY_CONTEXT_DENIED")
   deny(result['instance_id']!=binding['instance_id'] or result['public_key']!=binding['public_key'] or module.public_hex(private)!=result['public_key'],"KERNEL_NATIVE_IDENTITY_KEY_DENIED")
  except Denied:raise
  except Exception as exc:raise Denied("KERNEL_NATIVE_IDENTITY_VERIFICATION_DENIED") from exc
@@ -476,6 +494,18 @@ def validate(source,root,plan,identity_lookup=None):
  required={"schema","target_vm_id","source_parent","source_commit","source_tree","release_digest","current_boot_id","outpost_identity","replay_identity","payload","target_prestate","rollback_selector","authority_sha256","archive_sha256","source_receipt_sha256","source_inventory_digest","reserved_domain_ids","native_identity","signature"}
  required|={"host_identity","host_projection_digest","outpost_generation"}
  if isinstance(plan,dict) and 'runtime_access_prestate' in plan:required.add('runtime_access_prestate')
+ if isinstance(plan,dict) and 'installed_predecessor' in plan:
+  required.update({'installed_predecessor','installation_origin'})
+  prior=plan['installed_predecessor']
+  deny('recovered_predecessor' in plan or not isinstance(prior,dict) or set(prior)!=
+       {'rollback_selector','plan_sha256','receipt_sha256','journal_sha256','witness_sha256',
+        'current_boot_id','machine_id_sha256'}
+       or prior.get('rollback_selector')==plan.get('rollback_selector')
+       or not re.fullmatch(r'/var/lib/serein/rollback/kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',str(prior.get('rollback_selector')))
+       or prior.get('current_boot_id')!=plan.get('current_boot_id')
+       or any(not isinstance(prior.get(k),str) or not re.fullmatch(r'[0-9a-f]{64}',prior[k]) for k in
+           ('plan_sha256','receipt_sha256','journal_sha256','witness_sha256','machine_id_sha256')),
+       'KERNEL_SUCCESSOR_BINDING_DENIED')
  if isinstance(plan,dict) and 'recovered_predecessor' in plan:
   required.add('recovered_predecessor')
   prior=plan['recovered_predecessor']
@@ -506,6 +536,13 @@ def validate(source,root,plan,identity_lookup=None):
  except Exception as exc:raise Denied("KERNEL_PLAN_SIGNATURE_DENIED") from exc
  rows=plan["payload"];deny(not isinstance(rows,list) or not rows,"KERNEL_PAYLOAD_DENIED");seen=set()
  verify_host_identity(root,plan)
+ if 'installed_predecessor' in plan:
+  deny(plan['installed_predecessor']['machine_id_sha256']!=plan['host_identity']['file']['sha256'],
+       'KERNEL_SUCCESSOR_HOST_DENIED')
+  captured=capture_install_prestate(root,rows,plan['target_prestate'],preserve_generated=True)
+  for row in captured[:len(GENERATED)]:
+   expected_owner=(plan['replay_identity']['uid'],plan['replay_identity']['gid']) if row['target']==KEY else (0,0)
+   deny((row['uid'],row['gid'])!=expected_owner,'KERNEL_SUCCESSOR_GENERATED_CUSTODY_DENIED')
  if 'recovered_predecessor' in plan:
   deny(plan['recovered_predecessor']['machine_id_sha256']!=plan['host_identity']['file']['sha256'],
        'KERNEL_RECOVERED_HOST_DENIED')
@@ -573,6 +610,14 @@ def installed_policy_evidence_body(plan,rows,native,manifest_sha256):
        'outpost_generation':dict(plan['outpost_generation']),
        'conversation_policy':dict(policy[0]),'payload':[dict(row) for row in rows],
        'state':'MATERIAL_BINDING_ONLY','authority_effect':'NONE','admission_effect':'NONE'}
+ if 'installation_origin' in plan:
+  origin=plan['installation_origin']
+  body['installation_origin']={'plan_sha256':sha(canonical(origin)),
+      'source_generation':{k:origin['source_'+k] for k in ('parent','commit','tree')},
+      'native_identity':{k:origin['native_identity'][k] for k in
+          ('instance_id','checkpoint','registry_sha256','transaction_context')},
+      'host_identity_file':dict(origin['host_identity']['file']),
+      'boot_id':origin['current_boot_id']}
  return body
 
 
@@ -603,16 +648,19 @@ def install(root,source,plan,boundary=lambda:None,random_bytes=os.urandom,identi
  except Denied:raise
  except Exception as exc:raise Denied('KERNEL_POLICY_EVIDENCE_DENIED') from exc
  boundary()
- deny(capture_install_prestate(root,rows,plan['target_prestate'] if 'recovered_predecessor' in plan else None)!=plan["target_prestate"],"KERNEL_TARGET_PRESTATE_COLLISION_CHANGED")
+ successor='installed_predecessor' in plan
+ deny(capture_install_prestate(root,rows,plan['target_prestate'] if successor or 'recovered_predecessor' in plan else None,
+       preserve_generated=successor)!=plan["target_prestate"],"KERNEL_TARGET_PRESTATE_COLLISION_CHANGED")
  deny(os.path.lexists(rollback),"KERNEL_ROLLBACK_COLLISION_DENIED")
  preserved={row["target"]:row for row in plan["target_prestate"] if row["state"]=="PRESENT_PRESERVED"}
  replacing={row['target']:row for row in plan['target_prestate'] if row['state']=='PRESENT_REPLACE'}
  preimages={name:target_prestate(root,row,include_bytes=True)[1] for name,row in replacing.items()}
  predecessor_witness=None
- if 'recovered_predecessor' in plan:
+ prior_binding=plan.get('installed_predecessor',plan.get('recovered_predecessor'))
+ if prior_binding is not None:
   name='/var/lib/serein-outpost/kernel/kernel-install-witness.json';path=target(root,name)
   row={'target':name,'mode':'0600','bytes':path.lstat().st_size,
-       'sha256':plan['recovered_predecessor']['witness_sha256']}
+       'sha256':prior_binding['witness_sha256']}
   deny(not 0<row['bytes']<=16*1024*1024,'KERNEL_PREDECESSOR_WITNESS_DENIED')
   predecessor_witness=target_prestate(root,row,include_bytes=True)
  written=[];ownership=[]
@@ -621,9 +669,9 @@ def install(root,source,plan,boundary=lambda:None,random_bytes=os.urandom,identi
   if predecessor_witness is not None:
    deny(target_prestate(root,predecessor_witness[0],include_bytes=True)!=predecessor_witness,
         'KERNEL_PREDECESSOR_WITNESS_CHANGED')
-  for row in rows:
-   if row["target"] in preserved:
-    deny(target_prestate(root,row)!=preserved[row["target"]],"KERNEL_PRESERVED_PRESTATE_CHANGED")
+  for name,row in preserved.items():
+   deny(target_prestate(root,row,expected_owner=(row['uid'],row['gid']))!=row,
+        "KERNEL_PRESERVED_PRESTATE_CHANGED")
   for name,previous in replacing.items():
    if name not in written:
     held=rollback/('retained-inode-'+sha(name.encode()));links=2 if os.path.lexists(held) else 1
@@ -633,11 +681,11 @@ def install(root,source,plan,boundary=lambda:None,random_bytes=os.urandom,identi
     deny(target_prestate(root,previous,expected_nlink=links)!={**previous,'state':'PRESENT_PRESERVED','nlink':links},
          'KERNEL_RECOVERED_PRESTATE_CHANGED')
    else:
-    row=next(r for r in rows if r['target']==name);owned=next(r for r in ownership if r['target']==name)
+    row=next(r for r in replacements if r['target']==name);owned=next(r for r in ownership if r['target']==name)
     fact=target_prestate(root,row)
     deny((fact.get('device'),fact.get('inode'))!=(owned['device'],owned['inode']),
          'KERNEL_REPLACEMENT_OWNERSHIP_CHANGED')
- key=random_bytes(32);deny(type(key) is not bytes or len(key)!=32,"KERNEL_REPLAY_KEY_DENIED")
+ key=(target(root,KEY).read_bytes() if successor else random_bytes(32));deny(type(key) is not bytes or len(key)!=32,"KERNEL_REPLAY_KEY_DENIED")
  peer=(f"SEREIN_OUTPOST_UID={plan['outpost_identity']['uid']}\n"
        f"SEREIN_OUTPOST_GID={plan['outpost_identity']['gid']}\n"
        f"SEREIN_GATEWAY_UID={plan['replay_identity']['uid']}\n"
@@ -646,6 +694,17 @@ def install(root,source,plan,boundary=lambda:None,random_bytes=os.urandom,identi
  body={"schema":"VM4010HttpsReplayStoreDescriptor/v1","store_id":store_id,"backend_identity":"SEREIN_KERNEL_REPLAY","issuer":"KERNEL_AUTHORITY","observer":"OUTPOST","signature_algorithm":"HMAC-SHA256","trusted_key_fingerprint":sha(key),"trusted_key_receipt":key_receipt,"target":{"vm_id":plan["target_vm_id"],"boot_id":plan["current_boot_id"]},"source_generation":{"parent":plan["source_parent"],"commit":plan["source_commit"],"tree":plan["source_tree"]},"telemetry_schema":"VM4010HttpsAdapterTelemetry/v2","authority_effect":"NONE"};descriptor=canonical({"body":body,"signature":hmac.new(key,canonical(body),hashlib.sha256).hexdigest()})
  generated={KEY:(key,"0600",plan["replay_identity"]["uid"],plan["replay_identity"]["gid"]),DESCRIPTOR:(descriptor,"0644",0,0),PEER_ENV:(peer,"0600",0,0),NATIVE_KEY:(native_material['private'],"0600",0,0),NATIVE_REGISTRY:(native_material['registry'],"0644",0,0)}
  generated[POLICY_EVIDENCE]=(policy_evidence,"0644",0,0)
+ if successor:
+  # Keep immutable birth material and replay descriptor byte-for-byte. Only
+  # the signed installed-code evidence changes with this whole generation.
+  for name in GENERATED:
+   if name!=POLICY_EVIDENCE:
+    previous=preserved[name]
+    raw=target_prestate(root,previous,include_bytes=True,
+        expected_owner=(previous['uid'],previous['gid']))[1]
+    if name in {NATIVE_KEY,NATIVE_REGISTRY,PEER_ENV}:
+     deny(raw!=generated[name][0],'KERNEL_SUCCESSOR_IDENTITY_CHANGED')
+    generated[name]=(raw,previous['mode'],previous['uid'],previous['gid'])
  replacements=[{"target":n,"bytes":len(v),"sha256":sha(v),"mode":m,"uid":u,"gid":g,"branch":"AUTHORITY"} for n,(v,m,u,g) in generated.items()]+[{**{k:r[k] for k in ("target","bytes","sha256","mode","branch")},"uid":0,"gid":0} for r in rows]
  rollback_key=random_bytes(32);deny(type(rollback_key) is not bytes or len(rollback_key)!=32,"KERNEL_ROLLBACK_KEY_DENIED")
  receipt_body={"schema":"SereinPublicKernelFirstInstallReceipt/v1","plan_sha256":sha(canonical(plan)),"boot_id":plan["current_boot_id"],"branch_order":list(ORDER),"prestate":plan["target_prestate"],"replacements":replacements,"rollback_selector":plan["rollback_selector"],"rollback_auth_sha256":sha(rollback_key)}
@@ -696,7 +755,8 @@ def install(root,source,plan,boundary=lambda:None,random_bytes=os.urandom,identi
  try:
   for branch in ORDER:
    if branch=="AUTHORITY":
-    for name,(data,mode,uid,gid) in generated.items():install_new(name,data,mode,uid,gid)
+    for name,(data,mode,uid,gid) in generated.items():
+     if name not in preserved:install_new(name,data,mode,uid,gid)
    for row in (r for r in rows if r["branch"]==branch):
     if row["target"] not in preserved:install_new(row["target"],source_data(source,row),row["mode"])
   preserved_unchanged()
@@ -730,7 +790,7 @@ def rollback_transaction(root,receipt_path,boundary=lambda:None):
   plan_raw=plan_path.read_bytes();plan=json.loads(plan_raw)
   deny(canonical(plan)!=plan_raw or sha(plan_raw)!=receipt['plan_sha256']
        or plan.get('target_prestate')!=prestate
-       or (replacing and not isinstance(plan.get('recovered_predecessor'),dict)),
+       or (replacing and not isinstance(plan.get('recovered_predecessor',plan.get('installed_predecessor')),dict)),
        'KERNEL_COMPENSATION_PLAN_DENIED')
   anchor=target(root,AUTHORITY).read_bytes()
   deny(sha(anchor)!=plan.get('authority_sha256'),'KERNEL_COMPENSATION_ANCHOR_DENIED')
@@ -743,10 +803,15 @@ def rollback_transaction(root,receipt_path,boundary=lambda:None):
  for before in prestate:
   if before['state']=='ABSENT':deny(set(before)!={'target','state'},"KERNEL_RECEIPT_PRESTATE_DENIED")
   else:
-   deny(set(before)!={'target','state','bytes','sha256','mode','uid','gid','device','inode','nlink'} or before['target'] in GENERATED,"KERNEL_RECEIPT_PRESTATE_DENIED")
+   generated_preserved=(before['target'] in GENERATED and 'installed_predecessor' in plan)
+   deny(set(before)!={'target','state','bytes','sha256','mode','uid','gid','device','inode','nlink'}
+        or (before['target'] in GENERATED and not generated_preserved)
+        or (generated_preserved and before['state']!=('PRESENT_REPLACE' if before['target']==POLICY_EVIDENCE else 'PRESENT_PRESERVED')),
+        "KERNEL_RECEIPT_PRESTATE_DENIED")
    row=rows[before['target']]
+   expected_owner=(plan['replay_identity']['uid'],plan['replay_identity']['gid']) if generated_preserved and before['target']==KEY else (0,0)
    deny((before['state']=='PRESENT_PRESERVED' and any(before[field]!=row[field] for field in ('bytes','sha256','mode','uid','gid')))
-        or (before['uid'],before['gid'],before['nlink'])!=(0,0,1) or type(before['device']) is not int or type(before['inode']) is not int or before['device']<0 or before['inode']<=0,"KERNEL_RECEIPT_PRESTATE_DENIED")
+        or (before['uid'],before['gid'],before['nlink'])!=(*expected_owner,1) or type(before['device']) is not int or type(before['inode']) is not int or before['device']<0 or before['inode']<=0,"KERNEL_RECEIPT_PRESTATE_DENIED")
  install_order=[row['target'] for row in prestate if row['state']!='PRESENT_PRESERVED']
  deny(not isinstance(ownership,list),"KERNEL_PUBLICATION_OWNERSHIP_UNPROVEN")
  deny(any(not isinstance(item,dict) or set(item)!={'target','device','inode','temporary'}

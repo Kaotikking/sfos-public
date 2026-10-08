@@ -13,7 +13,7 @@ optional post-install compute input is not authentication or an install gate.
 """
 from __future__ import annotations
 import base64,hashlib,hmac,json,os,pwd,grp,re,stat,tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager,ExitStack
 from pathlib import Path
 from cryptography.hazmat.primitives.serialization import load_pem_private_key,load_pem_public_key
 from .transaction import strict_json,TransactionError
@@ -322,6 +322,18 @@ def install_request(path):
  deny(not isinstance(version,str) or version not in {'SereinOutpostKernelInstallRequest/v1','SereinOutpostKernelInstallRequest/v2'},'KERNEL_REQUEST_DENIED')
  if version.endswith('/v2'):required.add('offline_companion')
  if 'recovered_predecessor' in request:required.add('recovered_predecessor')
+ if 'installed_predecessor' in request:
+  required.add('installed_predecessor')
+  previous=request['installed_predecessor']
+  fields={'rollback_selector','plan_sha256','receipt_sha256','journal_sha256',
+          'witness_sha256','current_boot_id','machine_id_sha256','source_root','source_receipt'}
+  deny('recovered_predecessor' in request or not isinstance(previous,dict) or set(previous)!=fields,
+       'KERNEL_SUCCESSOR_REQUEST_DENIED')
+  for key in ('source_root','source_receipt'):
+   location=previous[key]
+   deny(not isinstance(location,str) or not location.startswith('/var/lib/serein/rollback/')
+        or '\\' in location or '\x00' in location or str(Path(location))!=location
+        or '..' in Path(location).parts,'KERNEL_SUCCESSOR_SOURCE_PATH_DENIED')
  deny(set(request)!=required or request['target_vm_id']!='VM4010' or request['repository']!='Kaotikking/sfos-public','KERNEL_REQUEST_DENIED')
  if 'offline_companion' in request:
   value=request['offline_companion']
@@ -352,6 +364,111 @@ def capture_outpost_generation(root):
  deny(root==Path('/') and executing!=expected.absolute(),'KERNEL_OUTPOST_EXECUTOR_GENERATION_DENIED')
  deny(regular(executing)!=regular(expected),'KERNEL_OUTPOST_EXECUTOR_SOURCE_DENIED')
  return selector
+
+
+def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_KEY,witness_path=None):
+ """Authenticate a successful predecessor for a whole-domain successor.
+
+ Read-only: retain birth/replay provenance and exact public preimages. This
+ does not run the first-install rollback, generate identity, quiesce services,
+ authorize replacement, or describe active mutable databases as frozen.
+ """
+ root=Path(root);source=Path(source)
+ fields={'rollback_selector','plan_sha256','receipt_sha256','journal_sha256',
+         'witness_sha256','current_boot_id','machine_id_sha256'}
+ deny(not isinstance(expected,dict) or set(expected)!=fields
+      or any(not isinstance(expected[k],str) or not HEX64.fullmatch(expected[k])
+             for k in fields-{'rollback_selector','current_boot_id'}),
+      'KERNEL_SUCCESSOR_EXPECTATION_DENIED')
+ expected=strict_json(canonical(expected));selector=expected['rollback_selector']
+ deny(not isinstance(selector,str) or not re.fullmatch(
+      r'/var/lib/serein/rollback/kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',selector),
+      'KERNEL_SUCCESSOR_SELECTOR_DENIED')
+ directory=root/selector.lstrip('/')
+ witness_path=Path(witness_path) if witness_path is not None else root/'var/lib/serein-outpost/kernel/kernel-install-witness.json'
+ paths={directory/'plan.json':'plan_sha256',directory/'receipt.json':'receipt_sha256',
+        directory/'phase-journal.json':'journal_sha256',witness_path:'witness_sha256'}
+ captured={}
+ for path,key in paths.items():
+  raw=regular(path,expected_custody=(0,0,0o600))
+  deny(sha(raw)!=expected[key],'KERNEL_SUCCESSOR_RECORD_DENIED')
+  value=strict_json(raw)
+  deny(canonical(value)!=raw,'KERNEL_SUCCESSOR_RECORD_DENIED')
+  captured[path]=raw
+ plan=strict_json(captured[directory/'plan.json']);witness=strict_json(captured[witness_path])
+ anchor=regular(verify_path,expected_custody=(0,0,0o644))
+ deny(sha(anchor)!=CANONICAL_AUTHORITY_SHA256 or plan.get('authority_sha256')!=sha(anchor),
+      'KERNEL_SUCCESSOR_ANCHOR_DENIED')
+ try:load_pem_public_key(anchor).verify(decode(plan['signature']),canonical({k:v for k,v in plan.items() if k!='signature'}))
+ except Exception as exc:raise RunnerDenied('KERNEL_SUCCESSOR_SIGNATURE_DENIED') from exc
+ deny(plan.get('schema')!='SereinPublicKernelFirstInstallPlan/v1'
+      or plan.get('target_vm_id')!='VM4010' or plan.get('rollback_selector')!=selector
+      or plan.get('current_boot_id')!=expected['current_boot_id']
+      or witness.get('schema') not in {'SereinOutpostKernelInstallWitness/v1','SereinOutpostKernelInstallWitness/v2'}
+      or witness.get('target')!='VM4010' or witness.get('boot_id')!=plan['current_boot_id']
+      or witness.get('install_status') not in {'INSTALLED_INACTIVE','CONSTRUCTION_OBSERVED'}
+      or witness.get('authority_effect')!='NONE'
+      or witness.get('witness_digest')!=sha(canonical({k:v for k,v in witness.items() if k!='witness_digest'}))
+      or any(witness.get(k)!=plan.get(k) for k in ('source_commit','source_tree','archive_sha256',
+          'release_digest','source_receipt_sha256','rollback_selector','native_identity','host_identity','host_projection_digest')),
+      'KERNEL_SUCCESSOR_PREDECESSOR_DENIED')
+ if witness['schema'].endswith('/v1'):
+  deny(witness['install_status']!='INSTALLED_INACTIVE'
+       or witness.get('admission')!='INDEPENDENT_AUDIT_PENDING'
+       or witness.get('stage1')!='NOT_READY','KERNEL_SUCCESSOR_TERMINAL_DENIED')
+ else:
+  deny(witness['install_status']!='CONSTRUCTION_OBSERVED'
+       or witness.get('admission')!='UNADMITTED' or witness.get('stage1')!='NOT_READY'
+       or witness.get('admission_effect')!='NONE'
+       or witness.get('temporal_scope')!='HISTORICAL_CONSTRUCTION_OBSERVATION'
+       or witness.get('public_acceptance')!='UNPROVEN'
+       or not isinstance(witness.get('observations'),dict)
+       or witness.get('observations_sha256')!=sha(canonical(witness['observations'])),
+       'KERNEL_SUCCESSOR_TERMINAL_DENIED')
+ def currentness():
+  machine_mode=stat.S_IMODE((root/'etc/machine-id').lstat().st_mode)
+  deny(machine_mode not in {0o444,0o644},'KERNEL_SUCCESSOR_HOST_CUSTODY_DENIED')
+  deny((root/'proc/sys/kernel/random/boot_id').read_text().strip()!=expected['current_boot_id']
+       or sha(regular(root/'etc/machine-id',expected_custody=(0,0,machine_mode)))!=expected['machine_id_sha256'],
+       'KERNEL_SUCCESSOR_HOST_CHANGED')
+  deny(any(regular(path,expected_custody=(0,0,0o600))!=raw for path,raw in captured.items())
+       or regular(verify_path,expected_custody=(0,0,0o644))!=anchor,
+       'KERNEL_SUCCESSOR_RECORD_CHANGED')
+  deny('sha256:'+sha(canonical(safe_tree(source)))!=plan['source_inventory_digest'],
+       'KERNEL_SUCCESSOR_SOURCE_CHANGED')
+ currentness()
+ manifest=read_json(source/'release-manifest.json')
+ module=load_installer(source,manifest,expected_release=plan['release_digest'])
+ module.verify_host_identity(root,plan)
+ receipt={'status':'INSTALLED_INACTIVE','receipt':selector+'/receipt.json'}
+ digest=_verify_install_material(root,plan,receipt,source=source)
+ deny(module.journal_read(directory,digest)!=strict_json(captured[directory/'phase-journal.json']),
+      'KERNEL_SUCCESSOR_JOURNAL_CHANGED')
+ deny(witness.get('installer_receipt_sha256')!=digest,'KERNEL_SUCCESSOR_RECEIPT_DENIED')
+ public=module.capture_successor_payload(root,plan['payload'])
+ rows=strict_json(captured[directory/'receipt.json'])['replacements']
+ generated={}
+ for row in rows:
+  if row['target'] in module.GENERATED:
+   generated[row['target']]=regular(root/row['target'].lstrip('/'),fact=True,
+       expected_custody=(row['uid'],row['gid'],int(row['mode'],8)),include_identity=True)
+ deny(set(generated)!=set(module.GENERATED),'KERNEL_SUCCESSOR_GENERATED_SET_DENIED')
+ currentness();module.verify_host_identity(root,plan)
+ deny(_verify_install_material(root,plan,receipt,source=source)!=digest
+      or module.capture_successor_payload(root,plan['payload'])!=public,
+      'KERNEL_SUCCESSOR_PRESTATE_CHANGED')
+ for row in rows:
+  if row['target'] in generated:
+   deny(regular(root/row['target'].lstrip('/'),fact=True,
+       expected_custody=(row['uid'],row['gid'],int(row['mode'],8)),include_identity=True)!=generated[row['target']],
+       'KERNEL_SUCCESSOR_IDENTITY_CHANGED')
+ currentness()
+ deny(module.journal_read(directory,digest)!=strict_json(captured[directory/'phase-journal.json']),
+      'KERNEL_SUCCESSOR_JOURNAL_CHANGED')
+ return {'state':'INSTALLED_PREDECESSOR_CAPTURE_ONLY','plan':plan,'receipt_digest':digest,
+         'witness':witness,'expected':expected,'public_payload':public,
+         'generated_prestate':generated,'mutable_private_state':'NOT_QUIESCED',
+         'authority_effect':'NONE','admission_effect':'NONE'}
 
 
 def capture_recovered_kernel_prestate(root,module,expected,*,verify_path=VERIFY_KEY,witness_path=None):
@@ -553,7 +670,35 @@ def build_plan(source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,verify_pa
  plan['host_projection_digest']=host['projection_digest'];plan['reserved_domain_ids']=list(reserved)
  plan['outpost_generation']=capture_outpost_generation(root)
  plan['runtime_access_prestate']=module.capture_runtime_access(root,plan)
- if 'recovered_predecessor' in request:
+ if 'installed_predecessor' in request:
+  previous=request['installed_predecessor']
+  prior_source=Path(root)/previous['source_root'].lstrip('/')
+  bound={k:v for k,v in previous.items() if k not in {'source_root','source_receipt'}}
+  installed=capture_installed_kernel_prestate(root,prior_source,bound,verify_path=verify_path,
+      witness_path=STATE/'kernel-install-witness.json')
+  prior_receipt,prior_receipt_digest=source_receipt(prior_source,
+      Path(root)/previous['source_receipt'].lstrip('/'),verify_path)
+  deny(prior_receipt_digest!=installed['plan']['source_receipt_sha256'],
+       'KERNEL_SUCCESSOR_SOURCE_RECEIPT_DENIED')
+  origin=installed['plan'].get('installation_origin',installed['plan'])
+  deny(reserved!=origin['reserved_domain_ids'],'KERNEL_SUCCESSOR_RESERVED_CHANGED')
+  deny(set(installed['public_payload'])!={row['target'] for row in rows},
+       'KERNEL_SUCCESSOR_PAYLOAD_SET_CHANGED')
+  plan['installed_predecessor']=bound
+  plan['installation_origin']=strict_json(canonical(origin))
+  plan['native_identity']=dict(installed['plan']['native_identity'])
+  prestate=[]
+  for name in module.GENERATED:
+   digest,uid,gid,mode,size,device,inode,nlink=installed['generated_prestate'][name]
+   prestate.append({'target':name,'state':'PRESENT_REPLACE' if name==module.POLICY_EVIDENCE else 'PRESENT_PRESERVED',
+       'sha256':digest,'uid':uid,'gid':gid,'mode':format(mode,'04o'),'bytes':size,
+       'device':device,'inode':inode,'nlink':nlink})
+  for row in rows:
+   fact=installed['public_payload'][row['target']]['prestate']
+   changed=any(fact[k]!=row[k] for k in ('bytes','sha256','mode'))
+   prestate.append({**fact,'state':'PRESENT_REPLACE' if changed else 'PRESENT_PRESERVED'})
+  plan['target_prestate']=module.capture_install_prestate(root,rows,prestate,preserve_generated=True)
+ elif 'recovered_predecessor' in request:
   recovered=capture_recovered_kernel_prestate(root,module,request['recovered_predecessor'],verify_path=verify_path,
       witness_path=STATE/'kernel-install-witness.json')
   deny(recovered['reserved_domain_id'] not in reserved,'KERNEL_RECOVERED_IDENTITY_NOT_RESERVED')
@@ -619,6 +764,14 @@ def _verify_install_material(root,plan,receipt,*,source):
       'conversation_policy':policy_rows[0],
       'payload':sorted(plan['payload'],key=lambda r:ORDER.index(r['branch'])),
       'state':'MATERIAL_BINDING_ONLY','authority_effect':'NONE','admission_effect':'NONE'}
+  if 'installation_origin' in plan:
+   origin=plan['installation_origin']
+   expected['installation_origin']={'plan_sha256':sha(canonical(origin)),
+       'source_generation':{k:origin['source_'+k] for k in ('parent','commit','tree')},
+       'native_identity':{k:origin['native_identity'][k] for k in
+           ('instance_id','checkpoint','registry_sha256','transaction_context')},
+       'host_identity_file':dict(origin['host_identity']['file']),
+       'boot_id':origin['current_boot_id']}
   deny(not isinstance(document,dict) or set(document)!={'body','signature'}
        or canonical(document)!=raw or document['body']!=expected,'KERNEL_POLICY_EVIDENCE_BINDING_DENIED')
   anchor=regular(Path(root)/'usr/share/serein/outpost/cognition-verification.pem',expected_custody=(0,0,0o644))
@@ -631,9 +784,15 @@ def _verify_install_material(root,plan,receipt,*,source):
       or value.get("prestate")!=prestate,"KERNEL_INSTALL_PRESTATE_DENIED")
  preserved={row['target']:row for row in prestate if row['state']=='PRESENT_PRESERVED'}
  replaced={row['target']:row for row in prestate if row['state']=='PRESENT_REPLACE'}
- deny(bool(replaced) and 'recovered_predecessor' not in plan,'KERNEL_INSTALL_PRESTATE_DENIED')
- deny(bool(set(preserved)&generated),"KERNEL_INSTALL_PRESTATE_DENIED")
- deny(bool(set(replaced)&generated),'KERNEL_INSTALL_PRESTATE_DENIED')
+ successor='installed_predecessor' in plan
+ deny(bool(replaced) and not successor and 'recovered_predecessor' not in plan,'KERNEL_INSTALL_PRESTATE_DENIED')
+ if successor:
+  deny(set(preserved)&generated!=generated-{'/var/lib/serein/kernel/authority/installed-policy-evidence.json'}
+       or set(replaced)&generated!={'/var/lib/serein/kernel/authority/installed-policy-evidence.json'},
+       'KERNEL_SUCCESSOR_PRESERVATION_DENIED')
+ else:
+  deny(bool(set(preserved)&generated),"KERNEL_INSTALL_PRESTATE_DENIED")
+  deny(bool(set(replaced)&generated),'KERNEL_INSTALL_PRESTATE_DENIED')
  for name,prior in replaced.items():
   backup=receipt_path.parent/('preimage-'+sha(name.encode()))
   raw=regular(backup,expected_custody=(0,0,0o600))
@@ -642,8 +801,8 @@ def _verify_install_material(root,plan,receipt,*,source):
   fact=regular(held,fact=True,expected_custody=(prior['uid'],prior['gid'],int(prior['mode'],8)),include_identity=True)
   deny(fact!=(prior['sha256'],prior['uid'],prior['gid'],int(prior['mode'],8),prior['bytes'],
               prior['device'],prior['inode'],1),'KERNEL_COMPENSATION_INODE_DENIED')
- if 'recovered_predecessor' in plan:
-  previous=plan['recovered_predecessor']
+ previous=plan.get('installed_predecessor',plan.get('recovered_predecessor'))
+ if previous is not None:
   raw=regular(receipt_path.parent/'predecessor-witness.json',expected_custody=(0,0,0o600))
   deny(sha(raw)!=previous['witness_sha256'],'KERNEL_COMPENSATION_WITNESS_DENIED')
   prior_selector=previous['rollback_selector']
@@ -2131,8 +2290,9 @@ def _kernel_material_boundary(plan,host_prestate,request_raw,*,root,source,
   # checks and conceal a request/Host/source/identity change during the read.
   check_parent()
   deny(current_boot()!=boot or regular(request_path)!=request_raw,'KERNEL_REQUEST_CHANGED')
-  if 'recovered_predecessor' in plan:
-   previous=plan['recovered_predecessor'];selector=previous['rollback_selector']
+  previous=plan.get('installed_predecessor',plan.get('recovered_predecessor'))
+  if previous is not None:
+   selector=previous['rollback_selector']
    deny(not re.fullmatch(r'/var/lib/serein/rollback/kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',selector),
         'KERNEL_RECOVERED_SELECTOR_DENIED')
    for filename,field in (('plan.json','plan_sha256'),('receipt.json','receipt_sha256'),('phase-journal.json','journal_sha256')):
@@ -2348,6 +2508,130 @@ def _complete_kernel_lifecycle(plan,receipt,request,preparation,expectation,*,bo
   return result
 
 
+def _restore_kernel_source_inputs(*,root,source,receipt_path,prior_source,prior_receipt_path,
+                                 plan,module,guard,retained_guard):
+ """Retain rejected public input bytes and restore the exact signed inbox.
+
+ Called only inside the whole owner after file compensation and quiescence.
+ No private identity, provider ref, model, service or admission effect here.
+ """
+ root=Path(root);source=Path(source);receipt_path=Path(receipt_path)
+ prior_source=Path(prior_source);prior_receipt_path=Path(prior_receipt_path)
+ selector=root/plan['rollback_selector'].lstrip('/')
+ deny(source!=STATE/'source/sfos/kernel' or receipt_path!=STATE/'source-receipt.json',
+      'KERNEL_SUCCESSOR_CANONICAL_INPUT_PATH_DENIED')
+ guard()
+ predecessor=read_json(root/plan['installed_predecessor']['rollback_selector'].lstrip('/')/'plan.json')
+ old_receipt=regular(prior_receipt_path,expected_custody=(0,0,0o600))
+ deny(sha(old_receipt)!=predecessor['source_receipt_sha256'],'KERNEL_SUCCESSOR_SOURCE_RECEIPT_DENIED')
+ current_receipt=regular(receipt_path,expected_custody=(0,0,0o600))
+ deny(sha(current_receipt)!=plan['source_receipt_sha256'],'KERNEL_SUCCESSOR_SOURCE_RECEIPT_CHANGED')
+ inventory=safe_tree(prior_source)
+ deny('sha256:'+sha(canonical(inventory))!=predecessor['source_inventory_digest'],
+      'KERNEL_SUCCESSOR_SOURCE_CHANGED')
+ staged=selector/'predecessor-source';parked=selector/'candidate-source'
+ deny(any(os.path.lexists(path) for path in (staged,parked,selector/'candidate-source-receipt.json')),
+      'KERNEL_SUCCESSOR_INPUT_COMPENSATION_COLLISION')
+ staged.mkdir(mode=0o700)
+ for row in inventory:
+  original=prior_source/row['path'];raw=regular(original)
+  deny(len(raw)!=row['bytes'] or sha(raw)!=row['sha256'],'KERNEL_SUCCESSOR_SOURCE_CHANGED')
+  mode=stat.S_IMODE(original.lstat().st_mode)
+  deny(mode not in {0o644,0o755},'KERNEL_SUCCESSOR_SOURCE_CUSTODY_DENIED')
+  module.atomic(staged/row['path'],raw,format(mode,'04o'),lambda:None,create_only=True)
+ deny(safe_tree(staged)!=inventory,'KERNEL_SUCCESSOR_SOURCE_COPY_DENIED')
+ module.atomic(selector/'candidate-source-receipt.json',current_receipt,'0600',guard,create_only=True)
+ guard()
+ parent_fd=os.open(source.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ selector_fd=os.open(selector,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+ try:
+  for fd,path in ((parent_fd,source.parent),(selector_fd,selector)):
+   info=os.fstat(fd);named=path.lstat()
+   deny((info.st_dev,info.st_ino)!=(named.st_dev,named.st_ino)
+        or (info.st_uid,info.st_gid)!=(0,0) or stat.S_IMODE(info.st_mode)&0o022,
+        'KERNEL_SUCCESSOR_INPUT_DIRECTORY_DENIED')
+  deny(os.path.lexists(parked) or not source.is_dir() or source.is_symlink(),
+       'KERNEL_SUCCESSOR_INPUT_COMPENSATION_COLLISION')
+  os.rename(source.name,parked.name,src_dir_fd=parent_fd,dst_dir_fd=selector_fd)
+  os.fsync(parent_fd);os.fsync(selector_fd)
+  retained_guard()
+  deny('sha256:'+sha(canonical(safe_tree(parked)))!=plan['source_inventory_digest']
+       or os.path.lexists(source),'KERNEL_SUCCESSOR_CANDIDATE_INPUT_CHANGED')
+  os.rename(staged.name,source.name,src_dir_fd=selector_fd,dst_dir_fd=parent_fd)
+  os.fsync(parent_fd);os.fsync(selector_fd)
+ finally:
+  os.close(selector_fd);os.close(parent_fd)
+ deny(safe_tree(source)!=inventory,'KERNEL_SUCCESSOR_SOURCE_RESTORATION_UNPROVEN')
+ def receipt_guard():
+  retained_guard()
+  deny(regular(receipt_path,expected_custody=(0,0,0o600))!=current_receipt
+       or safe_tree(source)!=inventory
+       or 'sha256:'+sha(canonical(safe_tree(parked)))!=plan['source_inventory_digest'],
+       'KERNEL_SUCCESSOR_INPUT_COMPENSATION_CHANGED')
+ module.atomic(receipt_path,old_receipt,'0600',receipt_guard)
+ deny(regular(receipt_path,expected_custody=(0,0,0o600))!=old_receipt,
+      'KERNEL_SUCCESSOR_SOURCE_RECEIPT_RESTORATION_UNPROVEN')
+ return parked
+
+
+@contextmanager
+def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restored,publication):
+ """Whole-successor owner: stop only the exact installed Kernel units.
+
+ No host, Outpost, runtime/model or enablement effect. On failure the old
+ generation may restart only after its exact signed files are restored.
+ """
+ import subprocess
+ groups=(AUTHORITY_UNITS,OPERATIONS_UNITS,INTERFACE_UNITS)
+ names=set(AUTHORITY_UNITS+OTHER_KERNEL_UNITS)
+ deny(set(prestate)!=names,'KERNEL_SUCCESSOR_UNIT_SET_DENIED')
+ for name,row in prestate.items():
+  deny(row['LoadState']!='loaded' or row['NeedDaemonReload']!='no'
+       or not (_unit_active(name,row) or (row['ActiveState'],row['SubState'])==('inactive','dead')),
+       'KERNEL_SUCCESSOR_UNIT_PRESTATE_DENIED')
+ original=strict_json(canonical(prestate));attempted=False
+ def read():return {**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()}
+ def definitions(current):
+  deny(set(current)!=names or any(any(current[name][key]!=original[name][key] for key in
+       ('Id','LoadState','FragmentPath','DropInPaths','UnitFileState','NeedDaemonReload')) for name in names),
+       'KERNEL_SUCCESSOR_UNIT_DEFINITION_CHANGED')
+ def command(action,units):
+  if not units:return
+  guard()
+  try:subprocess.run(['/usr/bin/systemctl','--no-ask-password',
+      '--job-mode=replace' if action=='stop' else '--job-mode=fail',action,*units],
+      check=True,timeout=90,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+      close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
+  except (OSError,subprocess.SubprocessError) as exc:raise RunnerDenied('KERNEL_SUCCESSOR_QUIESCE_COMMAND_FAILED') from exc
+  guard()
+ guard();verify_predecessor()
+ deny(read()!=original,'KERNEL_SUCCESSOR_UNIT_PRESTATE_CHANGED')
+ try:
+  for units in reversed(groups):
+   definitions(read());attempted=True;command('stop',units)
+   observed=read();definitions(observed)
+   deny(any((observed[name]['ActiveState'],observed[name]['SubState'])!=('inactive','dead') for name in units),
+        'KERNEL_SUCCESSOR_QUIESCENCE_UNPROVEN')
+  guard();verify_predecessor()
+  yield
+ except BaseException as exc:
+  if attempted and not publication['completed']:
+   try:
+    guard();verify_predecessor()
+    restored_guard=verify_restored()
+    if restored_guard is not None:guard=restored_guard
+    guard();definitions(read())
+    for units in groups:
+     command('start',tuple(name for name in units if _unit_active(name,original[name])))
+    current=read();definitions(current)
+    deny(any(not _unit_active(name,current[name]) for name in names if _unit_active(name,original[name])),
+         'KERNEL_SUCCESSOR_PREDECESSOR_RESTART_UNPROVEN')
+    guard();verify_predecessor()
+   except BaseException as recovery_error:
+    raise RunnerDenied('KERNEL_SUCCESSOR_COMPENSATION_UNPROVEN') from recovery_error
+  raise
+
+
 def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,signing_path=SIGNING_KEY,verify_path=VERIFY_KEY,source_receipt_path=SOURCE_RECEIPT,installer=None,rollback_installer=None,*,construct=False,compute_expectation=None,read_compute_expectation=None,read_public_response=None,read_public_request=None):
  # Serialize with Outpost promotion using its already-proven root-private lock.
  # Do not introduce a service-owned privileged lock or a new root service.
@@ -2372,13 +2656,14 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
        (not callable(read_public_request) or read_public_response is None),
        'KERNEL_PUBLIC_REQUEST_HANDOFF_DENIED')
  publication={'completed':False}
- with witness_directory(STATE,publication) as (witness_fd,check_parent),public_generation_lock(root,sha(request_raw),boot):
+ with witness_directory(STATE,publication) as (witness_fd,check_parent),public_generation_lock(root,sha(request_raw),boot),ExitStack() as successor_scope:
   prior_witness=None
-  if 'recovered_predecessor' in request:
+  prior_binding=request.get('installed_predecessor',request.get('recovered_predecessor'))
+  if prior_binding is not None:
    path=STATE/'kernel-install-witness.json'
    raw=regular(path,expected_custody=(0,0,0o600))
    fact=regular(path,fact=True,expected_custody=(0,0,0o600),include_identity=True)
-   deny(sha(raw)!=request['recovered_predecessor'].get('witness_sha256') or fact[0]!=sha(raw),
+   deny(sha(raw)!=prior_binding.get('witness_sha256') or fact[0]!=sha(raw),
         'KERNEL_WITNESS_PREDECESSOR_CHANGED')
    prior_witness=(raw,fact)
   else:deny(os.path.lexists(STATE/"kernel-install-witness.json"),"KERNEL_WITNESS_COLLISION_DENIED")
@@ -2391,7 +2676,9 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
     deny((row['ActiveState'],row['SubState'])!=('inactive','dead'),
          'KERNEL_AUTHORITY_NOT_INACTIVE' if name in AUTHORITY_UNITS else 'KERNEL_DOMAIN_NOT_INACTIVE')
    return units
-  unit_prestate=inactive_kernel_units()
+  successor='installed_predecessor' in request
+  deny(successor and not complete,'KERNEL_SUCCESSOR_COMPLETE_CONSTRUCTION_REQUIRED')
+  unit_prestate=({**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()} if successor else inactive_kernel_units())
   enablement_prestate=read_kernel_enablement_prestate(root) if complete else None
   if complete:
    deny(any(row['NeedDaemonReload']!='no' for row in unit_prestate.values()),
@@ -2422,7 +2709,11 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
   deny(sha(regular(verify_path))!=CANONICAL_AUTHORITY_SHA256,"KERNEL_CANONICAL_ANCHOR_DENIED")
   private=load_pem_private_key(regular(signing_path),password=None)
   module=load_installer(source,read_json(source/'release-manifest.json'),expected_release=plan['release_digest'])
-  native_material=module.prepare_native_identity(source,plan,private,reserved_ids=set(plan['reserved_domain_ids']))
+  if 'installed_predecessor' in plan:
+   native_material={'binding':dict(plan['native_identity']),
+       'registry':regular(Path(root)/module.NATIVE_REGISTRY.lstrip('/'),expected_custody=(0,0,0o644)),
+       'private':regular(Path(root)/module.NATIVE_KEY.lstrip('/'),expected_custody=(0,0,0o600))}
+  else:native_material=module.prepare_native_identity(source,plan,private,reserved_ids=set(plan['reserved_domain_ids']))
   plan['native_identity']=native_material['binding']
   plan["signature"]=base64.urlsafe_b64encode(private.sign(canonical(plan))).decode().rstrip("=")
   signed_runtime_plan=None
@@ -2433,6 +2724,46 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
    signed_runtime_plan['signature']=base64.urlsafe_b64encode(
        private.sign(runtime_module.signing_payload(signed_runtime_plan))).decode().rstrip('=')
   policy_evidence=module.prepare_installed_policy_evidence(root,source,plan,private,native_material=native_material)
+  if successor:
+   previous=request['installed_predecessor']
+   def verify_predecessor():
+    return capture_installed_kernel_prestate(root,Path(root)/previous['source_root'].lstrip('/'),
+        {k:v for k,v in previous.items() if k not in {'source_root','source_receipt'}},verify_path=verify_path,
+        witness_path=STATE/'kernel-install-witness.json')
+   def verify_restored():
+    # Restored runtime bytes alone cannot restart a generation against a new
+    # canonical source inbox. Require its original signed provider binding.
+    old=verify_predecessor()['plan']
+    parked=Path(root)/plan['rollback_selector'].lstrip('/')/'candidate-source'
+    immutable_before={name:regular(Path(root)/name.lstrip('/'),fact=True) for name in IMMUTABLE_POLICY}
+    retained_material=None
+    def retained_guard():
+     nonlocal retained_material
+     deny(any(regular(Path(root)/name.lstrip('/'),fact=True)!=value for name,value in immutable_before.items()),
+          'KERNEL_IMMUTABLE_CHANGED')
+     if retained_material is None:
+      retained_material=_kernel_material_boundary(plan,host_prestate,request_raw,
+          root=root,source=parked,request_path=request_path,host_path=host_path,check_parent=check_parent,
+          preserved_runtime=prepared['preserved_runtime'])
+     retained_material()
+     deny(read_kernel_enablement_prestate(root)!=enablement_prestate,'KERNEL_ENABLEMENT_CHANGED')
+    _restore_kernel_source_inputs(root=root,source=source,receipt_path=source_receipt_path,
+        prior_source=Path(root)/previous['source_root'].lstrip('/'),
+        prior_receipt_path=Path(root)/previous['source_receipt'].lstrip('/'),
+        plan=plan,module=module,guard=material_boundary,retained_guard=retained_guard)
+    def restored_guard():
+     retained_guard()
+     restored,digest=source_receipt(source,source_receipt_path,verify_path)
+     deny(digest!=old['source_receipt_sha256'] or any(restored[k]!=old[k] for k in
+         ('source_parent','source_commit','source_tree','archive_sha256','release_digest'))
+         or restored['inventory_digest']!=old['source_inventory_digest'],
+         'KERNEL_SUCCESSOR_RUNTIME_SOURCE_NOT_RESTORED')
+    restored_guard()
+    return restored_guard
+   successor_scope.enter_context(_quiesce_installed_kernel(unit_prestate,guard=material_boundary,
+       verify_predecessor=verify_predecessor,verify_restored=verify_restored,publication=publication))
+   successor_unit_prestate=unit_prestate
+   unit_prestate=inactive_kernel_units()
   def boundary():
    nonlocal unit_poststate
    material_boundary()
@@ -2500,6 +2831,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
      witness['kernel_enablement_prestate']=enablement_prestate
      witness['runtime_access_prestate']=plan['runtime_access_prestate']
      witness['runtime_access_poststate']=runtime_access_poststate
+     if successor:witness['installed_predecessor_unit_prestate']=successor_unit_prestate
      def publication_boundary():
       material_boundary()
       verify_lifecycle()
