@@ -433,6 +433,44 @@ def verify_native_identity_material(source,plan,material,installer_public,*,rese
  except Exception as exc:raise Denied("KERNEL_NATIVE_IDENTITY_VERIFICATION_DENIED") from exc
  return binding
 
+def verify_gateway_credential(root):
+ """Preflight the existing LoadCredential source, never provision or disclose it.
+
+ Same fixed name/32..4096-byte/no-CRLF contract as load_companion_token.
+ This checks root custody before systemd projects the secret to the service;
+ it does not prove that HAOS holds the matching value or grant admission.
+ """
+ path=Path(root)/'etc/serein/haos-companion-token';handles=[]
+ identity=lambda s:(s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gid,s.st_nlink)
+ fingerprint=lambda s:(*identity(s),s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+ try:
+  parent=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+  handles.append((parent,None,'/',identity(os.fstat(parent))))
+  for part in path.parts[1:-1]:
+   child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+   handles.append((child,parent,part,identity(os.fstat(child))));parent=child
+  fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+  with os.fdopen(fd,'rb') as stream:
+   before=os.fstat(stream.fileno())
+   deny(not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_uid!=0
+        or stat.S_IMODE(before.st_mode)&0o077 or not 32<=before.st_size<=4096,
+        'KERNEL_GATEWAY_CREDENTIAL_CUSTODY_DENIED')
+   data=stream.read(4097);stream.seek(0);second=stream.read(4097)
+   deny(len(data)!=before.st_size or not 32<=len(data)<=4096 or b'\r' in data or b'\n' in data,
+        'KERNEL_GATEWAY_CREDENTIAL_FORMAT_DENIED')
+   deny(data!=second or fingerprint(before)!=fingerprint(os.fstat(stream.fileno()))
+        or fingerprint(before)!=fingerprint(os.stat(path.name,dir_fd=parent,follow_symlinks=False)),
+        'KERNEL_GATEWAY_CREDENTIAL_CHANGED')
+  for child,parent_fd,name,before in handles:
+   deny(identity(os.fstat(child))!=before
+        or identity(os.stat(name,dir_fd=parent_fd,follow_symlinks=False))!=before,
+        'KERNEL_GATEWAY_CREDENTIAL_ANCESTOR_CHANGED')
+ except FileNotFoundError:raise Denied('KERNEL_GATEWAY_CREDENTIAL_MISSING') from None
+ except OSError:raise Denied('KERNEL_GATEWAY_CREDENTIAL_CUSTODY_DENIED') from None
+ finally:
+  for fd,_,_,_ in reversed(handles):os.close(fd)
+
+
 def validate(source,root,plan,identity_lookup=None):
  identity_lookup=identity_lookup or system_identity
  required={"schema","target_vm_id","source_parent","source_commit","source_tree","release_digest","current_boot_id","outpost_identity","replay_identity","payload","target_prestate","rollback_selector","authority_sha256","archive_sha256","source_receipt_sha256","source_inventory_digest","reserved_domain_ids","native_identity","signature"}
@@ -490,6 +528,7 @@ def validate(source,root,plan,identity_lookup=None):
  deny(sorted((r["source"],r["bytes"],r["sha256"],r["mode"]) for r in rows)!=sorted(tuple(x) for x in declared),"KERNEL_RELEASE_DENOMINATOR_DENIED")
  deny(target(root,"/proc/sys/kernel/random/boot_id").read_text().strip()!=plan["current_boot_id"],"KERNEL_BOOT_DENIED")
  rollback=target(root,plan["rollback_selector"]);deny(rollback.parent!=target(root,"/var/lib/serein/rollback") or not re.fullmatch(r"kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}",rollback.name),"KERNEL_ROLLBACK_DENIED")
+ verify_gateway_credential(root)
  return [r for branch in ORDER for r in rows if r["branch"]==branch],rollback
 
 def prepare_installed_policy_evidence(root,source,plan,installer_key,*,native_material,identity_lookup=None):

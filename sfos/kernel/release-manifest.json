@@ -282,8 +282,8 @@
   "installer_files": [
     [
       "install/kernel_first_install.py",
-      58653,
-      "9fe391a85ffb0cc2f876b8732b4359e7ff686e18b2ea6d4bede582836d532218",
+      60833,
+      "a0dc5d16e4f282e9b08c9b4a6436042b2885fbf74387c74ffc3a79ac699938fc",
       "0755"
     ],
     [
@@ -315,5 +315,5 @@
   ],
   "activation": "OUTPOST_ONLY_AFTER_INACTIVE_PROOF",
   "admission_effect": "NONE",
-  "self_digest": "sha256:4d2850fb0bab61c416e45b7ab6872eb705058a16555139f73b2b5c4487576143"
+  "self_digest": "sha256:af5a7c44166fd871b415a9459c13b2e298cc5d81ad6b11618487bc777115f9cf"
 }
