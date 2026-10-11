@@ -2594,13 +2594,22 @@ def _restore_kernel_source_inputs(*,root,source,receipt_path,prior_source,prior_
 
 
 @contextmanager
-def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restored,publication,retain_prestate=None):
+def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restored,publication,
+                             predecessor_boot_id,current_boot_id,retain_prestate=None):
  """Whole-successor owner: stop only the exact installed Kernel units.
 
  No host, Outpost, runtime/model or enablement effect. On failure the old
  generation may restart only after its exact signed files are restored.
  """
  import subprocess
+ # These bindings come from the authenticated predecessor and current plan,
+ # not an optional request flag. Historical services cannot regain authority
+ # merely because a successor fails on another boot.
+ boot_pattern=r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+ deny(any(not isinstance(value,str) or not re.fullmatch(boot_pattern,value)
+          for value in (predecessor_boot_id,current_boot_id)),
+      'KERNEL_SUCCESSOR_BOOT_BINDING_DENIED')
+ restart_predecessor=predecessor_boot_id==current_boot_id
  groups=(AUTHORITY_UNITS,OPERATIONS_UNITS,INTERFACE_UNITS)
  names=set(AUTHORITY_UNITS+OTHER_KERNEL_UNITS)
  deny(set(prestate)!=names,'KERNEL_SUCCESSOR_UNIT_SET_DENIED')
@@ -2645,7 +2654,7 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
  guard();verify_predecessor()
  deny(read()!=original,'KERNEL_SUCCESSOR_UNIT_PRESTATE_CHANGED')
  failed=tuple(name for name in OPERATIONS_SERVICES if original[name]['ActiveState']=='failed')
- if failed:
+ if failed or not restart_predecessor:
   deny(not callable(retain_prestate),'KERNEL_SUCCESSOR_FAILURE_EVIDENCE_REQUIRED')
   retain_prestate(original)
   guard();verify_predecessor()
@@ -2675,10 +2684,11 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
     restored_guard=verify_restored()
     if restored_guard is not None:guard=restored_guard
     guard();definitions(read())
-    for units in groups:
-     command('start',tuple(name for name in units if _unit_active(name,original[name])))
+    if restart_predecessor:
+     for units in groups:
+      command('start',tuple(name for name in units if _unit_active(name,original[name])))
     current=read();definitions(current)
-    deny(any((_unit_active(name,current[name]) if _unit_active(name,original[name]) else
+    deny(any((_unit_active(name,current[name]) if restart_predecessor and _unit_active(name,original[name]) else
               (current[name]['ActiveState'],current[name]['SubState'])==('inactive','dead')) is not True
              for name in names),
          'KERNEL_SUCCESSOR_PREDECESSOR_RESTART_UNPROVEN')
@@ -2737,9 +2747,6 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
   successor='installed_predecessor' in request
   deny(successor and not complete,'KERNEL_SUCCESSOR_COMPLETE_CONSTRUCTION_REQUIRED')
   unit_prestate=({**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()} if successor else inactive_kernel_units())
-  if successor and request['installed_predecessor']['current_boot_id']!=boot:
-   deny(any((row['ActiveState'],row['SubState'])!=('inactive','dead') for row in unit_prestate.values()),
-        'KERNEL_CROSS_BOOT_PREDECESSOR_NOT_INACTIVE')
   enablement_prestate=read_kernel_enablement_prestate(root) if complete else None
   if complete:
    deny(any(row['NeedDaemonReload']!='no' for row in unit_prestate.values()),
@@ -2827,6 +2834,9 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
     deny(any(controls[name]['MainPID']!='0' or any(controls[name][key]!=rows[name][key]
              for key in rows[name]) for name in failed),'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
     evidence={'schema':'SereinKernelSuccessorQuiescence/v1','boot_id':boot,
+        'predecessor_boot_id':plan['installed_predecessor']['current_boot_id'],
+        'predecessor_restart':('SAME_BOOT_ONLY' if plan['installed_predecessor']['current_boot_id']==plan['current_boot_id']
+                               else 'DENIED_HISTORICAL_BOOT'),
         'request_sha256':sha(request_raw),'plan_sha256':sha(canonical(plan)),
         'rollback_selector':plan['rollback_selector'],'unit_prestate':rows,
         'operations_service_controls':controls,'failed_predecessors':failed,
@@ -2839,6 +2849,8 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
         evidence,witness_fd,evidence_boundary)
    successor_scope.enter_context(_quiesce_installed_kernel(unit_prestate,guard=material_boundary,
        verify_predecessor=verify_predecessor,verify_restored=verify_restored,publication=publication,
+       predecessor_boot_id=plan['installed_predecessor']['current_boot_id'],
+       current_boot_id=plan['current_boot_id'],
        retain_prestate=retain_prestate))
    successor_unit_prestate=unit_prestate
    unit_prestate=inactive_kernel_units()
