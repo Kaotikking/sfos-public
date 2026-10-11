@@ -19,7 +19,7 @@ from datetime import timedelta
 from uuid import NAMESPACE_URL, uuid5
 
 CONTRACT_PATH = Path('/usr/lib/serein/kernel/replay_store.py')
-CONTRACT_SHA256 = 'ddb9a320bb5955f648c18b6c2a5c445ab4f10d5f79f544ce4f3eccbcee40c48f'
+CONTRACT_SHA256 = 'a3321dd7ed9f4a04ed333663d46f2d77f2dde46964ea63d11d631f3358bb90cb'
 
 
 def canonical_request_id(value):
@@ -278,7 +278,8 @@ class PersistentReplayStore:
                 raise ValueError('installed conversation context denied')
             return self.contract.verify_conversation_binding(binding,chain_id,
                 descriptor=self.descriptor,
-                expected_generation=self._conversation_context['source_generation'])
+                expected_generation=self._conversation_context['source_generation'],
+                expected_boot_id=self._conversation_context['boot_id'])
         return self.contract.verify_dispatch_binding(binding, chain_id, descriptor=self.descriptor)
 
     def _bindings(self, chains):
@@ -348,6 +349,10 @@ class PersistentReplayStore:
                              current_time=current_time, require_consumed=False)
             bound = self.connection.execute('SELECT binding FROM dispatches WHERE chain_id=?', (chain_id,)).fetchone()
             if bound:
+                # _history authenticated this stored envelope, but history is
+                # not permission to consume under another installed context.
+                # Reuse the reservation gate before any row is changed.
+                self._binding(json.loads(bound[0])['body']['binding'],chain_id)
                 if (operation != 'CONSUME' or not isinstance(result_sha256,str)
                         or not self.contract.HEX64.fullmatch(result_sha256)):
                     raise ValueError('dispatch result binding required')

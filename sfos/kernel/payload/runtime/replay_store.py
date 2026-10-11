@@ -292,7 +292,7 @@ CONVERSATION_BINDING_FIELDS = frozenset({'schema','request_id','conversation_id'
     'authority_effect','admission_effect'})
 
 
-def verify_conversation_binding(binding, chain_id, *, descriptor, expected_generation=None):
+def verify_conversation_binding(binding, chain_id, *, descriptor, expected_generation=None, expected_boot_id=None):
     """Closed attempt record for installed policy, never an execution grant.
 
     No generic route contract, UMP, lease or capacity evidence is fabricated.
@@ -332,7 +332,9 @@ def verify_conversation_binding(binding, chain_id, *, descriptor, expected_gener
     expected = descriptor['body']
     generation_scope = (expected_generation if expected_generation is not None else
                         {k: expected['source_generation'][k] for k in ('commit','tree')})
-    if (binding['boot_id'] != expected['target']['boot_id']
+    boot_scope = expected['target']['boot_id'] if expected_boot_id is None else expected_boot_id
+    if (not isinstance(boot_scope,str) or not UUID.fullmatch(boot_scope)
+            or binding['boot_id'] != boot_scope
             or generation != generation_scope):
         raise ValueError('conversation replay generation denied')
     utc(binding['observed_at'])
@@ -388,7 +390,8 @@ def verify_dispatch_bindings(rows, chains, *, descriptor, key, allow_conversatio
             # Historical source is authenticated by the existing MAC and
             # receipt anchor below, not asserted as current installation.
             bindings[chain_id] = verify_conversation_binding(body['binding'], chain_id,
-                descriptor=descriptor, expected_generation=body['binding'].get('source_generation'))
+                descriptor=descriptor, expected_generation=body['binding'].get('source_generation'),
+                expected_boot_id=body['binding'].get('boot_id'))
         else:
             bindings[chain_id] = verify_dispatch_binding(body['binding'], chain_id, descriptor=descriptor)
         values = chains.get(chain_id, [])

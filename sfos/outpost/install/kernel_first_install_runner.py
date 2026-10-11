@@ -366,7 +366,8 @@ def capture_outpost_generation(root):
  return selector
 
 
-def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_KEY,witness_path=None):
+def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_KEY,witness_path=None,
+                                     observation_boot_id=None):
  """Authenticate a successful predecessor for a whole-domain successor.
 
  Read-only: retain birth/replay provenance and exact public preimages. This
@@ -381,6 +382,14 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
              for k in fields-{'rollback_selector','current_boot_id'}),
       'KERNEL_SUCCESSOR_EXPECTATION_DENIED')
  expected=strict_json(canonical(expected));selector=expected['rollback_selector']
+ # A historical signed installation remains evidence after a boot change.
+ # Explicit read-only observation never changes its signed boot or permits
+ # installation/runtime execution. Existing executable callers retain their
+ # same-boot default until the complete successor contract is proven.
+ observed_boot=expected['current_boot_id'] if observation_boot_id is None else observation_boot_id
+ deny(not isinstance(observed_boot,str) or not re.fullmatch(
+      r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',observed_boot),
+      'KERNEL_SUCCESSOR_OBSERVATION_BOOT_DENIED')
  deny(not isinstance(selector,str) or not re.fullmatch(
       r'/var/lib/serein/rollback/kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',selector),
       'KERNEL_SUCCESSOR_SELECTOR_DENIED')
@@ -428,7 +437,7 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
  def currentness():
   machine_mode=stat.S_IMODE((root/'etc/machine-id').lstat().st_mode)
   deny(machine_mode not in {0o444,0o644},'KERNEL_SUCCESSOR_HOST_CUSTODY_DENIED')
-  deny((root/'proc/sys/kernel/random/boot_id').read_text().strip()!=expected['current_boot_id']
+  deny((root/'proc/sys/kernel/random/boot_id').read_text().strip()!=observed_boot
        or sha(regular(root/'etc/machine-id',expected_custody=(0,0,machine_mode)))!=expected['machine_id_sha256'],
        'KERNEL_SUCCESSOR_HOST_CHANGED')
   deny(any(regular(path,expected_custody=(0,0,0o600))!=raw for path,raw in captured.items())
@@ -467,6 +476,7 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
       'KERNEL_SUCCESSOR_JOURNAL_CHANGED')
  return {'state':'INSTALLED_PREDECESSOR_CAPTURE_ONLY','plan':plan,'receipt_digest':digest,
          'witness':witness,'expected':expected,'public_payload':public,
+         'observation_boot_id':observed_boot,
          'generated_prestate':generated,'mutable_private_state':'NOT_QUIESCED',
          'authority_effect':'NONE','admission_effect':'NONE'}
 
@@ -675,7 +685,7 @@ def build_plan(source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,verify_pa
   prior_source=Path(root)/previous['source_root'].lstrip('/')
   bound={k:v for k,v in previous.items() if k not in {'source_root','source_receipt'}}
   installed=capture_installed_kernel_prestate(root,prior_source,bound,verify_path=verify_path,
-      witness_path=STATE/'kernel-install-witness.json')
+      witness_path=STATE/'kernel-install-witness.json',observation_boot_id=plan['current_boot_id'])
   prior_receipt,prior_receipt_digest=source_receipt(prior_source,
       Path(root)/previous['source_receipt'].lstrip('/'),verify_path)
   deny(prior_receipt_digest!=installed['plan']['source_receipt_sha256'],
@@ -2727,6 +2737,9 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
   successor='installed_predecessor' in request
   deny(successor and not complete,'KERNEL_SUCCESSOR_COMPLETE_CONSTRUCTION_REQUIRED')
   unit_prestate=({**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()} if successor else inactive_kernel_units())
+  if successor and request['installed_predecessor']['current_boot_id']!=boot:
+   deny(any((row['ActiveState'],row['SubState'])!=('inactive','dead') for row in unit_prestate.values()),
+        'KERNEL_CROSS_BOOT_PREDECESSOR_NOT_INACTIVE')
   enablement_prestate=read_kernel_enablement_prestate(root) if complete else None
   if complete:
    deny(any(row['NeedDaemonReload']!='no' for row in unit_prestate.values()),
@@ -2777,7 +2790,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
    def verify_predecessor():
     return capture_installed_kernel_prestate(root,Path(root)/previous['source_root'].lstrip('/'),
         {k:v for k,v in previous.items() if k not in {'source_root','source_receipt'}},verify_path=verify_path,
-        witness_path=STATE/'kernel-install-witness.json')
+        witness_path=STATE/'kernel-install-witness.json',observation_boot_id=plan['current_boot_id'])
    def verify_restored():
     # Restored runtime bytes alone cannot restart a generation against a new
     # canonical source inbox. Require its original signed provider binding.

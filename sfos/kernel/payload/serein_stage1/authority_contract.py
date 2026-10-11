@@ -190,7 +190,7 @@ def read_consumer_installed_policy_evidence(*, root):
                     or not HEX64.fullmatch(origin['plan_sha256'])
                     or origin['native_identity']!=native
                     or origin['host_identity_file']!=host_file
-                    or origin['boot_id']!=body['boot_id']
+                    or not isinstance(origin['boot_id'],str) or not BOOT.fullmatch(origin['boot_id'])
                     or not isinstance(origin['source_generation'],dict)
                     or set(origin['source_generation'])!={'parent','commit','tree'}
                     or any(not isinstance(v,str) or not HEX40.fullmatch(v)
@@ -253,7 +253,7 @@ def read_consumer_installed_policy_evidence(*, root):
                 'boot_id':body['boot_id'],'canonical_manifest_digest':body['manifest_sha256'],
                 'plan_sha256':body['plan_sha256'],
                 **({'replay_origin':{'plan_sha256':origin['plan_sha256'],
-                     'source_generation':origin['source_generation']}} if origin else {}),
+                     'source_generation':origin['source_generation'],'boot_id':origin['boot_id']}} if origin else {}),
                 'native_identity':{**identity,'registry_integrity':'VERIFIED','private_key_possession':'UNKNOWN'},
                 'authority_effect':'NONE','admission_effect':'NONE','dispatch_effect':'NONE'}
     except Exception as exc:

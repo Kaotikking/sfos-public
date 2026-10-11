@@ -33,7 +33,7 @@ INTERVAL_SECONDS = 0.5
 HEARTBEAT_FLOOR_SECONDS = 1.0
 MAX_RECEIPTS = 4096
 REPLAY_CONTRACT = Path('/usr/lib/serein/kernel/replay_store.py')
-REPLAY_CONTRACT_SHA256 = 'ddb9a320bb5955f648c18b6c2a5c445ab4f10d5f79f544ce4f3eccbcee40c48f'
+REPLAY_CONTRACT_SHA256 = 'a3321dd7ed9f4a04ed333663d46f2d77f2dde46964ea63d11d631f3358bb90cb'
 VITALS_HOST = 'serein.sardonyxsapphire.us'
 VITALS_PATH = '/v1/runtime/status'
 VITALS_MAX_BYTES = 2 * 1024 * 1024
@@ -297,7 +297,7 @@ def installed_replay_owner(*, root, database_path, clock, read_only=False):
     # A different, still MAC-valid descriptor is not this installation.
     body=descriptor['body']
     origin=installed.get('replay_origin',{'plan_sha256':installed['plan_sha256'],
-        'source_generation':installed['evidence']['source_generation']})
+        'source_generation':installed['evidence']['source_generation'],'boot_id':installed['boot_id']})
     plan_digest=origin['plan_sha256']
     if (body['store_id']!=str(uuid5(NAMESPACE_URL,'serein-kernel-store:'+plan_digest))
             or body['trusted_key_receipt']!=str(uuid5(NAMESPACE_URL,'serein-kernel-key:'+plan_digest))):
@@ -313,7 +313,7 @@ def installed_replay_owner(*, root, database_path, clock, read_only=False):
                        for name,(value,custody) in captured.items())):
             raise OperationsDenied('REPLAY_OWNER_INPUT_CHANGED')
     store=module.PersistentReplayStore(database_path,descriptor=descriptor,key=key,
-        expected_target={'vm_id':'VM4010','boot_id':installed['boot_id']},
+        expected_target={'vm_id':'VM4010','boot_id':origin['boot_id']},
         expected_generation=origin['source_generation'],input_guard=unchanged,
         conversation_context={
             'source_generation':{'commit':installed['source_commit'],'tree':installed['source_tree']},
@@ -497,9 +497,10 @@ def reserve_installed_conversation(payload, *, authenticated_caller, root, repla
     binding = matched['replay_binding']
     descriptor = replay_store.descriptor['body']
     installed = matched['installed_policy']
-    origin = installed.get('replay_origin',{'source_generation':installed['evidence']['source_generation']})
+    origin = installed.get('replay_origin',{'source_generation':installed['evidence']['source_generation'],
+        'boot_id':installed['boot_id']})
     if (descriptor['target'].get('vm_id') != 'VM4010'
-            or descriptor['target']['boot_id'] != binding['boot_id']
+            or descriptor['target']['boot_id'] != origin['boot_id']
             or {key: descriptor['source_generation'][key] for key in ('commit','tree')}
                != {key:origin['source_generation'][key] for key in ('commit','tree')}):
         raise OperationsDenied('CONVERSATION_REPLAY_SCOPE_DENIED')
@@ -1154,7 +1155,7 @@ def observe(*, boot_id_path: Path, descriptor_path: Path, key_path: Path,
         from .authority_contract import read_consumer_installed_policy_evidence, canonical
         installed = read_consumer_installed_policy_evidence(root=installed_root)
         origin = installed.get('replay_origin',{'plan_sha256':installed['plan_sha256'],
-            'source_generation':installed['evidence']['source_generation']})
+            'source_generation':installed['evidence']['source_generation'],'boot_id':installed['boot_id']})
         body = descriptor['body']
         if (installed['boot_id']!=boot_id or body['source_generation']!=origin['source_generation']
                 or body['store_id']!=str(uuid5(NAMESPACE_URL,'serein-kernel-store:'+origin['plan_sha256']))
@@ -1168,7 +1169,7 @@ def observe(*, boot_id_path: Path, descriptor_path: Path, key_path: Path,
             expected_issuer='KERNEL_AUTHORITY', expected_observer='OUTPOST',
             expected_key_fingerprint=hashlib.sha256(key).hexdigest(),
             expected_key_receipt=trusted_key_receipt,
-            expected_target={'vm_id':'VM4010', 'boot_id':boot_id},
+            expected_target={'vm_id':'VM4010', 'boot_id':origin['boot_id'] if installed is not None else boot_id},
             expected_generation=body['source_generation'])
     except (ValueError, KeyError, TypeError) as exc:
         raise OperationsDenied('REPLAY_DESCRIPTOR_AUTHENTICITY_DENIED') from exc

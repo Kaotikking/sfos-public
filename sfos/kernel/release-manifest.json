@@ -57,14 +57,14 @@
     ],
     [
       "payload/runtime/persistent_replay_store.py",
-      26407,
-      "df5b5fa9f08c9e3f800f2f0d9b656e89765f5476889049a3a49bebff0d7db8d6",
+      26786,
+      "430c12d61213824a2178f1b643b65b65a59f2cba9dd6e94375a61fd2362ba8c5",
       "0644"
     ],
     [
       "payload/runtime/replay_store.py",
-      27865,
-      "ddb9a320bb5955f648c18b6c2a5c445ab4f10d5f79f544ce4f3eccbcee40c48f",
+      28111,
+      "a3321dd7ed9f4a04ed333663d46f2d77f2dde46964ea63d11d631f3358bb90cb",
       "0644"
     ],
     [
@@ -93,8 +93,8 @@
     ],
     [
       "payload/serein_stage1/authority_contract.py",
-      53658,
-      "3f0bd33ec72255ed5325f999c38d7fb98f9b59e0decd1dc9203ef59c3ec05857",
+      53730,
+      "a48ad53b0de26bc97db02667a70e663c83847878308e0fcae454a87d9426c8d9",
       "0644"
     ],
     [
@@ -117,8 +117,8 @@
     ],
     [
       "payload/serein_stage1/domain_identity.py",
-      13517,
-      "0cc857a437b951ed5631217d2c529bd63b442bceeac7663b60d0a9de05f3884c",
+      13818,
+      "47ac373f8c78367b5d147d810d8b44da643ae28b48b6972e50b595741572513b",
       "0644"
     ],
     [
@@ -159,8 +159,8 @@
     ],
     [
       "payload/serein_stage1/kernel_operations.py",
-      86027,
-      "b06168bf3704a69d12863d6999074c5ab425b42e2ae474957d3e4a705dc8381d",
+      86173,
+      "3902d2987bd218efac4cc5ec9d48a5a41abae63bee59ca537770047b6ed1c118",
       "0644"
     ],
     [
@@ -272,8 +272,8 @@
       "0644"
     ]
   ],
-  "payload_digest": "sha256:6f340026ade9a46d077ed8bdd3787e98b4cf5ae05e82ae55296cb3d25284f18e",
-  "install_denominator_digest": "sha256:51ffaae884e3098c53e749bd6e5cd1333f7f3b1faff29b6df41ec90074d14510",
+  "payload_digest": "sha256:634f8743d80f1262691d87a786eccb9b214a6d7145eeda356f4be94fffdd1002",
+  "install_denominator_digest": "sha256:af60bbf7e5c5c468b5ecbfa3f8ad88312d437426ac5e04773fac93052a92de75",
   "generated_secrets": [
     "/var/lib/serein/kernel/authority/replay.key",
     "/var/lib/serein/kernel/authority/domain-identity.pem"
@@ -282,8 +282,8 @@
   "installer_files": [
     [
       "install/kernel_first_install.py",
-      65607,
-      "b43c6413fd2881a7e9484ec7e0d23a5ddf55523b0df1eb3bffd9736961bc6491",
+      65676,
+      "2919059d91d33588c94f780ed7b6b23a9f0ea5cc73bb5c1d2c08d04b71d075e6",
       "0755"
     ],
     [
@@ -315,5 +315,5 @@
   ],
   "activation": "OUTPOST_ONLY_AFTER_INACTIVE_PROOF",
   "admission_effect": "NONE",
-  "self_digest": "sha256:10f7f1b223accbc24a8d603f1fbcb0d1f5f4f59fc7f2554d455685b73f53af2d"
+  "self_digest": "sha256:0a6d7f8d2573b604b0a70b2a6dd0bad651439c228c7b7ea95221c5f0efddf695"
 }

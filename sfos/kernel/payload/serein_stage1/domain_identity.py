@@ -82,7 +82,10 @@ def verify_installation_origin(plan, *, installer_public, native_identity,
                 and plan.get('schema')=='SereinPublicKernelFirstInstallPlan/v1'
                 and plan.get('target_vm_id')=='VM4010'
                 and 'installation_origin' not in plan
-                and plan.get('current_boot_id')==boot_id,
+                and isinstance(boot_id,str)
+                and re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',boot_id)
+                and isinstance(plan.get('current_boot_id'),str)
+                and re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',plan['current_boot_id']),
                 'IDENTITY_ORIGIN_PLAN_DENIED')
         signature=plan['signature']
         require(isinstance(signature,str) and re.fullmatch(r'[A-Za-z0-9_-]{86}',signature),

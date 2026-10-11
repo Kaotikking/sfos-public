@@ -502,7 +502,7 @@ def validate(source,root,plan,identity_lookup=None):
         'current_boot_id','machine_id_sha256'}
        or prior.get('rollback_selector')==plan.get('rollback_selector')
        or not re.fullmatch(r'/var/lib/serein/rollback/kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',str(prior.get('rollback_selector')))
-       or prior.get('current_boot_id')!=plan.get('current_boot_id')
+       or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',str(prior.get('current_boot_id')))
        or any(not isinstance(prior.get(k),str) or not re.fullmatch(r'[0-9a-f]{64}',prior[k]) for k in
            ('plan_sha256','receipt_sha256','journal_sha256','witness_sha256','machine_id_sha256')),
        'KERNEL_SUCCESSOR_BINDING_DENIED')
