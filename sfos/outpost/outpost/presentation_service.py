@@ -67,6 +67,14 @@ class PresentationServer(socketserver.UnixStreamServer):
     def __init__(self, address, store: VitalsRuntimeStore):
         if os.path.lexists(address):
             raise ValueError("PRESENTATION_SOCKET_COLLISION_DENIED")
+        # Validate the existing history before exposing the request socket.
+        # Subsequent requests still rehash every prefix byte and validate all
+        # additions. A broken/absent history must not prevent recovery Vitals.
+        if isinstance(store, VitalsRuntimeStore):
+            try:
+                store.chronology.read_summary()
+            except (OSError, ValueError, TypeError):
+                pass
         super().__init__(address, PresentationHandler)
         self.host_vitality_store = store
 

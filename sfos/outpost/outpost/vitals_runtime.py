@@ -1,8 +1,12 @@
 """Aggregate Outpost-owned, read-only Serein Vitals evidence."""
 from __future__ import annotations
 
-import json
+import hashlib
+import os
+import re
+import stat
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -10,13 +14,144 @@ from .constitutional_registry import registry_snapshot
 from .host_vitality import BOOT, JOINED_SCHEMA, RECIPE_SCHEMA, HostVitalityStore, HostCollectionAttempts, host_attempt_matches
 from .reboot_vitality import VitalityChronology, validate_classification
 from .vitals_aggregation import aggregate_vitals, producer_observation, validate_producer
-from .service import validate_coordinator_witness, held_domain_boot_view
+from .service import validate_coordinator_witness, held_domain_boot_view, _validate_generation_identity
+from install.transaction import strict_json, TransactionError, canonical
 
 
 class VitalsRuntimeError(ValueError):
     pass
 
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
+
+GENERATION_ROOT = Path("/usr/share/serein/outpost-generations")
+
+
+def _evidence_bytes(path, *, custody=None):
+    """Bound one read to open directory/file identities; never repair custody."""
+    path = Path(path).absolute()
+    if ".." in path.parts:
+        raise VitalsRuntimeError("VITALS_SOURCE_CUSTODY_DENIED")
+    def fingerprint(info):
+        return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                info.st_uid, info.st_gid, info.st_size,
+                info.st_mtime_ns, info.st_ctime_ns)
+    with ExitStack() as opened:
+        def acquire(name, flags, parent=None):
+            descriptor = os.open(name, flags, dir_fd=parent)
+            opened.callback(os.close, descriptor)
+            return descriptor
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        parent = acquire(path.anchor, directory_flags)
+        ancestry = []
+        for name in path.parts[1:-1]:
+            child = acquire(name, directory_flags, parent)
+            ancestry.append((parent, name, child))
+            parent = child
+        leaf = acquire(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, parent)
+        initial = os.fstat(leaf)
+        if not stat.S_ISREG(initial.st_mode) or initial.st_nlink != 1:
+            raise VitalsRuntimeError("VITALS_SOURCE_CUSTODY_DENIED")
+        if custody is not None and (initial.st_uid, initial.st_gid, stat.S_IMODE(initial.st_mode)) != custody:
+            raise VitalsRuntimeError("VITALS_SOURCE_CUSTODY_DENIED")
+        if initial.st_size > MAX_SOURCE_BYTES:
+            raise VitalsRuntimeError("VITALS_SOURCE_SIZE_DENIED")
+        data = bytearray()
+        while len(data) <= MAX_SOURCE_BYTES:
+            block = os.read(leaf, min(65536, MAX_SOURCE_BYTES + 1 - len(data)))
+            if not block:
+                break
+            data.extend(block)
+        if len(data) > MAX_SOURCE_BYTES:
+            raise VitalsRuntimeError("VITALS_SOURCE_SIZE_DENIED")
+        final = os.fstat(leaf)
+        named = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        if fingerprint(initial) != fingerprint(final) or fingerprint(final) != fingerprint(named):
+            raise VitalsRuntimeError("VITALS_SOURCE_CHANGED_DURING_READ")
+        for owner, name, descriptor in ancestry:
+            actual = os.fstat(descriptor)
+            named = os.stat(name, dir_fd=owner, follow_symlinks=False)
+            if (actual.st_dev, actual.st_ino, actual.st_mode, actual.st_uid, actual.st_gid) != (
+                    named.st_dev, named.st_ino, named.st_mode, named.st_uid, named.st_gid):
+                raise VitalsRuntimeError("VITALS_SOURCE_CHANGED_DURING_READ")
+        return bytes(data)
+
+
+def _running_generation():
+    """Verify the complete public payload, not only this reader's own file.
+
+    No private selector or key is read. This identifies running source bytes;
+    it does not select a generation or admit a domain.
+    """
+    module = Path(__file__).absolute()
+    root = module.parent.parent
+    try:
+        if root.parent != GENERATION_ROOT or not re.fullmatch(r"[0-9a-f]{64}", root.name):
+            return None
+        manifest_path = root / "release-manifest.json"
+        raw = _evidence_bytes(manifest_path, custody=(0, 0, 0o644))
+        manifest = strict_json(raw)
+        if not isinstance(manifest, dict):
+            return None
+        body = dict(manifest)
+        claimed = body.pop("self_digest", None)
+        if claimed != "sha256:" + root.name or hashlib.sha256(canonical(body)).hexdigest() != root.name:
+            return None
+        payload = body.get("payload")
+        if not isinstance(payload, list) or not payload:
+            return None
+        names = set()
+        for row in payload:
+            if not isinstance(row, dict) or set(row) != {"path", "bytes", "sha256"}:
+                return None
+            name = row["path"]
+            if (not isinstance(name, str) or not name or "\\" in name
+                    or name.startswith("/") or any(part in {"", ".", ".."} for part in name.split("/"))
+                    or name in names or type(row["bytes"]) is not int
+                    or not 0 <= row["bytes"] <= MAX_SOURCE_BYTES
+                    or not isinstance(row["sha256"], str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", row["sha256"])):
+                return None
+            names.add(name)
+            content = _evidence_bytes(root / name, custody=(0, 0, 0o644))
+            if len(content) != row["bytes"] or hashlib.sha256(content).hexdigest() != row["sha256"]:
+                return None
+        if module != root / "outpost/vitals_runtime.py" or "outpost/vitals_runtime.py" not in names:
+            return None
+        if _evidence_bytes(manifest_path, custody=(0, 0, 0o644)) != raw:
+            return None
+        return root.name
+    except (OSError, ValueError, TypeError, TransactionError):
+        return None
+
+
+def validate_kernel_vitals_projection(value, *, generation_identity, boot_id, observed_at):
+    """Check the existing public supporting-evidence contract, without admission."""
+    projection = validate_producer(value)
+    _validate_generation_identity(generation_identity)
+    details = projection["payload"]
+    hex_fields = {
+        "kernel_generation": 64, "source_commit": 40, "source_tree": 40,
+        "canonical_manifest_digest": 64, "host_projection_digest": 64,
+        "installed_evidence_sha256": 64, "observation_digest": 64,
+    }
+    constants = {"domain": "KERNEL", "outpost_generation": generation_identity["generation"],
+                 "stage1": "NOT_READY", "admission": "UNADMITTED"}
+    allowed = set(hex_fields) | set(constants)
+    valid = (projection["producer"] == "OUTPOST_DOMAIN_OBSERVER"
+             and projection["perspective"] == "serein"
+             and projection["claim"] == "STAGE1_SUPPORTING_EVIDENCE_AGGREGATED"
+             and projection["boot_id"] == boot_id
+             and 0 <= observed_at - projection["observed_at"] <= 30
+             and isinstance(details, dict) and set(details) == allowed)
+    if valid:
+        valid = all(details[key] == expected for key, expected in constants.items())
+        valid = valid and all(isinstance(details[key], str) and
+                              re.fullmatch("[0-9a-f]{" + str(width) + "}", details[key])
+                              for key, width in hex_fields.items())
+        valid = valid and projection["evidence_ref"] == "outpost-native:stage1:" + details["observation_digest"]
+    if not valid:
+        raise VitalsRuntimeError("VITALS_KERNEL_PROJECTION_DENIED")
+    return projection
 
 
 class VitalsRuntimeStore:
@@ -31,18 +166,13 @@ class VitalsRuntimeStore:
         self.coordinator_path = self.producer_root.parent / "coordinator/current.json"
         self.domain_state_path = Path(domain_state_path)
         self.recovery_path = Path(recovery_path)
+        self.chronology = VitalityChronology(self.producer_root.parent / "watchdog/chronology.jsonl")
 
     @staticmethod
-    def _read_json(path: Path) -> dict[str, Any]:
-        if path.is_symlink() or not path.is_file():
-            raise VitalsRuntimeError("VITALS_SOURCE_CUSTODY_DENIED")
+    def _read_json(path: Path, *, expected_custody=None) -> dict[str, Any]:
         try:
-            with path.open("rb") as stream:
-                raw = stream.read(MAX_SOURCE_BYTES + 1)
-            if len(raw) > MAX_SOURCE_BYTES:
-                raise VitalsRuntimeError("VITALS_SOURCE_SIZE_DENIED")
-            value = json.loads(raw.decode("utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            value = strict_json(_evidence_bytes(path, custody=expected_custody))
+        except (OSError, UnicodeError, TransactionError) as error:
             raise VitalsRuntimeError("VITALS_SOURCE_READ_DENIED") from error
         if not isinstance(value, dict):
             raise VitalsRuntimeError("VITALS_SOURCE_SHAPE_DENIED")
@@ -57,7 +187,7 @@ class VitalsRuntimeStore:
             payload={"status": "UNAVAILABLE"},
         )
 
-    def _producers(self, boot_id: str, now: float) -> dict[str, list[dict[str, Any]]]:
+    def _producers_once(self, boot_id: str, now: float) -> dict[str, list[dict[str, Any]]]:
         result: dict[str, list[dict[str, Any]]] = {}
         if self.producer_root.is_symlink() or (self.producer_root.exists() and not self.producer_root.is_dir()):
             raise VitalsRuntimeError("VITALS_PRODUCER_ROOT_DENIED")
@@ -89,8 +219,8 @@ class VitalsRuntimeStore:
                             or value["payload"] != native or value["claim"] != native["watchdog_state"]):
                         raise VitalsRuntimeError("VITALS_NATIVE_WITNESS_DENIED")
                 elif value["claim"] == "CHRONOLOGY_OBSERVED":
-                    rows = VitalityChronology(watchdog_root / "chronology.jsonl").read()
-                    if not rows or value["payload"] != {"event_count": len(rows), "latest_event": rows[-1]} or value["evidence_ref"] != "chronology:" + rows[-1]["event_hash"]:
+                    history = self.chronology.read_summary()
+                    if not history["event_count"] or value["payload"] != history or value["evidence_ref"] != "chronology:" + history["latest_event"]["event_hash"]:
                         raise VitalsRuntimeError("VITALS_NATIVE_WITNESS_DENIED")
                 elif value["claim"] != "CHRONOLOGY_UNAVAILABLE" or value["payload"] != {"status": "UNAVAILABLE"}:
                     raise VitalsRuntimeError("VITALS_NATIVE_WITNESS_DENIED")
@@ -98,6 +228,28 @@ class VitalsRuntimeStore:
                 value = self._unavailable("outpost", bindings[filename], "PRODUCER_EVIDENCE_UNAVAILABLE", boot_id, now)
             result.setdefault(value["perspective"], []).append(value)
         return result
+
+    def _producers(self, boot_id: str, now: float) -> dict[str, list[dict[str, Any]]]:
+        sample = self._producers_once(boot_id, now)
+        if any(row["claim"] == "PRODUCER_EVIDENCE_UNAVAILABLE"
+               for rows in sample.values() for row in rows):
+            # Reacquire the entire canonical pair once; do not combine old
+            # native history with a newer producer projection.
+            sample = self._producers_once(boot_id, now)
+        return sample
+
+    def _domain_observation(self, *, coordinator, boot_id, host, completed):
+        if coordinator is None:
+            raise VitalsRuntimeError("VITALS_KERNEL_GENERATION_UNAVAILABLE")
+        selected = coordinator["generation_identity"]
+        if selected is None or _running_generation() != selected["generation"]:
+            raise VitalsRuntimeError("VITALS_KERNEL_GENERATION_UNAVAILABLE")
+        evidence = self._read_json(self.domain_state_path, expected_custody=(0, 0, 0o644))
+        observed = validate_kernel_vitals_projection(evidence,
+            generation_identity=selected, boot_id=boot_id, observed_at=time.time())
+        if not completed or observed["payload"]["host_projection_digest"] != host.get("projection_digest"):
+            raise VitalsRuntimeError("VITALS_KERNEL_HOST_BINDING_DENIED")
+        return observed
 
     def snapshot(self, *, current_boot_id: str | None = None) -> dict[str, Any]:
         try:
@@ -115,6 +267,7 @@ class VitalsRuntimeStore:
             sources = self._producers(boot_id, now)
         except (OSError, ValueError, TypeError):
             sources = {"outpost": [self._unavailable("outpost", "OUTPOST_PRODUCER_READER", "PRODUCER_EVIDENCE_UNAVAILABLE", boot_id, now)]}
+        now = time.time()
         attempt = None
         attempt_error = False
         try:
@@ -153,6 +306,7 @@ class VitalsRuntimeStore:
             claim=str(registry["registry_state"]), observed_at=now, boot_id=boot_id,
             evidence_ref="registry:" + registry["registry_digest"], payload=registry,
         ))
+        coordinator = None
         try:
             coordinator=validate_coordinator_witness(self._read_json(self.coordinator_path),boot_id=boot_id,observed_at=now)
             if (coordinator["host_gate"] != ("CURRENT_BOOT_OBSERVED" if completed else "HOST_GATE_UNAVAILABLE")
@@ -166,12 +320,19 @@ class VitalsRuntimeStore:
                          "boot_verification":held_domain_boot_view(boot_id=boot_id,observed_at=now)},
             ))
         except (OSError,ValueError,TypeError):
+            coordinator = None
             sources.setdefault("domains", []).append(self._unavailable("domains","OUTPOST_DOMAIN_COORDINATOR","DOMAIN_STATE_UNAVAILABLE",boot_id,now))
         if self.domain_state_path.exists():
-            # No native admitted domain-state validator is installed in this
-            # Outpost-only candidate. A file/dict cannot stand in for one.
-            observation = self._unavailable("domains", "OUTPOST_DOMAIN_INSTALLER", "DOMAIN_STATE_UNAVAILABLE", boot_id, now)
-            sources.setdefault("domains", []).append(observation)
+            try:
+                projected = self._domain_observation(coordinator=coordinator,
+                    boot_id=boot_id, host=host, completed=completed)
+                sources.setdefault("serein", []).append(projected)
+            except (OSError, ValueError, TypeError):
+                group, producer, claim = (
+                    ("domains", "OUTPOST_DOMAIN_INSTALLER", "DOMAIN_STATE_UNAVAILABLE")
+                    if coordinator is None else
+                    ("serein", "OUTPOST_DOMAIN_OBSERVER", "STAGE1_OBSERVATION_UNAVAILABLE"))
+                sources.setdefault(group, []).append(self._unavailable(group, producer, claim, boot_id, now))
         if self.recovery_path.exists():
             try:
                 recovery = validate_classification(self._read_json(self.recovery_path))
@@ -186,4 +347,19 @@ class VitalsRuntimeStore:
             except (OSError, ValueError, TypeError):
                 observation = self._unavailable("recovery", "OUTPOST_RECOVERY_WITNESS", "RECOVERY_EVIDENCE_UNAVAILABLE", boot_id, now)
             sources.setdefault("recovery", []).append(observation)
-        return aggregate_vitals(sources, current_boot_id=boot_id, generated_at=now)
+        finished = time.time()
+        for index, item in enumerate(sources.get("serein", [])):
+            if item["claim"] != "STAGE1_SUPPORTING_EVIDENCE_AGGREGATED":
+                continue
+            try:
+                selected = coordinator["generation_identity"]
+                if _running_generation() != selected["generation"]:
+                    raise VitalsRuntimeError("VITALS_KERNEL_GENERATION_UNAVAILABLE")
+                finished = time.time()
+                validate_kernel_vitals_projection(item, generation_identity=selected,
+                    boot_id=boot_id, observed_at=finished)
+            except (ValueError, TypeError):
+                finished = time.time()
+                sources["serein"][index] = self._unavailable("serein", "OUTPOST_DOMAIN_OBSERVER",
+                    "STAGE1_OBSERVATION_UNAVAILABLE", boot_id, finished)
+        return aggregate_vitals(sources, current_boot_id=boot_id, generated_at=finished)

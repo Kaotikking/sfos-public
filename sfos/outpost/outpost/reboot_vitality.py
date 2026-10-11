@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import fcntl
 import json
 import math
 import os
 import re
 import stat
+import threading
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -129,7 +131,11 @@ def validate_classification(value: Mapping[str, Any], intent: Mapping[str, Any] 
 
 
 class VitalityChronology:
-    def __init__(self, path: Path): self.path = Path(path)
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self._summary_cache = None
+        self._summary_failure = None
+        self._summary_lock = threading.Lock()
 
     def _open(self, *, writing: bool):
         if self.path.is_symlink() or any(parent.is_symlink() for parent in self.path.parents):
@@ -170,8 +176,10 @@ class VitalityChronology:
         return fd, directories
 
     @staticmethod
-    def _read_locked(fd: int) -> list[dict[str, Any]]:
-        previous, seen, rows = "GENESIS", set(), []
+    def _read_locked(fd: int, verified_prefix=None) -> list[dict[str, Any]]:
+        rows = list(verified_prefix) if verified_prefix is not None else []
+        previous = rows[-1]["event_hash"] if rows else "GENESIS"
+        seen = {row["event_id"] for row in rows}
         try:
             with os.fdopen(os.dup(fd), "rb") as stream:
                 for raw in stream:
@@ -201,6 +209,96 @@ class VitalityChronology:
         finally:
             os.close(fd)
             for directory, _, _ in reversed(directories): os.close(directory)
+
+    def read_summary(self) -> dict[str, Any]:
+        """Validate all current bytes; reuse parsing only for a matching prefix.
+
+        The prefix hash is recomputed from the open file on EVERY read. This
+        is not a stat-only/tail cache and does not discard or trust history.
+        Cold reads still validate the complete chain. No admission is granted.
+        """
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+                    info.st_uid, info.st_gid, info.st_size,
+                    info.st_mtime_ns, info.st_ctime_ns)
+
+        def hash_bytes(fd, count):
+            result = hashlib.sha256()
+            while count:
+                block = os.read(fd, min(count, 1024 * 1024))
+                if not block:
+                    raise RebootVitalityError("VITALITY_CHRONOLOGY_CHANGED_DURING_READ")
+                result.update(block)
+                count -= len(block)
+            return result.hexdigest()
+
+        with self._summary_lock:
+            try:
+                fd, directories = self._open(writing=False)
+            except FileNotFoundError:
+                self._summary_cache = None
+                self._summary_failure = None
+                return {"event_count": 0, "latest_event": None}
+            reused_failure = False
+            try:
+                initial = identity(os.fstat(fd))
+                size = initial[6]
+                failed = self._summary_failure
+                if failed is not None and size == failed[0]:
+                    if hash_bytes(fd, size) == failed[1]:
+                        if identity(os.fstat(fd)) != initial:
+                            raise RebootVitalityError("VITALITY_CHRONOLOGY_CHANGED_DURING_READ")
+                        self._check_names(fd, directories)
+                        reused_failure = True
+                        raise RebootVitalityError(failed[2])
+                    os.lseek(fd, 0, os.SEEK_SET)
+                self._summary_failure = None
+                cached = self._summary_cache
+                prefix = None
+                if cached is not None and size >= cached[0]:
+                    if hash_bytes(fd, cached[0]) == cached[1]:
+                        prefix = cached[2]
+                if prefix is None:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                rows = self._read_locked(fd, prefix)
+                # Bind the new cache to the exact complete current bytes, not
+                # to a producer claim or filesystem timestamps alone.
+                os.lseek(fd, 0, os.SEEK_SET)
+                complete_hash = hash_bytes(fd, size)
+                if identity(os.fstat(fd)) != initial:
+                    raise RebootVitalityError("VITALITY_CHRONOLOGY_CHANGED_DURING_READ")
+                self._check_names(fd, directories)
+                self._summary_cache = (size, complete_hash, rows)
+                return {"event_count": len(rows),
+                        "latest_event": copy.deepcopy(rows[-1]) if rows else None}
+            except BaseException as error:
+                self._summary_cache = None
+                self._summary_failure = None
+                # Invalid history must not turn the recovery page into repeated
+                # full JSON/chain scans. Reuse only a stable CONTENT rejection,
+                # never a lock, I/O, race or custody failure, and rehash all its
+                # bytes on every later attempt before reusing that verdict.
+                content_errors = {
+                    "VITALITY_CHRONOLOGY_CHAIN_DENIED", "VITALITY_CHRONOLOGY_INPUT_DENIED",
+                    "VITALITY_CHRONOLOGY_INCOMPLETE_RECORD", "VITALITY_CHRONOLOGY_DUPLICATE_DENIED",
+                    "VITALITY_CHRONOLOGY_SHAPE_DENIED", "VITALITY_JSON_DUPLICATE_KEY_DENIED",
+                    "VITALITY_JSON_VALUE_DENIED",
+                }
+                invalid_content = isinstance(error, RebootVitalityError) and (
+                    reused_failure or str(error) in content_errors or
+                    str(error) == "VITALITY_CHRONOLOGY_READ_DENIED" and
+                    isinstance(error.__cause__, (UnicodeError, json.JSONDecodeError)))
+                if invalid_content:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    rejected_hash = hash_bytes(fd, size)
+                    if identity(os.fstat(fd)) != initial:
+                        raise RebootVitalityError("VITALITY_CHRONOLOGY_CHANGED_DURING_READ") from error
+                    self._check_names(fd, directories)
+                    self._summary_failure = (size, rejected_hash, str(error))
+                raise
+            finally:
+                os.close(fd)
+                for directory, _, _ in reversed(directories): os.close(directory)
 
     def _check_names(self, fd, directories):
         for opened, ancestor, name in directories[1:]:

@@ -999,6 +999,45 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
             'subject_bytes_sha256':hashlib.sha256(raw).hexdigest()}
 
 
+
+def kernel_vitals_projection(observation, *, outpost_generation, kernel_generation):
+    """Serialize the native owner's supporting result, not authenticate an upload.
+
+    Raw native responses/requests and machine/runtime identities stay private.
+    Only publish_installed_stage1_vitals owns production acquisition/custody.
+    A self digest is an integrity reference, never a signature or admission.
+    """
+    from .vitals_aggregation import producer_observation
+    require(isinstance(observation, dict) and
+            observation.get('result') == 'STAGE1_SUPPORTING_EVIDENCE_AGGREGATED' and
+            observation.get('stage1') == 'NOT_READY' and
+            observation.get('admission') == 'UNADMITTED' and
+            observation.get('authority_effect') == 'NONE' and
+            observation.get('admission_effect') == 'NONE', 'VITALS_NATIVE_OBSERVATION_DENIED')
+    source = observation.get('source')
+    require(isinstance(source, dict), 'VITALS_NATIVE_SOURCE_DENIED')
+    fields = {
+        'domain': 'KERNEL', 'outpost_generation': outpost_generation,
+        'kernel_generation': kernel_generation,
+        'source_commit': source.get('source_commit'), 'source_tree': source.get('source_tree'),
+        'canonical_manifest_digest': source.get('canonical_manifest_digest'),
+        'host_projection_digest': observation.get('host_projection_digest'),
+        'installed_evidence_sha256': observation.get('installed_evidence_sha256'),
+        'observation_digest': hashlib.sha256(record_bytes(observation)).hexdigest(),
+        'stage1': 'NOT_READY', 'admission': 'UNADMITTED',
+    }
+    for name in ('outpost_generation', 'kernel_generation', 'canonical_manifest_digest',
+                 'host_projection_digest', 'installed_evidence_sha256', 'observation_digest',
+                 'source_commit', 'source_tree'):
+        width = 40 if name in ('source_commit', 'source_tree') else 64
+        require(isinstance(fields[name], str) and
+                re.fullmatch('[0-9a-f]{' + str(width) + '}', fields[name]) is not None,
+                'VITALS_NATIVE_SOURCE_DENIED')
+    return producer_observation(perspective='serein', producer='OUTPOST_DOMAIN_OBSERVER',
+        claim='STAGE1_SUPPORTING_EVIDENCE_AGGREGATED',
+        observed_at=observation['observed_at'], boot_id=observation['boot_id'],
+        evidence_ref='outpost-native:stage1:' + fields['observation_digest'], payload=fields)
+
 def main():
     """Existing observer entry; compute request content uses private stdin."""
     require(len(sys.argv) == 2, "KERNEL_EXPECTED_SOURCE_REQUIRED")

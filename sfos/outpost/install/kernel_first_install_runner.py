@@ -3011,6 +3011,213 @@ def _read_compute_handoff(stream,*,timeout=10.0):
   os.set_blocking(fd,blocking)
 
 
+
+def _native_observer_generation():
+ """Bind this one-shot caller to the complete selected installed generation."""
+ from .generation_launcher import read_selector
+ from outpost import kernel_direct_witness
+ deny(os.geteuid()!=0 or os.getegid()!=0,'KERNEL_OBSERVER_CALLER_DENIED')
+ selected=read_selector(Path('/var/lib/serein-outpost/generation-state/current.json'),
+     Path('/usr/share/serein/outpost-generations'))
+ selector,generation=selected
+ deny(Path(__file__).absolute()!=generation/'install/kernel_first_install_runner.py'
+      or Path(kernel_direct_witness.__file__).absolute()!=generation/'outpost/kernel_direct_witness.py',
+      'KERNEL_OBSERVER_CALLER_GENERATION_DENIED')
+ return selected
+
+
+def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected):
+ """Read existing native subjects only; construction and admission stay separate."""
+ import secrets,time
+ from datetime import datetime,timezone
+ from outpost.kernel_direct_witness import compare_retained_compute_response
+ plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt))
+ expectation=_compute_expectation(expectation)
+ preserved_runtime=strict_json(canonical(preserved_runtime))
+ deny(not isinstance(preserved_runtime,dict) or not preserved_runtime,
+      'KERNEL_PRESERVED_RUNTIME_REQUIRED')
+ boot=plan.get('current_boot_id')
+ deny(preserved_runtime.get('boot_id')!=boot,'KERNEL_PRESERVED_RUNTIME_BOOT_DENIED')
+ def boundary():
+  deny(_native_observer_generation()!=selected or current_boot()!=boot,
+       'KERNEL_OBSERVER_GENERATION_CHANGED')
+ boundary()
+ anchor=regular(VERIFY_KEY)
+ host=current_host_gate(HOST_STATE,boot)
+ expectation=_bind_compute_model(plan,SOURCE,expectation)
+ challenge={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':'AUTHORITY',
+     'request_id':'kernel-authority-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
+     'previous_evidence_digest':'GENESIS'}
+ authority=observe_installed_authority(plan,receipt,challenge)
+ deny(authority.get('result')!='AUTHORITY_PHASE_A_OBSERVED','KERNEL_COMPUTE_AUTHORITY_UNPROVEN')
+ authority_raw=canonical(authority)
+ operations=observe_operations_lifecycle(plan,receipt,authority_raw,boundary=boundary)
+ deny(operations.get('result')!='OPERATIONS_MINIMUM_OBSERVED','KERNEL_COMPUTE_OPERATIONS_UNPROVEN')
+ interface=observe_installed_interface(plan,receipt,authority_raw,operations)
+ deny(interface.get('result')!='PRIVATE_INTERFACE_DENIAL_CORRELATED','KERNEL_COMPUTE_INTERFACE_UNPROVEN')
+ compute=observe_installed_compute(plan,receipt,authority_raw,operations,interface,expectation)
+ deny(compute.get('result')!='MEASURED_COMPUTE_CORRELATED','KERNEL_COMPUTE_UNPROVEN')
+ preparation={'offline_preparation':None,'preserved_runtime':preserved_runtime}
+ gpu=_observe_owned_gpu(plan,compute,preparation,signed_runtime_plan=None,boundary=boundary)
+ # The original observations must survive the final source/installed-closure
+ # comparison. This does not create a conversation or renew any timestamp.
+ envelope=prepare_compute_observation(plan,receipt,authority_raw,operations,interface,expectation)
+ deny(_observe_owned_gpu(plan,compute,preparation,signed_runtime_plan=None,boundary=boundary)!=gpu,
+      'KERNEL_GPU_INVENTORY_CHANGED')
+ fresh=current_host_gate(HOST_STATE,boot)
+ facts=lambda state:canonical({k:v for k,v in state['latest'].items()
+                              if k not in {'observed_at','evidence_digest'}})
+ deny(facts(fresh)!=facts(host) or fresh['latest']['observed_at']<host['latest']['observed_at'],
+      'KERNEL_OBSERVATION_PRESTATE_CHANGED')
+ deny(regular(VERIFY_KEY)!=anchor or read_operations_service_controls()!=operations['service_controls'],
+      'KERNEL_OBSERVATION_PRESTATE_CHANGED')
+ boundary()
+ # Sample time AFTER all blocking reads. Original clocks expire together.
+ samples=[authority,*operations['observations'],interface,compute]
+ try:stamps=[datetime.fromisoformat(item['observed_at'].replace('Z','+00:00')) for item in samples]
+ except (ValueError,TypeError,KeyError,AttributeError) as exc:
+  raise RunnerDenied('KERNEL_OBSERVER_CLOCK_DENIED') from exc
+ deny(any(stamp.utcoffset() is None for stamp in stamps),'KERNEL_OBSERVER_CLOCK_DENIED')
+ now=time.time();oldest=min(stamp.timestamp() for stamp in stamps)
+ deny(any(not 0<=now-stamp.timestamp()<=30 for stamp in stamps),'KERNEL_OBSERVER_STALE')
+ clock=datetime.fromtimestamp(now,timezone.utc)
+ deny(_compare_operations_lifecycle(plan,authority_raw,operations['observations'],
+      operations['service_controls'],envelope=envelope,boot=boot,anchor=anchor,now=clock)!=operations,
+      'KERNEL_COMPUTE_OPERATIONS_PREDECESSOR_DENIED')
+ deny(_compare_interface_observation(plan,{**envelope,'interface_predecessor':sha(canonical(operations))},
+      canonical(interface))!=interface,'KERNEL_COMPUTE_INTERFACE_PREDECESSOR_DENIED')
+ compared=compare_retained_compute_response(canonical(compute['subject_evidence']),
+      query=compute['request'],source=envelope['source'],
+      installed_evidence_sha256=envelope['installed_evidence_sha256'],boot_id=boot,
+      observed_at=clock,host_state=fresh,**expectation)
+ expected={**compared,'evidence_authentication':'ROOT_CREATED_PRIVATE_LISTENER',
+      'native_identity_possession':'NOT_ESTABLISHED_BY_OPERATIONS','request':compute['request'],
+      'observed_at':compute['observed_at'],'subject_bytes_sha256':sha(canonical(compute['subject_evidence']))}
+ deny(expected!=compute,'KERNEL_COMPUTE_OUTPUT_DENIED')
+ return {'result':'STAGE1_SUPPORTING_EVIDENCE_AGGREGATED','boot_id':boot,
+     'observed_at':oldest,'source':operations['source'],
+     'installed_evidence_sha256':operations['installed_evidence_sha256'],
+     'host_projection_digest':fresh['projection_digest'],
+     'native':{'authority':authority,'operations':operations,'interface':interface,
+               'compute':compute,'gpu':gpu},
+     'stage1':'NOT_READY','admission':'UNADMITTED','authority_effect':'NONE','admission_effect':'NONE'}
+
+
+def observe_installed_stage1(plan,receipt,expectation,*,preserved_runtime):
+ """Explicit root/PVE one-shot read; never the construction CLI or admission."""
+ plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt))
+ expectation=strict_json(canonical(expectation));preserved_runtime=strict_json(canonical(preserved_runtime))
+ selected=_native_observer_generation()
+ with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')):
+  return _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected)
+
+
+def _write_native_vitals(path,value,*,boundary):
+ """Replace only the declared nonsecret summary; private atomic() is unchanged.
+
+ Root-owned 0755 directory and 0644 summary are a separate public-data custody
+ contract. Never chmod a named existing directory or read a private predecessor.
+ A service-owned parent may rename its child: descriptor/name guards reject that
+ substitution. Nothing here publishes a private construction witness.
+ """
+ import secrets
+ deny(os.geteuid()!=0 or os.getegid()!=0,'VITALS_PUBLICATION_CALLER_DENIED')
+ path=Path(path);data=canonical(value)
+ deny(not path.is_absolute() or '..' in path.parts or path.name!='state.json'
+      or len(data)>16384,'VITALS_PUBLICATION_PATH_DENIED')
+ handles=[];fd=None;temporary=None;linked=False
+ def signature(info):
+  return (info.st_dev,info.st_ino,info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode))
+ def check():
+  for child,parent,name,before in handles:
+   deny(signature(os.fstat(child))!=before,'VITALS_PUBLICATION_DIRECTORY_CHANGED')
+   if parent is not None:
+    deny(signature(os.stat(name,dir_fd=parent,follow_symlinks=False))!=before,
+         'VITALS_PUBLICATION_DIRECTORY_CHANGED')
+ def leaf():
+  try:info=os.stat(path.name,dir_fd=fd,follow_symlinks=False)
+  except FileNotFoundError:return None
+  deny(not stat.S_ISREG(info.st_mode) or info.st_nlink!=1
+       or (info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode))!=(0,0,0o644),
+       'VITALS_PUBLICATION_CUSTODY_DENIED')
+  return (signature(info),info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+ try:
+  current=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+  handles.append((current,None,None,signature(os.fstat(current))))
+  for index,part in enumerate(path.parent.parts[1:]):
+   if index==len(path.parent.parts[1:])-1:
+    try:os.mkdir(part,0o755,dir_fd=current)
+    except FileExistsError:pass
+   child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=current)
+   handles.append((child,current,part,signature(os.fstat(child))));current=child
+  fd=current
+  deny(signature(os.fstat(fd))[2:]!=(0,0,0o755),'VITALS_PUBLICATION_CUSTODY_DENIED')
+  check();predecessor=leaf();boundary();check()
+  candidate_name='.vitals-'+secrets.token_hex(16)
+  output=os.open(candidate_name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o644,dir_fd=fd)
+  temporary=candidate_name
+  with os.fdopen(output,'wb') as stream:
+   deny((os.fstat(stream.fileno()).st_uid,os.fstat(stream.fileno()).st_gid,
+         stat.S_IMODE(os.fstat(stream.fileno()).st_mode))!=(0,0,0o644),
+        'VITALS_PUBLICATION_CUSTODY_DENIED')
+   stream.write(data);stream.flush();os.fsync(stream.fileno())
+  boundary();check()
+  deny(leaf()!=predecessor,'VITALS_PUBLICATION_PREDECESSOR_CHANGED')
+  if predecessor is None:
+   os.link(temporary,path.name,src_dir_fd=fd,dst_dir_fd=fd,follow_symlinks=False)
+  else:os.replace(temporary,path.name,src_dir_fd=fd,dst_dir_fd=fd);temporary=None
+  linked=True
+  if temporary is not None:
+   os.unlink(temporary,dir_fd=fd);temporary=None
+  os.fsync(fd);check()
+  deny(regular(path,expected_custody=(0,0,0o644))!=data,'VITALS_PUBLICATION_READBACK_DENIED')
+  boundary();check()
+ except BaseException as exc:
+  if linked:raise WitnessPublicationUncertain('VITALS_PUBLICATION_RECONCILIATION_REQUIRED') from exc
+  if isinstance(exc,OSError):raise RunnerDenied('VITALS_PUBLICATION_IO_DENIED') from exc
+  raise
+ finally:
+  try:
+   if temporary is not None and fd is not None:
+    try:os.unlink(temporary,dir_fd=fd)
+    except FileNotFoundError:pass
+    except OSError as exc:
+     if linked:raise WitnessPublicationUncertain('VITALS_PUBLICATION_RECONCILIATION_REQUIRED') from exc
+     raise
+  finally:
+   for child,_,_,_ in reversed(handles):os.close(child)
+
+
+def publish_installed_stage1_vitals(plan,receipt,expectation,*,preserved_runtime):
+ """Governed root one-shot: observe itself, then publish only public evidence.
+
+ No uploaded observation is accepted and no service, source, key or admission
+ is changed. The caller uses ordinary umask022; restrictive custody is denied,
+ never repaired. Installation of this capability is whole-generation only.
+ """
+ import time
+ from outpost.kernel_direct_witness import kernel_vitals_projection
+ plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt))
+ expectation=strict_json(canonical(expectation));preserved_runtime=strict_json(canonical(preserved_runtime))
+ selected=_native_observer_generation()
+ with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')):
+  observation=_read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected)
+  release=plan.get('release_digest')
+  deny(not isinstance(release,str) or not re.fullmatch('sha256:[0-9a-f]{64}',release),
+       'KERNEL_OBSERVATION_PLAN_DENIED')
+  projection=kernel_vitals_projection(observation,outpost_generation=selected[0]['generation'],
+      kernel_generation=release[7:])
+  def boundary():
+   host=current_host_gate(HOST_STATE,observation['boot_id'])
+   deny(_native_observer_generation()!=selected or current_boot()!=observation['boot_id'],
+        'KERNEL_OBSERVER_GENERATION_CHANGED')
+   deny(host['projection_digest']!=projection['payload']['host_projection_digest'],
+        'KERNEL_OBSERVATION_PRESTATE_CHANGED')
+   deny(not 0<=time.time()-projection['observed_at']<=30,'KERNEL_OBSERVER_STALE')
+  boundary()
+  _write_native_vitals(Path('/var/lib/serein-outpost/domains/state.json'),projection,boundary=boundary)
+  return projection
+
 def main(argv=None):
  """Wire the existing complete owner, without originating its acceptance call.
 

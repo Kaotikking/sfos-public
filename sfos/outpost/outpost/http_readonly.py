@@ -30,6 +30,23 @@ def _producer_evidence(snapshot,perspectives,missing,producers=None):
    rows.append("<p>Perspective: "+_status(perspective)+". Source: "+_status(item.get("producer"))+". State: "+_status(section.get("state"))+". Claim: "+_status(item.get("claim"))+". Freshness: "+_status(item.get("freshness"))+". Observed: "+_status(_when(item.get("observed_at")))+". Evidence: "+_status(item.get("evidence_ref"))+".</p>")
  return "".join(rows) if rows else missing
 
+def _kernel_observation_summary(snapshot):
+ articles=[]
+ observations=snapshot.get("sections",{}).get("serein",{}).get("perspectives",[])
+ for observation in observations:
+  if observation.get("producer")!="OUTPOST_DOMAIN_OBSERVER":continue
+  if observation.get("claim")!="STAGE1_SUPPORTING_EVIDENCE_AGGREGATED":continue
+  public=observation.get("payload",{})
+  if public.get("stage1")!="NOT_READY" or public.get("admission")!="UNADMITTED":continue
+  fields=(("Outpost generation","outpost_generation"),("Kernel generation","kernel_generation"),
+          ("Source commit","source_commit"),("Source tree","source_tree"),
+          ("Observation digest","observation_digest"))
+  evidence="".join("<p>"+label+": "+_status(public.get(key))+".</p>" for label,key in fields)
+  articles.append("<article aria-label='Kernel supporting observation'><h3>Kernel supporting observation</h3>"
+   "<p>Stage 1: NOT_READY. Admission: UNADMITTED. Supporting evidence is not independent acceptance.</p>"
+   +evidence+"</article>")
+ return "".join(articles)
+
 def _recovery_summary(snapshot):
  rows=[]
  for source in snapshot.get("sections",{}).get("recovery",{}).get("perspectives",[]):
@@ -142,7 +159,7 @@ def _outpost_operator_page(snapshot):
   "<section id='resume'><h2>Resume</h2>"+_recovery_summary(snapshot)+_producer_evidence(snapshot,("recovery",),"<p>Last-known-good reference: UNKNOWN — no source supplied in this Outpost dataset. Recovery execution: NOT AUTHORIZED.</p>")+"</section>"
   "<section id='domains'><h2>Domains</h2>"+_domain_registry_summary(snapshot)+_producer_evidence(snapshot,("domains",),"<p>Domain admission: UNKNOWN — no domain producer supplied in this Host-gate dataset.</p>")+"</section>"
   "<section id='hardware'><h2>Hardware/Frame</h2><p>GPU witness: "+_status(gpu.get("status"))+"; devices: "+_status(gpu.get("device_count"))+".</p></section>"
-  "<section id='sereinnet'><h2>SereinNet</h2>"+_producer_evidence(snapshot,("serein",),"<p>Kernel and Gateway admission: UNKNOWN — no SereinNet producer supplied in this Host-gate dataset.</p>")+"</section>"
+  "<section id='sereinnet'><h2>SereinNet</h2>"+_kernel_observation_summary(snapshot)+_producer_evidence(snapshot,("serein",),"<p>Kernel and Gateway admission: UNKNOWN — no SereinNet producer supplied in this Host-gate dataset.</p>")+"</section>"
   "<section id='memory'><h2>Memory/Knowledge</h2><p>State: UNKNOWN — no Memory or Knowledge producer supplied in this Host-gate dataset.</p></section>"
   "<section id='evidence'><h2>Evidence/Logs</h2>"+_producer_evidence(snapshot,("outpost",),"<p>Black-box event chronology: UNKNOWN — no event-log producer supplied in this Host-gate dataset.</p>",{"OUTPOST_VITALITY_CHRONOLOGY"})+"<p>Projection digest: "+_status(snapshot.get("projection_digest"))+"</p>"
   "<p>Observed at: "+_status(_when(latest.get("observed_at")))+"; monotonic sample sequence: "+_status(snapshot.get("sample_count"))+".</p>"
