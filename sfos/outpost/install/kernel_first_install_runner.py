@@ -230,6 +230,40 @@ def current_host_gate(host_path,boot_id):
 
 def current_boot():
  return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+
+def _settled_host_gate(host_path,boot_id):
+ """Wait only for collection evidence; never execute using a pending sample.
+
+ The recurring collector can begin between two installer boundaries. Keep the
+ ordinary observer fail-closed, but let the transaction wait briefly for that
+ exact attempt to finish. Failed, replaced, wrong-boot and abandoned attempts
+ remain denials. No service action, old-sample fallback or timestamp rewrite.
+ """
+ import time
+ from outpost.host_vitality import HostCollectionAttempts
+ deadline=time.monotonic()+10.0
+ try:return current_host_gate(host_path,boot_id)
+ except RunnerDenied as exc:
+  if str(exc)!='KERNEL_HOST_ATTEMPT_DENIED':raise
+  attempts=HostCollectionAttempts(Path(host_path).parent)
+  latest=attempts.latest()
+  if not latest:raise
+  pinned=latest['start']
+  while True:
+   if (not latest or latest['start']!=pinned
+       or pinned['payload']['boot_id']!=boot_id or pinned['observed_at']>time.time()):raise
+   if time.monotonic()>=deadline:raise
+   terminal=latest['terminal']
+   if terminal is not None:
+    if terminal['event_kind']!='HOST_COLLECTION_SUCCEEDED':raise
+    # It completed after the failed read. The unchanged strict reader must
+    # still prove the exact latest state; this is not a cached PASS.
+    result=current_host_gate(host_path,boot_id)
+    deny(attempts.latest()!=latest,'KERNEL_HOST_OBSERVATION_CHANGED')
+    deny(time.monotonic()>=deadline,'KERNEL_HOST_ATTEMPT_DENIED')
+    return result
+   time.sleep(0.1)
+   latest=attempts.latest()
 def load_installer(source,manifest,*,expected_release):
  """Compile only the exact installer bytes in the verified source manifest."""
  import types
@@ -2301,6 +2335,9 @@ def _kernel_material_boundary(plan,host_prestate,request_raw,*,root,source,
        'KERNEL_PRESERVED_RUNTIME_TARGET_DENIED')
  def boundary():
   nonlocal observed_at,classification
+  # Wait before the full material pass. A request, parent, predecessor,
+  # identity, source or runtime change during collection must still deny.
+  observed=_settled_host_gate(host_path,boot)
   if runtime_adapter is not None:
    try:runtime_adapter.observe_runtime(expected=preserved_runtime)
    except runtime_module.TransactionError as exc:
@@ -2318,7 +2355,6 @@ def _kernel_material_boundary(plan,host_prestate,request_raw,*,root,source,
     raw=regular(Path(root)/selector.lstrip('/')/filename,expected_custody=(0,0,0o600))
     deny(sha(raw)!=previous[field],'KERNEL_RECOVERED_HISTORY_CHANGED')
   deny(capture_outpost_generation(root)!=plan['outpost_generation'],'KERNEL_OUTPOST_GENERATION_CHANGED')
-  observed=current_host_gate(host_path,boot)
   deny(host_facts(observed)!=expected_host_facts
        or observed['latest']['observed_at']<observed_at
        or observed['classification'] not in {classification,'CURRENT_BOOT_STABLE'},
