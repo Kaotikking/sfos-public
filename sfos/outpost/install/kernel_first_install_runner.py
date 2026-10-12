@@ -311,12 +311,12 @@ def prepare_offline_companion(source,bundle_root,expected_before,rollback_select
  deny(sha(regular(verify_path))!=CANONICAL_AUTHORITY_SHA256,'KERNEL_CANONICAL_ANCHOR_DENIED')
  receipt,receipt_digest=source_receipt(source,source_receipt_path,verify_path)
  manifest=read_json(source/'release-manifest.json')
- boot=current_boot();host=current_host_gate(host_path,boot)
+ boot=current_boot();host=_settled_host_gate(host_path,boot)
  module=load_offline_installer(source,manifest,expected_release=receipt['release_digest'])
  if adapter is None:adapter=module.OfflineOllamaRealAdapter()
  plan=module.classify(adapter,Path(bundle_root),expected_before,rollback_selector,boot_id=boot,
       source_generation={'commit':receipt['source_commit'],'tree':receipt['source_tree']},request_id=request_id)
- fresh=current_host_gate(host_path,boot)
+ fresh=_settled_host_gate(host_path,boot)
  stable=lambda value:canonical({k:v for k,v in value['latest'].items() if k not in {'observed_at','evidence_digest'}})
  deny(current_boot()!=boot or stable(fresh)!=stable(host)
       or fresh['classification'] not in {host['classification'],'CURRENT_BOOT_STABLE'}
@@ -696,7 +696,7 @@ def build_plan(source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,verify_pa
  reserved=request['reserved_domain_ids']
  deny(not isinstance(reserved,list) or any(not isinstance(value,str) or not re.fullmatch(r'[0-9a-f]{16}',value) for value in reserved) or reserved!=sorted(set(reserved)),"KERNEL_NATIVE_IDENTITY_RESERVED_DENIED")
  receipt,receipt_digest=source_receipt(source,source_receipt_path,verify_path);deny(any(request[x]!=receipt[x] for x in ("repository","source_parent","source_commit","source_tree","archive_sha256")),"KERNEL_REQUEST_SOURCE_BINDING_DENIED")
- host=current_host_gate(host_path,current_boot())
+ host=_settled_host_gate(host_path,current_boot())
  manifest=read_json(source/"release-manifest.json");unsigned={k:v for k,v in manifest.items() if k!="self_digest"};deny(manifest.get("self_digest")!="sha256:"+sha(canonical(unsigned)) or receipt["release_digest"]!=manifest.get("self_digest"),"KERNEL_MANIFEST_DENIED")
  installer=regular(source/"install/kernel_first_install.py");installer_rows=manifest.get("installer_files",[]);deny(not any(row==["install/kernel_first_install.py",len(installer),sha(installer),"0755"] for row in installer_rows),"KERNEL_INSTALLER_DENOMINATOR_DENIED")
  layout=read_json(source/"install-layout.json");rows=payload_rows(source,manifest,layout);deny(manifest.get("install_denominator_digest")!="sha256:"+sha(canonical(rows)),"KERNEL_DENOMINATOR_DENIED")
@@ -897,7 +897,7 @@ def prepare_authority_observation(plan,receipt,request,*,root=Path('/'),source=S
  deny(not isinstance(selector,str) or not re.fullmatch(r'/var/lib/serein/rollback/kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',selector)
       or not isinstance(receipt,dict) or receipt.get('status')!='INSTALLED_INACTIVE'
       or receipt.get('receipt')!=selector+'/receipt.json','KERNEL_INSTALL_RECEIPT_DENIED')
- host=current_host_gate(host_path,boot)
+ host=_settled_host_gate(host_path,boot)
  deny(plan.get('host_identity',{}).get('machine_id')!=host['latest']['host']['machine_id'],
       'KERNEL_HOST_IDENTITY_MISMATCH')
  def verify_machine_identity():
@@ -956,7 +956,7 @@ def prepare_authority_observation(plan,receipt,request,*,root=Path('/'),source=S
   deny(not isinstance(origin,dict),'KERNEL_OBSERVATION_ORIGIN_DENIED')
   identity_binding['installation_origin']=strict_json(canonical(origin))
  expected_identity(identity_binding,anchor,source_binding)
- fresh=current_host_gate(host_path,boot)
+ fresh=_settled_host_gate(host_path,boot)
  facts=lambda value:canonical({k:v for k,v in value['latest'].items() if k not in {'observed_at','evidence_digest'}})
  deny(current_boot()!=boot or regular(verify_path)!=anchor or facts(host)!=facts(fresh)
       or fresh['latest']['observed_at']<host['latest']['observed_at']
@@ -2295,7 +2295,7 @@ def prepare_kernel_request(bundle_adapter=None,*,root=Path('/'),source=SOURCE,re
   try:runtime_adapter.observe_runtime(expected=preserved_runtime)
   except runtime_module.TransactionError as exc:
    raise RunnerDenied('KERNEL_PRESERVED_RUNTIME_CHANGED') from exc
- fresh=current_host_gate(host_path,boot)
+ fresh=_settled_host_gate(host_path,boot)
  facts=lambda state:canonical({k:v for k,v in state['latest'].items() if k not in {'observed_at','evidence_digest'}})
  deny(capture_outpost_generation(root)!=plan['outpost_generation'],'KERNEL_OUTPOST_GENERATION_CHANGED')
  deny(current_boot()!=boot or regular(request_path)!=raw or facts(host)!=facts(fresh)
