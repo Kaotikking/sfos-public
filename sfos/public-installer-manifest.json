@@ -121,8 +121,8 @@
     },
     {
       "path": "outpost/install/kernel_first_install_runner.py",
-      "sha256": "efa131d9fbf91a65a938f2c2e09040901ceecd4ba0c67530d663f3902c958070",
-      "bytes": 220851
+      "sha256": "6f83516a69320d7627dc5fbf24e0c19ebf8b66d9180ba3ed7b0388f049708657",
+      "bytes": 221180
     },
     {
       "path": "outpost/install/public_generation_transaction.py",
@@ -221,7 +221,7 @@
     },
     {
       "path": "outpost/release-manifest.json",
-      "sha256": "a8c297b9b59fab6d4f76811dddf7d6c3ca73b1dffa830cb926fa4b2d0f3a1f8d",
+      "sha256": "14006174e655a9dc7bde41e47312e23de722558f846adc462764baf4808dfa5d",
       "bytes": 5884
     },
     {
@@ -260,5 +260,5 @@
       "bytes": 10463
     }
   ],
-  "self_digest": "sha256:0f97740da5e7fa1673f688979aa3967c74744dd2aa1d4644cc2a59baaf003e1b"
+  "self_digest": "sha256:d358f326439c55f7ea030b095037b4d0aa5a39257d3b30263c835ad4d164e1ef"
 }

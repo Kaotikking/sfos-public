@@ -45,6 +45,11 @@ INTERFACE_UNITS=('serein-kernel-client-gateway-haos.socket','serein-kernel-clien
 HEX40=re.compile(r"[0-9a-f]{40}\Z")
 HEX64=re.compile(r"[0-9a-f]{64}\Z")
 MAX_FILE_BYTES=16*1024*1024
+# A Host observation is already rejected as stale after 30 seconds by the
+# installed observer contracts below.  Give an in-flight, same-boot collector
+# that full existing freshness budget; this is an absolute deadline and never
+# turns a pending attempt into evidence.
+HOST_SETTLE_DEADLINE_SECONDS=30.0
 
 class RunnerDenied(RuntimeError):pass
 class WitnessPublicationUncertain(RunnerDenied):pass
@@ -244,7 +249,7 @@ def _settled_host_gate(host_path,boot_id):
  import time
  from outpost.host_vitality import HostCollectionAttempts
  from outpost.reboot_vitality import RebootVitalityError
- deadline=time.monotonic()+10.0
+ deadline=time.monotonic()+HOST_SETTLE_DEADLINE_SECONDS
  def read_unlocked(reader):
   # The collector's exclusive flock is transient, not invalid evidence.
   # Retry only that exact lock result; every read still validates all bytes.
