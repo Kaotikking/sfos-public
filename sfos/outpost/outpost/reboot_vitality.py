@@ -176,13 +176,15 @@ class VitalityChronology:
         return fd, directories
 
     @staticmethod
-    def _read_locked(fd: int, verified_prefix=None) -> list[dict[str, Any]]:
+    def _read_locked(fd: int, verified_prefix=None, digest_state=None) -> list[dict[str, Any]]:
         rows = list(verified_prefix) if verified_prefix is not None else []
         previous = rows[-1]["event_hash"] if rows else "GENESIS"
         seen = {row["event_id"] for row in rows}
         try:
             with os.fdopen(os.dup(fd), "rb") as stream:
                 for raw in stream:
+                    if digest_state is not None:
+                        digest_state.update(raw)
                     if not raw.endswith(b"\n"):
                         raise RebootVitalityError("VITALITY_CHRONOLOGY_INCOMPLETE_RECORD")
                     record = json.loads(raw, object_pairs_hook=_unique_object)
@@ -255,16 +257,25 @@ class VitalityChronology:
                 self._summary_failure = None
                 cached = self._summary_cache
                 prefix = None
+                complete_digest = hashlib.sha256()
                 if cached is not None and size >= cached[0]:
-                    if hash_bytes(fd, cached[0]) == cached[1]:
-                        prefix = cached[2]
+                    prefix_digest = hashlib.sha256()
+                    prefix_bytes = cached[0]
+                    while prefix_bytes:
+                        block = os.read(fd, min(prefix_bytes, 1024 * 1024))
+                        if not block:
+                            raise RebootVitalityError("VITALITY_CHRONOLOGY_CHANGED_DURING_READ")
+                        prefix_digest.update(block)
+                        prefix_bytes -= len(block)
+                    if prefix_digest.hexdigest() == cached[1]:
+                        complete_digest = prefix_digest.copy(); prefix = cached[2]
                 if prefix is None:
                     os.lseek(fd, 0, os.SEEK_SET)
-                rows = self._read_locked(fd, prefix)
+                    complete_digest = hashlib.sha256()
+                rows = self._read_locked(fd, prefix, complete_digest)
                 # Bind the new cache to the exact complete current bytes, not
                 # to a producer claim or filesystem timestamps alone.
-                os.lseek(fd, 0, os.SEEK_SET)
-                complete_hash = hash_bytes(fd, size)
+                complete_hash = complete_digest.hexdigest()
                 if identity(os.fstat(fd)) != initial:
                     raise RebootVitalityError("VITALITY_CHRONOLOGY_CHANGED_DURING_READ")
                 self._check_names(fd, directories)

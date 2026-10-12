@@ -256,16 +256,21 @@ class HostVitalityStore:
      before=os.fstat(stream.fileno())
      if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
      raw=stream.read();cached=self._history_cache;rows=[];offset=0
+     complete_hash=hashlib.sha256()
      if cached is not None:
       size,hashed,validated,terminated=cached
-      if (len(raw)>=size and (terminated or len(raw)==size)
-          and hashlib.sha256(raw[:size]).hexdigest()==hashed):
-       rows=list(validated);offset=size
+      if len(raw)>=size and (terminated or len(raw)==size):
+       prefix_hash=hashlib.sha256(raw[:size])
+       if prefix_hash.hexdigest()==hashed:
+        complete_hash=prefix_hash.copy();rows=list(validated);offset=size
+       else:
+        complete_hash=hashlib.sha256()
+     complete_hash.update(raw[offset:])
      rows.extend(validate(json.loads(line)) for line in raw[offset:].splitlines())
      if (identity(before)!=identity(os.fstat(stream.fileno()))
          or identity(before)!=identity(self.samples.lstat()) or len(raw)!=before.st_size):
       raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
-     self._history_cache=(len(raw),hashlib.sha256(raw).hexdigest(),rows,raw.endswith(b'\n'))
+     self._history_cache=(len(raw),complete_hash.hexdigest(),rows,raw.endswith(b'\n'))
      return rows
    except (OSError,ValueError,TypeError):
     self._history_cache=None

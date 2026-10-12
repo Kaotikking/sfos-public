@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G18",
+  "generation": "G19",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -55,8 +55,8 @@
     },
     {
       "path": "outpost/host_vitality.py",
-      "bytes": 29274,
-      "sha256": "9ce0f50d6352555dca2e3aacaeedb8b61ebe05041cbcd4d67cf366c480b58b9c"
+      "bytes": 29456,
+      "sha256": "49fd19f495e94f885e654ab492f807ea30f5c14cdd21642441863ffd98b7d490"
     },
     {
       "path": "outpost/host_witness_runner.py",
@@ -85,8 +85,8 @@
     },
     {
       "path": "outpost/reboot_vitality.py",
-      "bytes": 21426,
-      "sha256": "8193dd3f28900259dac7b9a986fb08ab720ee35a2b85829e50908b0eb6029ad7"
+      "bytes": 22120,
+      "sha256": "567f5243ddfb4586228522b512766c3a22c67c5442bd080ef4b26357ab7a09aa"
     },
     {
       "path": "outpost/service.py",
@@ -178,5 +178,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:ee51b3f606255119d427da8812de22480240cd7ff9d7e185bfbe63d094f2c231"
+  "self_digest": "sha256:1a46abeebe54a1b27e2c25e1fecbb1e3913158a33f357f85e91a6e4e0d04a30e"
 }
