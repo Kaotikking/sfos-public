@@ -1,6 +1,6 @@
 """Persistent, observation-only Host OS/GPU first-install witness."""
 from __future__ import annotations
-import hashlib,json,math,os,re,tempfile
+import copy,hashlib,json,math,os,re,stat,tempfile,threading
 from urllib.parse import urlsplit
 from pathlib import Path
 from typing import Mapping,Any
@@ -237,7 +237,39 @@ def validate_state(value:Mapping[str,Any],*,active:bool=False)->dict:
  return dict(value)
 
 class HostVitalityStore:
- def __init__(self,root:Path):self.root=Path(root);self.state=self.root/"state.json";self.samples=self.root/"ecg.jsonl"
+ def __init__(self,root:Path):
+  self.root=Path(root);self.state=self.root/"state.json";self.samples=self.root/"ecg.jsonl"
+  self._history_cache=None;self._history_lock=threading.Lock()
+ def _read_history(self):
+  """Rehash every historical byte; reuse parsing only for an exact prefix.
+
+  ADAPT the existing VitalityChronology verified-prefix reader. No stat-only
+  cache, discarded history, cached Host verdict, or freshness relaxation.
+  """
+  def identity(info):
+   return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,
+           info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+  with self._history_lock:
+   try:
+    fd=os.open(self.samples,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+    with os.fdopen(fd,'rb') as stream:
+     before=os.fstat(stream.fileno())
+     if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
+     raw=stream.read();cached=self._history_cache;rows=[];offset=0
+     if cached is not None:
+      size,hashed,validated,terminated=cached
+      if (len(raw)>=size and (terminated or len(raw)==size)
+          and hashlib.sha256(raw[:size]).hexdigest()==hashed):
+       rows=list(validated);offset=size
+     rows.extend(validate(json.loads(line)) for line in raw[offset:].splitlines())
+     if (identity(before)!=identity(os.fstat(stream.fileno()))
+         or identity(before)!=identity(self.samples.lstat()) or len(raw)!=before.st_size):
+      raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
+     self._history_cache=(len(raw),hashlib.sha256(raw).hexdigest(),rows,raw.endswith(b'\n'))
+     return rows
+   except (OSError,ValueError,TypeError):
+    self._history_cache=None
+    raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED') from None
  @staticmethod
  def _projection(current,previous,count):
   return {"schema":"SereinOutpostHostVitalityState/v1","projection_revision":1,"projection_digest":digest(current),"previous_boot_id":previous["boot_id"] if previous else None,"current_boot_id":current["boot_id"],"sample_count":count,"latest":current,"classification":classify(current,previous),"authority_effect":"NONE","mutation_effect":"NONE"}
@@ -251,7 +283,7 @@ class HostVitalityStore:
   if self.samples.is_symlink():raise HostVitalityError("HOST_VITALITY_HISTORY_DENIED")
   if not self.samples.exists() and value is None:return None
   if not self.samples.is_file():raise HostVitalityError("HOST_VITALITY_HISTORY_DENIED")
-  try:rows=[validate(json.loads(line)) for line in self.samples.read_bytes().splitlines()]
+  try:rows=self._read_history()
   except (OSError,ValueError,TypeError) as exc:raise HostVitalityError("HOST_VITALITY_HISTORY_DENIED") from exc
   if not rows:
    if value is None:return None
@@ -262,7 +294,7 @@ class HostVitalityStore:
    if count==len(rows):return value
   # The fsynced ECG is the observation journal. A crash may leave the cache
   # absent or behind a validated prefix; reconstruct without mutating on read.
-  return self._projection(rows[-1],rows[-2] if len(rows)>1 else None,len(rows))
+  return self._projection(copy.deepcopy(rows[-1]),copy.deepcopy(rows[-2]) if len(rows)>1 else None,len(rows))
  def snapshot(self):
   value=self._read_state()
   if value is None:return {"schema":"SereinOutpostHostVitalityState/v1","status":"NO_OBSERVATION","authority_effect":"NONE","mutation_effect":"NONE"}

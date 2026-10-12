@@ -94,7 +94,11 @@ def _valid_message(value: Any) -> bool:
     content = value.get("content")
     if content_present and (
         not isinstance(content, str)
-        or len(content) > MAX_OLLAMA_CONTENT_CHARS
+        # Native HAOS Assist context is not a short scalar: the observed
+        # 16,813-character system message fits the canonical 128-KiB request.
+        # Preserve it intact; _classify_ollama_chat and the transport enforce
+        # the complete encoded byte bound. Identifier/metadata bounds stay put.
+        or len(content) > MAX_OLLAMA_REQUEST_BYTES
         or "\x00" in content
     ):
         return False
