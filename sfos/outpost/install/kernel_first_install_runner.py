@@ -1364,6 +1364,21 @@ def read_operations_service_controls():
  return _read_kernel_units(OPERATIONS_SERVICES,service_controls=True)
 
 
+def _verify_recovered_target_prestate(module,root,prestate):
+ """Read back the authenticated compensation prestate, including key custody.
+
+ Called only after the installer verifies the signed plan/receipt and completes
+ compensation. A preserved service-owned key must retain its recorded owner;
+ this comparison grants no new ownership or file mutation authority.
+ """
+ for row in prestate:
+  absent=row['state']=='ABSENT'
+  owner=(0,0) if absent else (row['uid'],row['gid'])
+  observed=module.target_prestate(root,row,generated=absent,expected_owner=owner)
+  deny(observed!=(row if absent else {**row,'state':'PRESENT_PRESERVED'}),
+       'KERNEL_RECOVERY_PRESTATE_UNPROVEN')
+
+
 def recover_failed_construction(root,source,receipt_path,expected):
  """Exact failed-attempt compensation owned by the current Outpost successor.
 
@@ -1486,10 +1501,7 @@ def recover_failed_construction(root,source,receipt_path,expected):
   units={**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()}
   deny(any((row['ActiveState'],row['SubState'])!=('inactive','dead') or row['NeedDaemonReload']!='no'
            for row in units.values()),'KERNEL_RECOVERY_STOP_UNPROVEN')
-  for row in receipt['prestate']:
-   observed=module.target_prestate(root,row,generated=row['state']=='ABSENT')
-   deny(observed!=(row if row['state']=='ABSENT' else {**row,'state':'PRESENT_PRESERVED'}),
-        'KERNEL_RECOVERY_PRESTATE_UNPROVEN')
+  _verify_recovered_target_prestate(module,root,receipt['prestate'])
   deny(module.capture_runtime_access(root,plan)!=plan['runtime_access_prestate'],
        'KERNEL_RECOVERY_ACCESS_UNPROVEN')
   return {'result':'FAILED_CONSTRUCTION_RECOVERED','boot_id':boot,'rollback_selector':plan['rollback_selector'],
