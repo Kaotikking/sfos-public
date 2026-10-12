@@ -610,7 +610,11 @@ def dispatch_installed_conversation(payload, *, authenticated_caller, root, repl
             if remaining<=0:
                 raise OperationsDenied('CONVERSATION_FORWARD_EXPIRED')
             evidence['forward_attempted']=True
-            return exchange_private_service('CONVERSATION',value,timeout_seconds=min(remaining,30.0),root=root)
+            # Use the existing conversation lease, not the unrelated 30-second
+            # generic grant ceiling. Never refresh the original expiry.
+            from .conversation_runtime import MAX_AGE_SECONDS
+            return exchange_private_service('CONVERSATION',value,
+                timeout_seconds=min(remaining,MAX_AGE_SECONDS),root=root)
         result=call_expected(runtime_payload,runtime_call=forward,clock=clock)
         evidence['result_sha256']=hashlib.sha256(result).hexdigest()
         returned=json.loads(result)

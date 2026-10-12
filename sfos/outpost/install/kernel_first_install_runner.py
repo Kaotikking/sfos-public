@@ -3147,7 +3147,8 @@ def _native_observer_generation():
  return selected
 
 
-def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected):
+def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,*,
+                           read_public_request=None,read_public_response=None):
  """Read existing native subjects only; construction and admission stay separate."""
  import secrets,time
  from datetime import datetime,timezone
@@ -3162,6 +3163,28 @@ def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected):
  def boundary():
   deny(_native_observer_generation()!=selected or current_boot()!=boot,
        'KERNEL_OBSERVER_GENERATION_CHANGED')
+ boundary()
+ # Reuse the lifecycle reader's bounded external handoff, before refreshing
+ # native evidence. These callbacks acquire bytes, not trust or admission.
+ deny(read_public_request is not None and read_public_response is None,
+      'KERNEL_PUBLIC_REQUEST_HANDOFF_DENIED')
+ deny(any(value is not None and not callable(value)
+          for value in (read_public_request,read_public_response)),
+      'KERNEL_PUBLIC_RESPONSE_HANDOFF_DENIED')
+ public_raw=read_public_response() if read_public_response is not None else None
+ deny(read_public_response is not None and
+      (type(public_raw) is not bytes or not 0<len(public_raw)<=65536),
+      'KERNEL_PUBLIC_RESPONSE_HANDOFF_DENIED')
+ external_request=None
+ if read_public_request is not None:
+  try:
+   original=read_public_request()
+   deny(not isinstance(original,dict),'KERNEL_PUBLIC_REQUEST_HANDOFF_DENIED')
+   original_raw=canonical(original)
+   deny(not 0<len(original_raw)<=65536,'KERNEL_PUBLIC_REQUEST_HANDOFF_DENIED')
+   external_request=strict_json(original_raw)
+  except (TransactionError,TypeError,ValueError,RecursionError) as exc:
+   raise RunnerDenied('KERNEL_PUBLIC_REQUEST_HANDOFF_DENIED') from exc
  boundary()
  anchor=regular(VERIFY_KEY)
  host=current_host_gate(HOST_STATE,boot)
@@ -3192,6 +3215,17 @@ def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected):
       'KERNEL_OBSERVATION_PRESTATE_CHANGED')
  deny(regular(VERIFY_KEY)!=anchor or read_operations_service_controls()!=operations['service_controls'],
       'KERNEL_OBSERVATION_PRESTATE_CHANGED')
+ public_observation=None
+ if public_raw is not None:
+  from outpost.kernel_direct_witness import compare_public_conversation_response
+  try:
+   retained=compute['subject_evidence']['facts']['observation']
+   runtime_raw=base64.b64decode(retained['runtime_response_b64'],validate=True)
+   public_observation=compare_public_conversation_response(public_raw,
+       runtime_raw=runtime_raw,expected_runtime_sha256=compute['runtime_result_sha256'],
+       request=expectation['request'],external_request=external_request)
+  except (KeyError,TypeError,ValueError) as exc:
+   raise RunnerDenied('KERNEL_PUBLIC_RESPONSE_UNCORRELATED') from exc
  boundary()
  # Sample time AFTER all blocking reads. Original clocks expire together.
  samples=[authority,*operations['observations'],interface,compute]
@@ -3220,17 +3254,19 @@ def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected):
      'installed_evidence_sha256':operations['installed_evidence_sha256'],
      'host_projection_digest':fresh['projection_digest'],
      'native':{'authority':authority,'operations':operations,'interface':interface,
-               'compute':compute,'gpu':gpu},
+               'compute':compute,'gpu':gpu,'public_response':public_observation},
      'stage1':'NOT_READY','admission':'UNADMITTED','authority_effect':'NONE','admission_effect':'NONE'}
 
 
-def observe_installed_stage1(plan,receipt,expectation,*,preserved_runtime):
+def observe_installed_stage1(plan,receipt,expectation,*,preserved_runtime,
+                             read_public_request=None,read_public_response=None):
  """Explicit root/PVE one-shot read; never the construction CLI or admission."""
  plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt))
  expectation=strict_json(canonical(expectation));preserved_runtime=strict_json(canonical(preserved_runtime))
  selected=_native_observer_generation()
  with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')):
-  return _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected)
+  return _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,
+      read_public_request=read_public_request,read_public_response=read_public_response)
 
 
 def _write_native_vitals(path,value,*,boundary):
@@ -3309,7 +3345,8 @@ def _write_native_vitals(path,value,*,boundary):
    for child,_,_,_ in reversed(handles):os.close(child)
 
 
-def publish_installed_stage1_vitals(plan,receipt,expectation,*,preserved_runtime):
+def publish_installed_stage1_vitals(plan,receipt,expectation,*,preserved_runtime,
+                                    read_public_request=None,read_public_response=None):
  """Governed root one-shot: observe itself, then publish only public evidence.
 
  No uploaded observation is accepted and no service, source, key or admission
@@ -3322,7 +3359,8 @@ def publish_installed_stage1_vitals(plan,receipt,expectation,*,preserved_runtime
  expectation=strict_json(canonical(expectation));preserved_runtime=strict_json(canonical(preserved_runtime))
  selected=_native_observer_generation()
  with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')):
-  observation=_read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected)
+  observation=_read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,
+      read_public_request=read_public_request,read_public_response=read_public_response)
   release=plan.get('release_digest')
   deny(not isinstance(release,str) or not re.fullmatch('sha256:[0-9a-f]{64}',release),
        'KERNEL_OBSERVATION_PLAN_DENIED')

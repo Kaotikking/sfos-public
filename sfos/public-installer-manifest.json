@@ -121,8 +121,8 @@
     },
     {
       "path": "outpost/install/kernel_first_install_runner.py",
-      "sha256": "0c611c0d52cb9cb58294aef50d4fbf114cb5ef85acc8a4e609d177266cef3257",
-      "bytes": 209245
+      "sha256": "6018420aa51b91cad21614063db1f82431f93fc831fa07320a1472af5c98381f",
+      "bytes": 211520
     },
     {
       "path": "outpost/install/public_generation_transaction.py",
@@ -206,8 +206,8 @@
     },
     {
       "path": "outpost/outpost/vitals_edge.py",
-      "sha256": "14a7b5bb68505bf4ca37dd6eeb4597b90f58caf375a21cb27083a4cf07ab2bb6",
-      "bytes": 22815
+      "sha256": "c1bde14fbb25ed03ca57df899218a312c9b7561d66bba0258eae323d4c2e1b1b",
+      "bytes": 23121
     },
     {
       "path": "outpost/outpost/vitals_runtime.py",
@@ -221,7 +221,7 @@
     },
     {
       "path": "outpost/release-manifest.json",
-      "sha256": "8482391165b9634dd41eb0026f65ba302033d9ff2df61a25d65fe6330c91242b",
+      "sha256": "a2dedcc13d5b542a4b08baecb6d668475002a8b526270e33cf890a3f86c15358",
       "bytes": 5883
     },
     {
@@ -260,5 +260,5 @@
       "bytes": 10463
     }
   ],
-  "self_digest": "sha256:d2f65204f0e1aa98f6f0387921afd7900250ca7b33814828655406a024e4622a"
+  "self_digest": "sha256:56c3117c6aa522cd092ccd0b77fe6a0a6c168450634cb3d41f582c60a067a3eb"
 }

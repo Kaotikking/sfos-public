@@ -392,7 +392,7 @@ def exchange_private_service(channel, payload, *, timeout_seconds, root=Path('/'
     socket custody is checked separately. No discovery, start, retry or repair.
     The owning dispatch must supply a timeout within its remaining lease.
     """
-    from .conversation_runtime import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES
+    from .conversation_runtime import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_AGE_SECONDS
     from .audit import MAX_EVENT_BYTES
     roads = {
         'CONVERSATION':('/run/serein/kernel/conversation.sock',0o660,MAX_REQUEST_BYTES,MAX_RESPONSE_BYTES,'serein-stage1'),
@@ -404,7 +404,8 @@ def exchange_private_service(channel, payload, *, timeout_seconds, root=Path('/'
     }
     if (not isinstance(channel,str) or channel not in roads
             or type(timeout_seconds) not in (int,float) or not math.isfinite(timeout_seconds)
-            or not 0 < timeout_seconds <= 30):
+            or not 0 < timeout_seconds <= (MAX_AGE_SECONDS
+                if channel=='CONVERSATION' else 30)):
         raise ValueError('private_service_configuration_denied')
     absolute, mode, maximum_request, maximum_response, owner = roads[channel]
     if not isinstance(payload,bytes) or not payload:
@@ -619,10 +620,32 @@ def handle_installed_companion(payload: bytes, *, client, root, replay_store,
                     'runtime_response_sha256':dispatched['result_sha256'],
                     'replay_consumption_sha256':replay_store.contract.receipt_hash(dispatched['replay'][-1])}
     except OperationsDenied as exc:
-        # The reservation is durable; retain only the bounded policy-denial
-        # class and result digest in the existing private terminal audit.
-        # Never return raw rejected tool data or retry the private inference.
+        # Preserve bounded failure attribution in the existing private audit.
+        # A post-reservation failure retains its durable reservation; a
+        # preflight failure must never imply reservation or inference occurred.
         evidence=getattr(exc,'evidence',None)
+        # Pre-reservation failures have no runtime result. Preserve only an
+        # exact fixed code, never arbitrary exception text, keys or context.
+        # A shared client denial must not erase the internal failing gate.
+        preflight_reasons={
+            'CONVERSATION_CURRENT_BOUNDARY_REQUIRED',
+            'CONVERSATION_INSTALLED_SCOPE_CHANGED',
+            'CONVERSATION_CURRENT_BOUNDARY_DENIED',
+            'CONVERSATION_CURRENT_OPERATIONS_DENIED',
+            'CONVERSATION_REPLAY_CLOCK_DENIED',
+            'CONVERSATION_REPLAY_SCOPE_DENIED',
+            'CONVERSATION_HOST_BINDING_DENIED',
+            'CURRENT_HOST_API_EVIDENCE_DENIED',
+            'REPLAY_OWNER_INPUT_CHANGED',
+            'REPLAY_INPUT_PATH_DENIED',
+            'REPLAY_INPUT_CUSTODY_DENIED',
+            'REPLAY_INPUT_CHANGED',
+            'REPLAY_PARENT_CHANGED',
+            'IMMUTABLE_REPLAY_INPUT_DENIED',
+        }
+        if (not hasattr(exc,'evidence') and len(exc.args)==1
+                and type(exc.args[0]) is str and exc.args[0] in preflight_reasons):
+            denial_evidence={'reason':exc.args[0]}
         if (isinstance(evidence,dict)
                 and evidence.get('policy_denial')=='CONVERSATION_RETURNED_TOOL_SCOPE_DENIED'):
             digest=evidence.get('result_sha256')

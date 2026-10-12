@@ -37,6 +37,7 @@ CONVERSATION_PATH = "/v1/voice/conversation"
 GATEWAY_SOCKET = Path('/run/serein/kernel/gateway-haos.sock')
 MAX_CONVERSATION_REQUEST_BYTES = 128 * 1024
 MAX_GATEWAY_RESPONSE_BYTES = 64 * 1024
+GATEWAY_RESPONSE_TIMEOUT_SECONDS = 120.0
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
@@ -59,7 +60,10 @@ def _gateway_exchange(wire: bytes, *, root=Path('/')) -> tuple[int, bytes]:
         raise VitalsEdgeError('GATEWAY_REQUEST_DENIED')
     group = grp.getgrnam('serein-stage1')
     handles, parents = [], []
-    deadline = time.monotonic() + 30
+    # Transport ceiling only, not a fresh request lease. Kernel retains the
+    # original observed_at expiry, current gates and one-attempt replay owner.
+    # Keep this edge independent: no Kernel import or admission interpretation.
+    deadline = time.monotonic() + GATEWAY_RESPONSE_TIMEOUT_SECONDS
     def remaining():
         value = deadline - time.monotonic()
         if value <= 0:

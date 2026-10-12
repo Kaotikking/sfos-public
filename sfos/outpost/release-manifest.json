@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G14",
+  "generation": "G15",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -15,8 +15,8 @@
     },
     {
       "path": "install/kernel_first_install_runner.py",
-      "bytes": 209245,
-      "sha256": "0c611c0d52cb9cb58294aef50d4fbf114cb5ef85acc8a4e609d177266cef3257"
+      "bytes": 211520,
+      "sha256": "6018420aa51b91cad21614063db1f82431f93fc831fa07320a1472af5c98381f"
     },
     {
       "path": "install/public_generation_transaction.py",
@@ -100,8 +100,8 @@
     },
     {
       "path": "outpost/vitals_edge.py",
-      "bytes": 22815,
-      "sha256": "14a7b5bb68505bf4ca37dd6eeb4597b90f58caf375a21cb27083a4cf07ab2bb6"
+      "bytes": 23121,
+      "sha256": "c1bde14fbb25ed03ca57df899218a312c9b7561d66bba0258eae323d4c2e1b1b"
     },
     {
       "path": "outpost/vitals_runtime.py",
@@ -178,5 +178,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:1066ba7eb8c528cf81f8c4a14e1033711abb83ccac4c3734ea4489843a10134c"
+  "self_digest": "sha256:3535ee447a3d2cb1a438b5fd0f00968cb4a3e6fe1f3a35d6910a9eaa81afa7d0"
 }
