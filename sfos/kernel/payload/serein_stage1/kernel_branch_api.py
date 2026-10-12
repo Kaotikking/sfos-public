@@ -226,6 +226,77 @@ def read_installed_compute_observation(request_id, *, root=Path('/')):
         **retained,'authority_effect':'NONE','admission_effect':'NONE','stage1':'NOT_READY'}
 
 
+def read_installed_gateway_observation(request_id, *, root=Path('/')):
+    """Join the private ingress mapping to authenticated retained compute.
+
+    No prompt export and no new grant. Audit custody is not a signature; the
+    internal request/result must match the existing authenticated replay road.
+    """
+    import base64
+    from .audit import read_recent_terminal
+    from .authority_contract import canonical as kernel_record
+    root=Path(root);owner=pwd.getpwnam('serein-stage1')
+    require((os.geteuid(),os.getegid())==(owner.pw_uid,owner.pw_gid),
+            'COMPUTE_OWNER_IDENTITY_DENIED')
+    path=root/'var/lib/serein/common/stage1-continuity/audit.jsonl'
+    custody=(owner.pw_uid,owner.pw_gid,0o600)
+    mapping_id='gateway-correlation:'+request_id
+    mapping=read_recent_terminal(path,mapping_id,custody=custody)
+    terminal=read_recent_terminal(path,request_id,custody=custody)
+    installed,retained=read_installed_compute_observation(request_id,root=root)
+    runtime=strict_json(base64.b64decode(retained['runtime_response_b64'],validate=True))
+    require(set(mapping)=={'schema','request_id','status','reason','timestamp','gateway_correlation'}
+        and mapping['schema']=='SereinStage1Response/v1' and mapping['request_id']==mapping_id
+        and mapping['status']=='ANSWERED' and mapping['reason']=='gateway_haos_round_correlated',
+        'GATEWAY_CORRELATION_EVENT_DENIED')
+    row=mapping['gateway_correlation']
+    require(isinstance(row,dict) and set(row)=={'external_request_id','internal_request_id',
+        'conversation_id','external_request_sha256','runtime_request_sha256','internal_response_sha256',
+        'public_response_sha256','external_request_content','authority_effect','effects'}
+        and row['internal_request_id']==retained['request_id']==request_id
+        and row['conversation_id']==retained['conversation_id']==runtime['conversation_id']
+        and row['runtime_request_sha256']==retained['payload_sha256']
+        and row['external_request_content']=='GATEWAY_OBSERVED_NOT_INDEPENDENTLY_ACQUIRED'
+        and row['authority_effect']=='NONE' and row['effects']==[]
+        and all(isinstance(row[key],str) and re.fullmatch('[0-9a-f]{64}',row[key]) for key in
+                ('external_request_sha256','runtime_request_sha256','internal_response_sha256','public_response_sha256')),
+        'GATEWAY_CORRELATION_BINDING_DENIED')
+    require(set(terminal)=={'schema','request_id','status','reason','timestamp','result','compute_evidence'}
+        and terminal['compute_evidence']=={key:retained[key] for key in
+            ('runtime_response_b64','runtime_response_sha256','replay_consumption_sha256')}
+        and terminal['schema']=='SereinStage1Response/v1' and terminal['status']=='ANSWERED'
+        and terminal['request_id']==runtime['request_id']==request_id
+        and terminal['timestamp']==runtime['completed_at']
+        and row['internal_response_sha256']==hashlib.sha256(kernel_record(
+            {key:value for key,value in terminal.items() if key!='compute_evidence'})).hexdigest(),
+        'GATEWAY_CORRELATION_RESPONSE_DENIED')
+    chat='message' in runtime
+    fields=(('message','continue_conversation','conversation_id','authority_effect','effects') if chat else
+            ('state','response','scope','conversation_id','authority_effect','effects'))
+    require(canonical(terminal['result'])==canonical({key:runtime[key] for key in fields})
+        and runtime['authority_effect']=='NONE' and runtime['effects']==[],
+        'GATEWAY_CORRELATION_RUNTIME_DENIED')
+    public={'status':'ANSWERED','request_id':row['external_request_id'],
+        'conversation_id':row['conversation_id'],
+        'message':runtime['message'] if chat else {'role':'assistant','content':runtime['response']},
+        'continue_conversation':runtime['continue_conversation'] if chat else False,
+        'authority_effect':'NONE','effects':[]}
+    require(row['public_response_sha256']==hashlib.sha256(kernel_record(public)).hexdigest(),
+        'GATEWAY_CORRELATION_PUBLIC_DENIED')
+    completed=datetime.fromisoformat(runtime['completed_at'].replace('Z','+00:00'))
+    mapped=datetime.fromisoformat(mapping['timestamp'].replace('Z','+00:00'))
+    now=datetime.now(timezone.utc)
+    require(mapped.utcoffset() is not None and completed<=mapped<=now
+        and (now-completed).total_seconds()<=120,'GATEWAY_CORRELATION_STALE')
+    require(read_recent_terminal(path,mapping_id,custody=custody)==mapping
+        and read_recent_terminal(path,request_id,custody=custody)==terminal,
+        'GATEWAY_CORRELATION_CHANGED')
+    # Expose the already-retained terminal envelope, without private compute
+    # material, so Outpost independently checks the response digest and join.
+    return installed,{**retained,'gateway_correlation':mapping,
+        'gateway_response':{key:value for key,value in terminal.items() if key!='compute_evidence'}}
+
+
 def serve_operations(connection, *, root=Path('/')):
     """Donor Operations-v1 readback, not Authority signing or Phase-B admission.
 
@@ -257,7 +328,8 @@ def serve_operations(connection, *, root=Path('/')):
         require(raw.endswith(b'\n') and len(raw) <= 16384, 'REQUEST_FRAMING_DENIED')
         request = _strict_json(raw)
         fields={'schema','branch','request_id','nonce','previous_evidence_digest'}
-        require(isinstance(request, dict) and set(request) in (fields,fields|{'compute_request_id'})
+        require(isinstance(request, dict) and set(request) in (fields,fields|{'compute_request_id'},
+                fields|{'compute_request_id','gateway_correlation'})
             and request['schema'] == 'SEREIN/KernelBranchWitnessRequest/v1'
             and request['branch'] in {'OPERATIONS','INTERFACE'}
             and isinstance(request['previous_evidence_digest'], str)
@@ -266,12 +338,15 @@ def serve_operations(connection, *, root=Path('/')):
                     and '\x00' not in request[key] for key in ('request_id','nonce')),
             'REQUEST_SCHEMA_DENIED')
         compute='compute_request_id' in request
+        gateway='gateway_correlation' in request
+        require(not gateway or request['gateway_correlation'] is True,'GATEWAY_CORRELATION_REQUEST_DENIED')
         require(not compute or (request['branch']=='OPERATIONS'
             and isinstance(request['compute_request_id'],str)
             and 0<len(request['compute_request_id'])<=128 and '\x00' not in request['compute_request_id']),
             'COMPUTE_REQUEST_SCHEMA_DENIED')
         if compute:
-            installed,event=read_installed_compute_observation(request['compute_request_id'],root=root)
+            reader=read_installed_gateway_observation if gateway else read_installed_compute_observation
+            installed,event=reader(request['compute_request_id'],root=root)
         elif request['branch']=='INTERFACE':
             installed,event=read_installed_interface_observation(root=root,deadline=deadline)
         else:

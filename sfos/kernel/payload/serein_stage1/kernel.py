@@ -908,7 +908,7 @@ def serve_governed_connection(connection, *, client: str, peer_uid: int, peer_gi
                     gateway_call=lambda payload: handle_installed_companion(
                         payload, client=client, root=installed_root,
                         replay_store=replay_store, boundary=boundary,
-                        audit_call=audit_call, clock=clock), clock=clock)
+                        audit_call=audit_call, clock=clock), clock=clock, audit_call=audit_call)
                 return
         try:
             deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS

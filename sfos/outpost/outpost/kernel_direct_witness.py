@@ -21,6 +21,7 @@ import stat
 import struct
 import sys
 import time
+from uuid import UUID
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
@@ -34,6 +35,10 @@ BOOT = Path("/proc/sys/kernel/random/boot_id")
 ANCHOR = Path("/usr/share/serein/outpost/cognition-verification.pem")
 PHASE_A_CHECKS = ("implementation-identity", "blueprint-policy-integrity", "frame-identity",
                   "contract-containment", "authority-admission-policy", "unknown-trust-safe-recovery")
+STAGE1_PREDICATES = ("SEED_BOOT", "VM_BOUNDARY", "HAPROXY_GATEWAY_ACCESS",
+                     "AUTHENTICATED_MINIMUM_ROUTE", "COMPANION_KERNEL_ANSWER",
+                     "NO_PRIVATE_SERVICE_EXPOSURE", "ALTERNATE_INGRESS_DENIAL",
+                     "OPERATOR_RECOVERY")
 
 
 class KernelWitnessError(ValueError):
@@ -57,6 +62,207 @@ def digest(value):
 def require(value, reason):
     if not value:
         raise KernelWitnessError(reason)
+
+
+def _owner_verified(kind, value, verifier):
+    """Require an independent owner decision without trusting or mutating it."""
+    require(callable(verifier), 'KERNEL_STAGE1_PROVENANCE_DENIED')
+    before = record_bytes(value)
+    try:
+        accepted = verifier(kind, value)
+    except Exception as exc:
+        raise KernelWitnessError('KERNEL_STAGE1_PROVENANCE_DENIED') from exc
+    require(accepted is True and record_bytes(value) == before,
+            'KERNEL_STAGE1_PROVENANCE_DENIED')
+
+
+def _stage1_instant(value):
+    require(isinstance(value, str) and value.endswith('Z'),
+            'KERNEL_STAGE1_FRESHNESS_DENIED')
+    try:
+        result = datetime.fromisoformat(value[:-1] + '+00:00')
+    except ValueError as exc:
+        raise KernelWitnessError('KERNEL_STAGE1_FRESHNESS_DENIED') from exc
+    require(result.utcoffset() is not None, 'KERNEL_STAGE1_FRESHNESS_DENIED')
+    return result
+
+
+def validate_stage1_predicate_evidence(proofs, *, expected_source, boot_id,
+                                       observed_at, evidence_verifier):
+    """Validate the historical eight-predicate denominator, never admission."""
+    try:
+        expected_source = copy.deepcopy(expected_source)
+        require(isinstance(observed_at, datetime) and observed_at.utcoffset() is not None,
+                'KERNEL_STAGE1_PREDICATE_EVIDENCE_DENIED')
+        observed_at = observed_at.astimezone(timezone.utc)
+        require(isinstance(expected_source, dict) and set(expected_source) == {
+                    'generation', 'commit', 'tree', 'canonical_manifest_digest'}
+                and isinstance(expected_source['generation'], str)
+                and expected_source['generation'].strip()
+                and re.fullmatch('[0-9a-f]{40}', expected_source['commit'])
+                and re.fullmatch('[0-9a-f]{40}', expected_source['tree'])
+                and re.fullmatch('[0-9a-f]{64}', expected_source['canonical_manifest_digest'])
+                and isinstance(boot_id, str) and boot_id,
+                'KERNEL_STAGE1_PREDICATE_EVIDENCE_DENIED')
+        require(isinstance(proofs, dict) and set(proofs) == set(STAGE1_PREDICATES),
+                'KERNEL_STAGE1_PREDICATE_EVIDENCE_DENIED')
+        result = {}
+        fields = {'schema', 'predicate', 'verdict', 'boot_id', 'source_generation',
+                  'source_commit', 'source_tree', 'canonical_manifest_digest',
+                  'observed_at', 'provenance', 'verifier_identity', 'evidence_digest'}
+        for name in STAGE1_PREDICATES:
+            proof = copy.deepcopy(proofs[name])
+            require(isinstance(proof, dict) and set(proof) == fields
+                    and proof['schema'] == 'SereinStage1PredicateEvidence/v1'
+                    and proof['predicate'] == name and proof['verdict'] == 'PASS'
+                    and proof['boot_id'] == boot_id
+                    and proof['source_generation'] == expected_source['generation']
+                    and proof['source_commit'] == expected_source['commit']
+                    and proof['source_tree'] == expected_source['tree']
+                    and proof['canonical_manifest_digest'] == expected_source['canonical_manifest_digest']
+                    and isinstance(proof['provenance'], str) and proof['provenance']
+                    and isinstance(proof['verifier_identity'], str) and proof['verifier_identity']
+                    and proof['evidence_digest'] == hashlib.sha256(record_bytes(
+                        {key: value for key, value in proof.items()
+                         if key != 'evidence_digest'})).hexdigest(),
+                    'KERNEL_STAGE1_PREDICATE_EVIDENCE_DENIED')
+            stamp = _stage1_instant(proof['observed_at'])
+            require(stamp <= observed_at and (observed_at - stamp).total_seconds() <= 30,
+                    'KERNEL_STAGE1_PREDICATE_EVIDENCE_DENIED')
+            _owner_verified('predicate:' + name, proof, evidence_verifier)
+            result[name] = proof['evidence_digest']
+        return result
+    except KernelWitnessError:
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise KernelWitnessError('KERNEL_STAGE1_PREDICATE_EVIDENCE_DENIED') from exc
+
+
+def verify_stage1_candidate(*, supporting_observation, expected_source,
+                            predicate_evidence, gateway_correlation, haos_witness,
+                            evidence_verifier, observed_at,
+                            seen_external_request_ids):
+    """Compose an attributable current-boot candidate; never admit Stage 1."""
+    try:
+        support = copy.deepcopy(supporting_observation)
+        expected_source = copy.deepcopy(expected_source)
+        gateway = copy.deepcopy(gateway_correlation)
+        haos = copy.deepcopy(haos_witness)
+        require(isinstance(observed_at, datetime) and observed_at.utcoffset() is not None,
+                'KERNEL_STAGE1_CANDIDATE_DENIED')
+        observed_at = observed_at.astimezone(timezone.utc)
+        require(isinstance(support, dict)
+                and support.get('result') == 'STAGE1_SUPPORTING_EVIDENCE_AGGREGATED'
+                and support.get('stage1') == 'NOT_READY'
+                and support.get('admission') == 'UNADMITTED'
+                and support.get('authority_effect') == 'NONE'
+                and support.get('admission_effect') == 'NONE',
+                'KERNEL_STAGE1_SUPPORT_DENIED')
+        source = support.get('source')
+        validate_expected_source(source)
+        require(isinstance(expected_source, dict) and set(expected_source) == {
+                    'generation', 'commit', 'tree', 'canonical_manifest_digest'}
+                and isinstance(source, dict)
+                and source['source_commit'] == expected_source['commit']
+                and source['source_tree'] == expected_source['tree']
+                and source['canonical_manifest_digest'] == expected_source['canonical_manifest_digest'],
+                'KERNEL_STAGE1_SOURCE_DENIED')
+        boot_id = support.get('boot_id')
+        require(isinstance(boot_id, str) and boot_id,
+                'KERNEL_STAGE1_SOURCE_DENIED')
+        require(all(re.fullmatch('[0-9a-f]{64}', str(support.get(name, '')))
+                    for name in ('host_projection_digest', 'installed_evidence_sha256')),
+                'KERNEL_STAGE1_SOURCE_DENIED')
+        require(type(support.get('observed_at')) in (int, float),
+                'KERNEL_STAGE1_FRESHNESS_DENIED')
+        support_stamp = datetime.fromtimestamp(support['observed_at'], timezone.utc)
+        require(support_stamp <= observed_at
+                and (observed_at - support_stamp).total_seconds() <= 30,
+                'KERNEL_STAGE1_FRESHNESS_DENIED')
+        _owner_verified('installed_observations', support, evidence_verifier)
+        predicate_digests = validate_stage1_predicate_evidence(
+            predicate_evidence, expected_source=expected_source, boot_id=boot_id,
+            observed_at=observed_at, evidence_verifier=evidence_verifier)
+        require(isinstance(gateway, dict)
+                and isinstance(support.get('native'), dict)
+                and gateway == support['native'].get('compute')
+                and gateway.get('result') == 'NATIVE_HAOS_KERNEL_ANSWER_CORRELATED'
+                and gateway.get('stage1') == 'NOT_READY'
+                and gateway.get('admission') == 'UNADMITTED'
+                and gateway.get('authority_effect') == 'NONE'
+                and gateway.get('admission_effect') == 'NONE'
+                and gateway.get('evidence_authentication') == 'ROOT_CREATED_PRIVATE_LISTENER'
+                and gateway.get('haos_evidence_authentication') == 'SEPARATE_REQUIRED'
+                and gateway.get('external_request_content') ==
+                    'GATEWAY_OBSERVED_NOT_INDEPENDENTLY_ACQUIRED',
+                'KERNEL_STAGE1_GATEWAY_DENIED')
+        for name in ('public_response_sha256', 'runtime_result_sha256',
+                     'replay_consumption_sha256', 'haos_event_sha256',
+                     'haos_result_sha256'):
+            require(re.fullmatch('[0-9a-f]{64}', str(gateway.get(name, ''))),
+                    'KERNEL_STAGE1_GATEWAY_DENIED')
+        external_id = gateway.get('external_request_id')
+        internal_id = gateway.get('internal_request_id')
+        require(isinstance(seen_external_request_ids, (set, frozenset, list, tuple))
+                and all(isinstance(item, str) for item in seen_external_request_ids)
+                and len(seen_external_request_ids) == len(set(seen_external_request_ids))
+                and isinstance(external_id, str) and isinstance(internal_id, str)
+                and external_id != internal_id
+                and external_id not in seen_external_request_ids,
+                'KERNEL_STAGE1_REPLAY_DENIED')
+        external_uuid, internal_uuid = UUID(external_id), UUID(internal_id)
+        require(str(external_uuid) == external_id and str(internal_uuid) == internal_id
+                and external_uuid.version == internal_uuid.version == 4,
+                'KERNEL_STAGE1_REPLAY_DENIED')
+        require(isinstance(haos, dict) and set(haos) == {
+                    'schema', 'surface', 'integration', 'authenticated', 'request_id',
+                    'conversation_id', 'result', 'observed_at', 'public_response_sha256',
+                    'event_sha256', 'result_sha256', 'contradictions'}
+                and haos['schema'] == 'SereinHaosConversationWitness/v1'
+                and haos['surface'] == 'ACTUAL_HAOS_CONVERSATION_ENTITY'
+                and haos['integration'] == 'conversation.serein'
+                and haos['authenticated'] is True and haos['result'] == 'ANSWERED'
+                and haos['request_id'] == external_id
+                and haos['conversation_id'] == gateway.get('conversation_id')
+                and haos['public_response_sha256'] == gateway['public_response_sha256']
+                and haos['event_sha256'] == gateway['haos_event_sha256']
+                and haos['result_sha256'] == gateway['haos_result_sha256']
+                and haos['contradictions'] == [],
+                'KERNEL_STAGE1_HAOS_DENIED')
+        haos_stamp = _stage1_instant(haos['observed_at'])
+        require(haos_stamp <= observed_at
+                and (observed_at - haos_stamp).total_seconds() <= 30,
+                'KERNEL_STAGE1_FRESHNESS_DENIED')
+        _owner_verified('gateway_correlation', gateway, evidence_verifier)
+        _owner_verified('haos', haos, evidence_verifier)
+        replay_history = {'boot_id': boot_id, 'source_commit': expected_source['commit'],
+            'external_request_id': external_id,
+            'seen_request_ids': sorted(seen_external_request_ids)}
+        _owner_verified('replay_history', replay_history, evidence_verifier)
+        oldest = min([support_stamp, haos_stamp] +
+                     [_stage1_instant(predicate_evidence[name]['observed_at'])
+                      for name in STAGE1_PREDICATES])
+        result = {'schema': 'SEREIN/Stage1CurrentBootEvidence/v1',
+                  'result': 'STAGE1_READY_CANDIDATE', 'boot_id': boot_id,
+                  'source_generation': expected_source['generation'],
+                  'source_commit': expected_source['commit'],
+                  'source_tree': expected_source['tree'],
+                  'canonical_manifest_digest': expected_source['canonical_manifest_digest'],
+                  'host_projection_digest': support.get('host_projection_digest'),
+                  'installed_evidence_sha256': support.get('installed_evidence_sha256'),
+                  'supporting_observation_digest': hashlib.sha256(record_bytes(support)).hexdigest(),
+                  'predicate_evidence_digests': predicate_digests,
+                  'gateway_correlation_digest': hashlib.sha256(record_bytes(gateway)).hexdigest(),
+                  'haos_witness_digest': hashlib.sha256(record_bytes(haos)).hexdigest(),
+                  'observed_at': oldest.timestamp(),
+                  'stage1': 'READY_CANDIDATE', 'independent_validation': 'REQUIRED',
+                  'admission': 'UNADMITTED', 'authority_effect': 'NONE',
+                  'admission_effect': 'NONE'}
+        return {**result, 'candidate_digest': digest(result)}
+    except KernelWitnessError:
+        raise
+    except (KeyError, TypeError, ValueError, AttributeError, OSError, OverflowError) as exc:
+        raise KernelWitnessError('KERNEL_STAGE1_CANDIDATE_DENIED') from exc
 
 
 def compare_operations_response(raw, *, request, source, boot_id,
@@ -301,6 +507,168 @@ def compare_retained_compute_response(raw, *, query, source, installed_evidence_
     except KernelWitnessError:raise
     except (TransactionError,ValueError,TypeError,KeyError,AttributeError,OverflowError) as exc:
         raise KernelWitnessError('KERNEL_COMPUTE_READBACK_DENIED') from exc
+
+
+def compare_gateway_correlation_response(raw, *, query, source, boot_id,
+        installed_evidence_sha256, haos_event, haos_result, haos_manifest_sha256, observed_at,
+        model, model_digest):
+    """Join existing HAOS result/event to source-bound retained Kernel evidence.
+
+    This compares semantics only. The owner must acquire HAOS evidence through
+    authenticated native APIs and the Kernel response through its installed
+    private listener. No reconstructed prompt, caller PASS, signer or admission.
+    """
+    import base64
+    from uuid import UUID
+    try:
+        require(isinstance(raw,bytes) and 0<len(raw)<=65536,'GATEWAY_READBACK_SIZE_DENIED')
+        value=strict_json(raw)
+        query,source,event,result=copy.deepcopy((query,source,haos_event,haos_result))
+        validate_expected_source(source)
+        require(set(query)=={'schema','branch','request_id','nonce','previous_evidence_digest',
+                'compute_request_id','gateway_correlation'}
+            and query['schema']=='SEREIN/KernelBranchWitnessRequest/v1'
+            and query['branch']=='OPERATIONS' and query['gateway_correlation'] is True
+            and all(isinstance(query[k],str) and 0<len(query[k])<=128 and '\x00' not in query[k]
+                    for k in ('request_id','nonce','compute_request_id'))
+            and re.fullmatch('[0-9a-f]{64}',query['previous_evidence_digest'])
+            and re.fullmatch('[0-9a-f]{64}',installed_evidence_sha256)
+            and re.fullmatch('[0-9a-f]{64}',haos_manifest_sha256), 'GATEWAY_QUERY_DENIED')
+        require(set(value)=={'schema','domain','branch','issuer','verdict','issued_at',
+                'request_id','nonce','previous_evidence_digest','source_commit','source_tree',
+                'canonical_manifest_digest','boot_id','facts','facts_digest','uncertainty',
+                'authority_effect','evidence_digest'}
+            and value['schema']=='SEREIN/KernelBranchDirectWitness/v1'
+            and value['domain']=='KERNEL' and value['branch']=='OPERATIONS'
+            and value['issuer']=='KERNEL_BRANCH_API' and value['verdict']=='UNKNOWN'
+            and value['uncertainty']=='COMPUTE_DOMAIN_UNPROVEN'
+            and value['authority_effect']=='NONE' and value['boot_id']==boot_id
+            and all(value[k]==query[k] for k in ('request_id','nonce','previous_evidence_digest'))
+            and all(value[k]==source[k] for k in ('source_commit','source_tree','canonical_manifest_digest'))
+            and value['evidence_digest']==digest({k:v for k,v in value.items() if k!='evidence_digest'}),
+            'GATEWAY_SOURCE_BINDING_DENIED')
+        facts=value['facts'];retained=facts['observation']
+        require(set(facts)=={'source_commit','source_tree','canonical_manifest_digest','boot_id',
+                'observation','audit','phase_b','authority_effect','installed_evidence_sha256'}
+            and all(facts[k]==value[k] for k in ('source_commit','source_tree','canonical_manifest_digest','boot_id'))
+            and facts['installed_evidence_sha256']==installed_evidence_sha256
+            and facts['audit']=='RETAINED_BYTES_MATCH_AUTHENTICATED_REPLAY'
+            and facts['phase_b']=='UNPROVEN' and facts['authority_effect']=='NONE'
+            and value['facts_digest']==digest(facts),'GATEWAY_FACTS_DENIED')
+        require(set(retained)=={'state','observed_at','request_id','conversation_id','payload_sha256',
+                'request_sha256','runtime_response_b64','runtime_response_sha256','replay_consumption_sha256',
+                'authority_effect','admission_effect','stage1','gateway_correlation','gateway_response'}
+            and retained['state']=='AUTHENTICATED_RETAINED_COMPUTE_ONLY'
+            and retained['request_id']==query['compute_request_id']
+            and retained['authority_effect']==retained['admission_effect']=='NONE'
+            and retained['stage1']=='NOT_READY'
+            and all(re.fullmatch('[0-9a-f]{64}',retained[k]) for k in
+                ('payload_sha256','request_sha256','runtime_response_sha256','replay_consumption_sha256'))
+            and isinstance(retained['runtime_response_b64'],str)
+            and len(retained['runtime_response_b64'])<=43692,'GATEWAY_RETAINED_DENIED')
+        runtime_raw=base64.b64decode(retained['runtime_response_b64'],validate=True)
+        require(base64.b64encode(runtime_raw).decode()==retained['runtime_response_b64']
+            and hashlib.sha256(runtime_raw).hexdigest()==retained['runtime_response_sha256'],
+            'GATEWAY_RUNTIME_HASH_DENIED')
+        runtime=strict_json(runtime_raw);mapping=retained['gateway_correlation']
+        row=mapping['gateway_correlation'];terminal=retained['gateway_response']
+        require(set(mapping)=={'schema','request_id','status','reason','timestamp','gateway_correlation'}
+            and mapping['schema']=='SereinStage1Response/v1'
+            and mapping['request_id']=='gateway-correlation:'+retained['request_id']
+            and mapping['status']=='ANSWERED' and mapping['reason']=='gateway_haos_round_correlated',
+            'GATEWAY_MAPPING_EVENT_DENIED')
+        require(set(row)=={'external_request_id','internal_request_id','conversation_id',
+                'external_request_sha256','runtime_request_sha256','internal_response_sha256',
+                'public_response_sha256','external_request_content','authority_effect','effects'}
+            and row['internal_request_id']==retained['request_id']==runtime['request_id']
+            and row['conversation_id']==retained['conversation_id']==runtime['conversation_id']
+            and row['runtime_request_sha256']==retained['payload_sha256']
+            and row['external_request_content']=='GATEWAY_OBSERVED_NOT_INDEPENDENTLY_ACQUIRED'
+            and row['authority_effect']=='NONE' and row['effects']==[]
+            and all(re.fullmatch('[0-9a-f]{64}',row[k]) for k in
+                ('external_request_sha256','runtime_request_sha256','internal_response_sha256','public_response_sha256')),
+            'GATEWAY_MAPPING_DENIED')
+        internal=UUID(row['internal_request_id']);external=UUID(row['external_request_id'])
+        require(str(internal)==row['internal_request_id'] and internal.version==4
+            and str(external)==row['external_request_id'] and external.version==4
+            and internal!=external,'GATEWAY_ROUND_ID_DENIED')
+        require(runtime['schema']=='SereinStage1ConversationRuntimeResponse/v2'
+            and runtime['status']=='ANSWERED' and runtime['authority_effect']=='NONE'
+            and runtime['effects']==[] and runtime['continue_conversation'] is False
+            and runtime['completed_at']==retained['observed_at']
+            and runtime['invocation']=={'request_id':str(internal),'conversation_id':row['conversation_id'],
+                'runtime_request_sha256':retained['payload_sha256']},'GATEWAY_RUNTIME_BINDING_DENIED')
+        message=runtime['message']
+        require(isinstance(message,dict) and set(message)=={'role','content'}
+            and message['role']=='assistant' and isinstance(message['content'],str)
+            and 0<len(message['content'])<=4096 and '\x00' not in message['content'],
+            'GATEWAY_FINAL_ANSWER_DENIED')
+        measured=runtime['compute_observation']
+        require(isinstance(model,str) and model and re.fullmatch('[0-9a-f]{64}',model_digest)
+            and measured['schema']=='SereinCompanionComputeObservation/v2'
+            and measured['state']=='OBSERVED_NOT_CONTROL_OR_ADMISSION'
+            and measured['model']==model and measured['model_digest']==model_digest
+            and measured['provider']=='http://127.0.0.1:11434/api/chat'
+            and measured['invocation']==runtime['invocation']
+            and measured['authority_effect']==measured['admission_effect']=='NONE'
+            and all(measured[k] is False for k in ('alternate_provider_requested',
+                'alternate_model_requested','cpu_fallback_requested'))
+            and measured['gpu_control']==measured['runtime_cpu_fallback']=='UNPROVEN'
+            and measured['message_sha256']==hashlib.sha256(canonical(message)).hexdigest()
+            and measured['gpu_before']==measured['gpu_after']
+            and measured['gpu_after']['boot_id']==boot_id
+            and measured['model_residency_after']['model']==model
+            and measured['model_residency_after']['digest']==model_digest
+            and type(measured['model_residency_after']['size_vram']) is int
+            and measured['model_residency_after']['size_vram']>0,
+            'GATEWAY_COMPUTE_BINDING_DENIED')
+        for name in ('model_tags_before','model_tags_after'):
+            tags=measured[name]
+            require(isinstance(tags,dict) and set(tags)=={'models'} and len(tags['models'])==1
+                and tags['models'][0]['model']==model and tags['models'][0]['digest']==model_digest,
+                'GATEWAY_MODEL_DENIED')
+        projected={k:runtime[k] for k in ('message','continue_conversation','conversation_id','authority_effect','effects')}
+        require(set(terminal)=={'schema','request_id','status','reason','timestamp','result'}
+            and terminal['schema']=='SereinStage1Response/v1' and terminal['status']=='ANSWERED'
+            and terminal['request_id']==str(internal) and terminal['timestamp']==runtime['completed_at']
+            and canonical(terminal['result'])==canonical(projected)
+            and hashlib.sha256(record_bytes(terminal)).hexdigest()==row['internal_response_sha256'],
+            'GATEWAY_TERMINAL_DENIED')
+        public={'status':'ANSWERED','request_id':str(external),**projected}
+        require(hashlib.sha256(record_bytes(public)).hexdigest()==row['public_response_sha256'],
+            'GATEWAY_PUBLIC_HASH_DENIED')
+        require(set(event)=={'schema','installed_manifest_sha256','request_id','conversation_id',
+                'status','completed_at','rounds','authority_effect','effects'}
+            and event['schema']=='SereinGatewayCorrelation/v1'
+            and event['installed_manifest_sha256']==haos_manifest_sha256
+            and event['request_id']==str(external) and event['conversation_id']==row['conversation_id']
+            and event['status']=='ANSWERED' and event['authority_effect']=='NONE' and event['effects']==[]
+            and type(event['rounds']) is int and event['rounds']==1,'HAOS_CORRELATION_DENIED')
+        require(isinstance(result,dict) and set(result)=={'response','conversation_id','continue_conversation'}
+            and result['conversation_id']==row['conversation_id'] and result['continue_conversation'] is False
+            and result['response']['response_type']=='action_done'
+            and result['response']['speech']['plain']['speech']==message['content']
+            and result['response']['data']['success']==[] and result['response']['data']['failed']==[],
+            'HAOS_NATIVE_RESULT_DENIED')
+        stamps=[datetime.fromisoformat(item.replace('Z','+00:00')) for item in
+            (measured['started_at'],measured['completed_at'],runtime['completed_at'],
+             mapping['timestamp'],event['completed_at'],value['issued_at'])]
+        require(observed_at.utcoffset() is not None and all(s.utcoffset() is not None for s in stamps)
+            and stamps==sorted(stamps) and stamps[-1]<=observed_at
+            and (observed_at-stamps[0]).total_seconds()<=120
+            and (observed_at-stamps[-1]).total_seconds()<=30,'GATEWAY_CORRELATION_STALE')
+        return {'result':'NATIVE_HAOS_KERNEL_ANSWER_CORRELATED','subject_evidence':value,
+            'external_request_id':str(external),'internal_request_id':str(internal),
+            'conversation_id':row['conversation_id'],'public_response_sha256':row['public_response_sha256'],
+            'runtime_result_sha256':retained['runtime_response_sha256'],
+            'replay_consumption_sha256':retained['replay_consumption_sha256'],
+            'haos_event_sha256':digest(event),'haos_result_sha256':digest(result),
+            'external_request_content':row['external_request_content'],
+            'evidence_authentication':'SEPARATE_REQUIRED','stage1':'NOT_READY',
+            'admission':'UNADMITTED','authority_effect':'NONE','admission_effect':'NONE'}
+    except KernelWitnessError:raise
+    except (TransactionError,ValueError,TypeError,KeyError,AttributeError,OverflowError) as exc:
+        raise KernelWitnessError('GATEWAY_CORRELATION_DENIED') from exc
 
 
 def compare_public_conversation_response(raw, *, runtime_raw, expected_runtime_sha256, request,
@@ -920,7 +1288,7 @@ def observe_authority(*, source, identity, socket_path=SOCKET, boot_path=BOOT, a
 def observe_operations(*, source, identity, installed_evidence_sha256,
                        authority_observation, socket_path=OPERATIONS_SOCKET,
                        boot_path=BOOT, anchor_path=ANCHOR, host_path=HOST_STATE,
-                       interface_predecessor=None, compute_expectation=None):
+                       interface_predecessor=None, compute_expectation=None, gateway_expectation=None):
     """Read the donor private API after verifying the actual Authority witness.
 
     Socket-activation peer credentials attest the root-created listener, not
@@ -947,12 +1315,20 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
         and set(compute)=={'request','expected_provider_request_sha256','model','model_digest'}
         and isinstance(compute['request'],dict) and interface_predecessor is not None),
         'KERNEL_COMPUTE_EXPECTATION_DENIED')
-    branch='INTERFACE' if interface_predecessor is not None and compute is None else 'OPERATIONS'
+    gateway=copy.deepcopy(gateway_expectation)
+    require(gateway is None or (isinstance(gateway,dict)
+        and set(gateway)=={'compute_request_id','haos_event','haos_result','haos_manifest_sha256','model','model_digest'}
+        and isinstance(gateway['compute_request_id'],str) and 0<len(gateway['compute_request_id'])<=128
+        and '\x00' not in gateway['compute_request_id']
+        and compute is None and interface_predecessor is not None),
+        'GATEWAY_EXPECTATION_DENIED')
+    branch='INTERFACE' if interface_predecessor is not None and compute is None and gateway is None else 'OPERATIONS'
     request={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':branch,
         'request_id':'kernel-operations-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
         'previous_evidence_digest':interface_predecessor if interface_predecessor is not None
                                    else previous['observation_digest']}
     if compute is not None:request['compute_request_id']=compute['request']['request_id']
+    if gateway is not None:request.update(compute_request_id=gateway['compute_request_id'],gateway_correlation=True)
     account=pwd.getpwnam('serein-outpost');path=Path(socket_path)
     require(os.geteuid()==account.pw_uid,'OUTPOST_OBSERVER_IDENTITY_DENIED')
     require(not path.is_symlink() and all(not p.is_symlink() for p in path.parents),
@@ -984,7 +1360,11 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
         raise KernelWitnessError('KERNEL_TRANSPORT_UNAVAILABLE') from exc
     require(raw.endswith(b'\n') and len(raw)<=65536,'KERNEL_RESPONSE_FRAMING_DENIED')
     now=datetime.now(timezone.utc)
-    if compute is not None:
+    if gateway is not None:
+        result=compare_gateway_correlation_response(raw,query=request,source=source,boot_id=boot_id,
+            installed_evidence_sha256=installed_evidence_sha256,observed_at=now,
+            **{k:v for k,v in gateway.items() if k!='compute_request_id'})
+    elif compute is not None:
         result=compare_retained_compute_response(raw,query=request,source=source,boot_id=boot_id,
             installed_evidence_sha256=installed_evidence_sha256,observed_at=now,host_state=host,**compute)
     else:
@@ -998,6 +1378,10 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
     require(final_host['latest']['host']['machine_id']
             ==host['latest']['host']['machine_id'],'KERNEL_FRAME_IDENTITY_CHANGED')
     now=datetime.now(timezone.utc)
+    if gateway is not None:
+        result=compare_gateway_correlation_response(raw,query=request,source=source,boot_id=boot_id,
+            installed_evidence_sha256=installed_evidence_sha256,observed_at=now,
+            **{k:v for k,v in gateway.items() if k!='compute_request_id'})
     if compute is not None:
         result=compare_retained_compute_response(raw,query=request,source=source,boot_id=boot_id,
             installed_evidence_sha256=installed_evidence_sha256,observed_at=now,
@@ -1006,6 +1390,7 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
         request=prior_request,boot_id=boot_id,observed_at=now,
         anchor=anchor,host_machine_id=host['latest']['host']['machine_id'])
     return {**result,'evidence_authentication':'ROOT_CREATED_PRIVATE_LISTENER',
+            **({'haos_evidence_authentication':'SEPARATE_REQUIRED'} if gateway is not None else {}),
             'native_identity_possession':'NOT_ESTABLISHED_BY_'+branch,
             'request':request,'observed_at':now.isoformat(),
             'subject_bytes_sha256':hashlib.sha256(raw).hexdigest()}
@@ -1020,14 +1405,32 @@ def kernel_vitals_projection(observation, *, outpost_generation, kernel_generati
     A self digest is an integrity reference, never a signature or admission.
     """
     from .vitals_aggregation import producer_observation
-    require(isinstance(observation, dict) and
-            observation.get('result') == 'STAGE1_SUPPORTING_EVIDENCE_AGGREGATED' and
-            observation.get('stage1') == 'NOT_READY' and
-            observation.get('admission') == 'UNADMITTED' and
-            observation.get('authority_effect') == 'NONE' and
-            observation.get('admission_effect') == 'NONE', 'VITALS_NATIVE_OBSERVATION_DENIED')
-    source = observation.get('source')
+    require(isinstance(observation, dict)
+            and observation.get('admission') == 'UNADMITTED'
+            and observation.get('authority_effect') == 'NONE'
+            and observation.get('admission_effect') == 'NONE',
+            'VITALS_NATIVE_OBSERVATION_DENIED')
+    candidate = observation.get('result') == 'STAGE1_READY_CANDIDATE'
+    require((candidate and observation.get('stage1') == 'READY_CANDIDATE'
+             and observation.get('independent_validation') == 'REQUIRED'
+             and observation.get('schema') == 'SEREIN/Stage1CurrentBootEvidence/v1'
+             and observation.get('candidate_digest') == digest(
+                 {key: value for key, value in observation.items()
+                  if key != 'candidate_digest'}))
+            or (not candidate
+                and observation.get('result') == 'STAGE1_SUPPORTING_EVIDENCE_AGGREGATED'
+                and observation.get('stage1') == 'NOT_READY'),
+            'VITALS_NATIVE_OBSERVATION_DENIED')
+    source = ({'source_commit': observation.get('source_commit'),
+               'source_tree': observation.get('source_tree'),
+               'canonical_manifest_digest': observation.get('canonical_manifest_digest')}
+              if candidate else observation.get('source'))
     require(isinstance(source, dict), 'VITALS_NATIVE_SOURCE_DENIED')
+    if candidate:
+        require(tuple(observation.get('predicate_evidence_digests', {})) == STAGE1_PREDICATES
+                and all(re.fullmatch('[0-9a-f]{64}', str(value))
+                        for value in observation['predicate_evidence_digests'].values()),
+                'VITALS_NATIVE_OBSERVATION_DENIED')
     fields = {
         'domain': 'KERNEL', 'outpost_generation': outpost_generation,
         'kernel_generation': kernel_generation,
@@ -1036,8 +1439,13 @@ def kernel_vitals_projection(observation, *, outpost_generation, kernel_generati
         'host_projection_digest': observation.get('host_projection_digest'),
         'installed_evidence_sha256': observation.get('installed_evidence_sha256'),
         'observation_digest': hashlib.sha256(record_bytes(observation)).hexdigest(),
-        'stage1': 'NOT_READY', 'admission': 'UNADMITTED',
+        'stage1': 'READY_CANDIDATE' if candidate else 'NOT_READY',
+        'admission': 'UNADMITTED',
     }
+    if candidate:
+        fields.update(independent_validation='REQUIRED',
+                      predicate_evidence_digests=copy.deepcopy(
+                          observation['predicate_evidence_digests']))
     for name in ('outpost_generation', 'kernel_generation', 'canonical_manifest_digest',
                  'host_projection_digest', 'installed_evidence_sha256', 'observation_digest',
                  'source_commit', 'source_tree'):
@@ -1046,8 +1454,9 @@ def kernel_vitals_projection(observation, *, outpost_generation, kernel_generati
                 re.fullmatch('[0-9a-f]{' + str(width) + '}', fields[name]) is not None,
                 'VITALS_NATIVE_SOURCE_DENIED')
     return producer_observation(perspective='serein', producer='OUTPOST_DOMAIN_OBSERVER',
-        claim='STAGE1_SUPPORTING_EVIDENCE_AGGREGATED',
-        observed_at=observation['observed_at'], boot_id=observation['boot_id'],
+        claim='STAGE1_READY_CANDIDATE' if candidate else 'STAGE1_SUPPORTING_EVIDENCE_AGGREGATED',
+        observed_at=observation['observed_at'],
+        boot_id=observation['boot_id'],
         evidence_ref='outpost-native:stage1:' + fields['observation_digest'], payload=fields)
 
 def main():
@@ -1061,12 +1470,15 @@ def main():
         raise KernelWitnessError("KERNEL_EXPECTED_SOURCE_DENIED") from exc
     require(isinstance(envelope, dict), "KERNEL_EXPECTED_SOURCE_DENIED")
     common={'source','identity','installed_evidence_sha256','authority_observation'}
-    if set(envelope) in (common,common|{'interface_predecessor'},common|{'interface_predecessor','compute_expectation'}):
-        require('compute_expectation' not in envelope or sys.argv[1]=='-', 'KERNEL_PRIVATE_COMPUTE_INPUT_REQUIRED')
+    if set(envelope) in (common,common|{'interface_predecessor'},
+            common|{'interface_predecessor','compute_expectation'},
+            common|{'interface_predecessor','gateway_expectation'}):
+        require(not {'compute_expectation','gateway_expectation'}&set(envelope)
+                or sys.argv[1]=='-', 'KERNEL_PRIVATE_COMPUTE_INPUT_REQUIRED')
         result=observe_operations(source=envelope['source'],identity=envelope['identity'],
             installed_evidence_sha256=envelope['installed_evidence_sha256'],
             authority_observation=record_bytes(envelope['authority_observation']),
-            **{key:envelope[key] for key in ('interface_predecessor','compute_expectation') if key in envelope})
+            **{key:envelope[key] for key in ('interface_predecessor','compute_expectation','gateway_expectation') if key in envelope})
     else:
         require(set(envelope)=={'source','request','identity'}, 'KERNEL_EXPECTED_SOURCE_DENIED')
         result = observe_authority(source=envelope["source"], request=envelope["request"],

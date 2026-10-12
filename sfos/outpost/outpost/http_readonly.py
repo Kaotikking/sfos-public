@@ -35,16 +35,20 @@ def _kernel_observation_summary(snapshot):
  observations=snapshot.get("sections",{}).get("serein",{}).get("perspectives",[])
  for observation in observations:
   if observation.get("producer")!="OUTPOST_DOMAIN_OBSERVER":continue
-  if observation.get("claim")!="STAGE1_SUPPORTING_EVIDENCE_AGGREGATED":continue
+  claim=observation.get("claim")
+  if claim not in {"STAGE1_SUPPORTING_EVIDENCE_AGGREGATED","STAGE1_READY_CANDIDATE"}:continue
   public=observation.get("payload",{})
-  if public.get("stage1")!="NOT_READY" or public.get("admission")!="UNADMITTED":continue
+  candidate=claim=="STAGE1_READY_CANDIDATE"
+  if public.get("stage1")!=("READY_CANDIDATE" if candidate else "NOT_READY") or public.get("admission")!="UNADMITTED":continue
+  if candidate and public.get("independent_validation")!="REQUIRED":continue
   fields=(("Outpost generation","outpost_generation"),("Kernel generation","kernel_generation"),
           ("Source commit","source_commit"),("Source tree","source_tree"),
           ("Observation digest","observation_digest"))
   evidence="".join("<p>"+label+": "+_status(public.get(key))+".</p>" for label,key in fields)
-  articles.append("<article aria-label='Kernel supporting observation'><h3>Kernel supporting observation</h3>"
-   "<p>Stage 1: NOT_READY. Admission: UNADMITTED. Supporting evidence is not independent acceptance.</p>"
-   +evidence+"</article>")
+  heading="Stage 1 candidate witness" if candidate else "Kernel supporting observation"
+  state=("<p>Stage 1: READY_CANDIDATE. Admission: UNADMITTED. Independent validation is REQUIRED; this witness is not admission.</p>"
+         if candidate else "<p>Stage 1: NOT_READY. Admission: UNADMITTED. Supporting evidence is not independent acceptance.</p>")
+  articles.append("<article aria-label='"+heading+"'><h3>"+heading+"</h3>"+state+evidence+"</article>")
  return "".join(articles)
 
 def _recovery_summary(snapshot):

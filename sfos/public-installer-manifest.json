@@ -121,8 +121,8 @@
     },
     {
       "path": "outpost/install/kernel_first_install_runner.py",
-      "sha256": "6c5d1eec6fa5b5c6937dcc2438ff4ba5beba8505160e60b6028671ae007e0a01",
-      "bytes": 212021
+      "sha256": "efa131d9fbf91a65a938f2c2e09040901ceecd4ba0c67530d663f3902c958070",
+      "bytes": 220851
     },
     {
       "path": "outpost/install/public_generation_transaction.py",
@@ -171,13 +171,13 @@
     },
     {
       "path": "outpost/outpost/http_readonly.py",
-      "sha256": "2416cb4e1fca7ca6ade5e70910a8abf4e012a30880f457e411a7b7b419ec6ad0",
-      "bytes": 15539
+      "sha256": "f9e5e6cf9631279f3a74ab4fc2ae46a0519811b5d07d4685d8653e976ee51a03",
+      "bytes": 15958
     },
     {
       "path": "outpost/outpost/kernel_direct_witness.py",
-      "sha256": "487da22409cb4fd3d48441a27d1d8554d546d2008021ccfaffdf3128227a6be8",
-      "bytes": 72897
+      "sha256": "93d3014c9974fa13899cf173410d7cd406f5543fc7f8b50d7f437701d01cb0eb",
+      "bytes": 100954
     },
     {
       "path": "outpost/outpost/presentation_service.py",
@@ -211,8 +211,8 @@
     },
     {
       "path": "outpost/outpost/vitals_runtime.py",
-      "sha256": "828e064542821cf3345d7501864aaa886ddec25117775e9176ab074d423fa0db",
-      "bytes": 21312
+      "sha256": "a35d5f990fc330f16ffdbec879cd600a847b2089e3a36beacaacdf9f5e05b075",
+      "bytes": 22032
     },
     {
       "path": "outpost/outpost/watchdog.py",
@@ -221,8 +221,8 @@
     },
     {
       "path": "outpost/release-manifest.json",
-      "sha256": "f965699021e25e19f1697eb6dd036f0632dc6945e72d3ee466c1ec536b4d2c71",
-      "bytes": 5883
+      "sha256": "6a5c7593a6ec21f98f260273f3848693b9eb6c8f1169c7e10b1fa265613b8e03",
+      "bytes": 5884
     },
     {
       "path": "outpost/systemd/serein-https-gateway-adapter.service",
@@ -260,5 +260,5 @@
       "bytes": 10463
     }
   ],
-  "self_digest": "sha256:205063c34410841e9cc478bce9c012644df9135a27574bc1191ce02815c4324a"
+  "self_digest": "sha256:4612161c5b856dc52ff40f9d7ce54161fe5cc35f1e6f5df8fbe37767e629587d"
 }

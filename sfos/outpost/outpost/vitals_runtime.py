@@ -125,7 +125,7 @@ def _running_generation():
 
 
 def validate_kernel_vitals_projection(value, *, generation_identity, boot_id, observed_at):
-    """Check the existing public supporting-evidence contract, without admission."""
+    """Check bounded supporting/candidate evidence; neither grants admission."""
     projection = validate_producer(value)
     _validate_generation_identity(generation_identity)
     details = projection["payload"]
@@ -137,9 +137,13 @@ def validate_kernel_vitals_projection(value, *, generation_identity, boot_id, ob
     constants = {"domain": "KERNEL", "outpost_generation": generation_identity["generation"],
                  "stage1": "NOT_READY", "admission": "UNADMITTED"}
     allowed = set(hex_fields) | set(constants)
+    candidate = projection["claim"] == "STAGE1_READY_CANDIDATE"
+    if candidate:
+        constants.update(stage1="READY_CANDIDATE", independent_validation="REQUIRED")
+        allowed = set(hex_fields) | set(constants) | {"predicate_evidence_digests"}
     valid = (projection["producer"] == "OUTPOST_DOMAIN_OBSERVER"
              and projection["perspective"] == "serein"
-             and projection["claim"] == "STAGE1_SUPPORTING_EVIDENCE_AGGREGATED"
+             and projection["claim"] in {"STAGE1_SUPPORTING_EVIDENCE_AGGREGATED", "STAGE1_READY_CANDIDATE"}
              and projection["boot_id"] == boot_id
              and 0 <= observed_at - projection["observed_at"] <= 30
              and isinstance(details, dict) and set(details) == allowed)
@@ -149,6 +153,12 @@ def validate_kernel_vitals_projection(value, *, generation_identity, boot_id, ob
                               re.fullmatch("[0-9a-f]{" + str(width) + "}", details[key])
                               for key, width in hex_fields.items())
         valid = valid and projection["evidence_ref"] == "outpost-native:stage1:" + details["observation_digest"]
+        if valid and candidate:
+            from .kernel_direct_witness import STAGE1_PREDICATES
+            predicates = details["predicate_evidence_digests"]
+            valid = (isinstance(predicates, dict) and set(predicates) == set(STAGE1_PREDICATES)
+                     and all(isinstance(value, str) and re.fullmatch("[0-9a-f]{64}", value)
+                             for value in predicates.values()))
     if not valid:
         raise VitalsRuntimeError("VITALS_KERNEL_PROJECTION_DENIED")
     return projection
@@ -349,7 +359,7 @@ class VitalsRuntimeStore:
             sources.setdefault("recovery", []).append(observation)
         finished = time.time()
         for index, item in enumerate(sources.get("serein", [])):
-            if item["claim"] != "STAGE1_SUPPORTING_EVIDENCE_AGGREGATED":
+            if item["claim"] not in {"STAGE1_SUPPORTING_EVIDENCE_AGGREGATED", "STAGE1_READY_CANDIDATE"}:
                 continue
             try:
                 selected = coordinator["generation_identity"]

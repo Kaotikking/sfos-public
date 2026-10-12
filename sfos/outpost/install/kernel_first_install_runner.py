@@ -1294,6 +1294,70 @@ def observe_installed_compute(plan,receipt,authority_observation,operations,inte
  return _observe_installed_branch(plan,receipt,(authority_observation,operations,interface,expectation),branch='COMPUTE')
 
 
+def prepare_gateway_observation(plan,receipt,authority_observation,operations,interface,expectation):
+ """Same private observer, with metadata from the governed HAOS API proxy.
+
+ No new signer or caller PASS. Native acquisition authentication is a separate
+ required fact; this material alone cannot admit Stage 1.
+ """
+ expectation=strict_json(canonical(expectation))
+ deny(not isinstance(expectation,dict) or set(expectation)!=
+      {'compute_request_id','haos_event','haos_result','haos_manifest_sha256'},
+      'GATEWAY_EXPECTATION_DENIED')
+ deny(len(canonical(expectation))>16384,'GATEWAY_EXPECTATION_BOUND_DENIED')
+ envelope=prepare_interface_observation(plan,receipt,authority_observation,operations)
+ verified=_compare_interface_observation(plan,envelope,canonical(interface))
+ deny(verified!=interface,'KERNEL_COMPUTE_INTERFACE_PREDECESSOR_DENIED')
+ return {**envelope,'interface_predecessor':sha(canonical(interface)),
+         'gateway_expectation':{**expectation,**_bind_compute_model(plan,SOURCE)}}
+
+
+def consume_gateway_observation(plan,receipt,authority_observation,operations,interface,expectation,raw):
+ from datetime import datetime,timezone
+ from outpost.kernel_direct_witness import compare_gateway_correlation_response
+ envelope=prepare_gateway_observation(plan,receipt,authority_observation,operations,interface,expectation)
+ deny(not isinstance(raw,bytes) or not 0<len(raw)<=65536,'GATEWAY_OUTPUT_DENIED')
+ value=strict_json(raw)
+ deny(not isinstance(value,dict) or canonical(value)!=raw,'GATEWAY_OUTPUT_DENIED')
+ request=value.get('request')
+ deny(not isinstance(request,dict) or request.get('previous_evidence_digest')!=envelope['interface_predecessor']
+      or request.get('compute_request_id')!=expectation['compute_request_id'],
+      'GATEWAY_PREDECESSOR_DENIED')
+ host=current_host_gate(HOST_STATE,plan['current_boot_id'])
+ boot=current_boot();controls=read_operations_service_controls();anchor=regular(VERIFY_KEY)
+ deny(boot!=plan['current_boot_id'] or controls!=operations['service_controls'],
+      'KERNEL_OPERATIONS_PROCESS_CHANGED')
+ now=datetime.now(timezone.utc)
+ deny(_compare_operations_lifecycle(plan,authority_observation,operations['observations'],
+      controls,envelope=envelope,boot=boot,anchor=anchor,now=now)!=operations,
+      'KERNEL_COMPUTE_OPERATIONS_PREDECESSOR_DENIED')
+ deny(_compare_interface_observation(plan,
+      {**envelope,'interface_predecessor':sha(canonical(operations))},canonical(interface))!=interface,
+      'KERNEL_COMPUTE_INTERFACE_PREDECESSOR_DENIED')
+ # Timestamp sampled after prerequisite reads. No returned timestamp renews
+ # the actual native conversation or the earlier Authority/O/I evidence.
+ now=datetime.now(timezone.utc)
+ try:stamp=datetime.fromisoformat(value['observed_at'].replace('Z','+00:00'))
+ except (ValueError,TypeError,KeyError,AttributeError) as exc:raise RunnerDenied('GATEWAY_CLOCK_DENIED') from exc
+ deny(stamp.utcoffset() is None or not 0<=(now-stamp).total_seconds()<=30,'GATEWAY_STALE')
+ subject=canonical(value['subject_evidence'])
+ compared=compare_gateway_correlation_response(subject,query=request,source=envelope['source'],
+     installed_evidence_sha256=envelope['installed_evidence_sha256'],boot_id=boot,observed_at=now,
+     **{k:v for k,v in envelope['gateway_expectation'].items() if k!='compute_request_id'})
+ expected={**compared,'evidence_authentication':'ROOT_CREATED_PRIVATE_LISTENER',
+     'haos_evidence_authentication':'SEPARATE_REQUIRED',
+     'native_identity_possession':'NOT_ESTABLISHED_BY_OPERATIONS','request':request,
+     'observed_at':value['observed_at'],'subject_bytes_sha256':sha(subject)}
+ deny(value!=expected,'GATEWAY_OUTPUT_DENIED')
+ return value
+
+
+def observe_installed_gateway(plan,receipt,authority_observation,operations,interface,expectation):
+ """Read-only existing Outpost identity/launcher road, never a domain effect."""
+ return _observe_installed_branch(plan,receipt,
+     (authority_observation,operations,interface,expectation),branch='GATEWAY')
+
+
 def read_authority_unit_prestate(*,cleanup=False):
  """Read only the two existing Authority units before ordered construction.
 
@@ -2188,7 +2252,7 @@ def _observe_installed_branch(plan,receipt,prior,*,branch):
  import selectors,subprocess,time
  from .generation_launcher import read_selector
  deny(os.geteuid()!=0,'KERNEL_OBSERVER_CALLER_DENIED')
- deny(branch not in {'AUTHORITY','OPERATIONS','INTERFACE','COMPUTE'},'KERNEL_OBSERVER_BRANCH_DENIED')
+ deny(branch not in {'AUTHORITY','OPERATIONS','INTERFACE','COMPUTE','GATEWAY'},'KERNEL_OBSERVER_BRANCH_DENIED')
  plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt))
  if branch=='AUTHORITY':
   prior=strict_json(canonical(prior))
@@ -2197,6 +2261,8 @@ def _observe_installed_branch(plan,receipt,prior,*,branch):
   envelope=prepare_interface_observation(plan,receipt,*prior)
  elif branch=='COMPUTE':
   envelope=prepare_compute_observation(plan,receipt,*prior)
+ elif branch=='GATEWAY':
+  envelope=prepare_gateway_observation(plan,receipt,*prior)
  else:
   envelope=prepare_operations_observation(plan,receipt,prior)
  encoded=canonical(envelope)
@@ -2227,8 +2293,8 @@ def _observe_installed_branch(plan,receipt,prior,*,branch):
  process=None
  try:
   process=subprocess.Popen([str(launcher),'outpost/kernel_direct_witness.py',
-      '-' if branch=='COMPUTE' else encoded.decode('utf-8')],
-      stdin=subprocess.PIPE if branch=='COMPUTE' else subprocess.DEVNULL,
+      '-' if branch in {'COMPUTE','GATEWAY'} else encoded.decode('utf-8')],
+      stdin=subprocess.PIPE if branch in {'COMPUTE','GATEWAY'} else subprocess.DEVNULL,
       stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
       cwd='/',env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','PYTHONDONTWRITEBYTECODE':'1'},
       shell=False,close_fds=True,user=account['uid'],group=account['gid'],extra_groups=(),umask=0o077)
@@ -2277,6 +2343,7 @@ def _observe_installed_branch(plan,receipt,prior,*,branch):
  if branch=='AUTHORITY':result=consume_authority_observation(plan,receipt,prior,raw)
  elif branch=='INTERFACE':result=consume_interface_observation(plan,receipt,*prior,raw)
  elif branch=='COMPUTE':result=consume_compute_observation(plan,receipt,*prior,raw)
+ elif branch=='GATEWAY':result=consume_gateway_observation(plan,receipt,*prior,raw)
  else:result=consume_operations_observation(plan,receipt,prior,raw)
  boundary()
  deny(time.monotonic()>=deadline,'KERNEL_OBSERVER_DEADLINE_DENIED')
@@ -3160,13 +3227,18 @@ def _native_observer_generation():
 
 
 def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,*,
-                           read_public_request=None,read_public_response=None):
+                           read_public_request=None,read_public_response=None,gateway_expectation=None):
  """Read existing native subjects only; construction and admission stay separate."""
  import secrets,time
  from datetime import datetime,timezone
- from outpost.kernel_direct_witness import compare_retained_compute_response
+ from outpost.kernel_direct_witness import compare_retained_compute_response,compare_gateway_correlation_response
  plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt))
- expectation=_compute_expectation(expectation)
+ gateway=gateway_expectation is not None
+ if gateway:
+  deny(expectation is not None or read_public_request is not None or read_public_response is not None,
+       'GATEWAY_EXPECTATION_CONFLICT')
+  gateway_expectation=strict_json(canonical(gateway_expectation))
+ else:expectation=_compute_expectation(expectation)
  preserved_runtime=strict_json(canonical(preserved_runtime))
  deny(not isinstance(preserved_runtime,dict) or not preserved_runtime,
       'KERNEL_PRESERVED_RUNTIME_REQUIRED')
@@ -3200,7 +3272,7 @@ def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,*
  boundary()
  anchor=regular(VERIFY_KEY)
  host=current_host_gate(HOST_STATE,boot)
- expectation=_bind_compute_model(plan,SOURCE,expectation)
+ if not gateway:expectation=_bind_compute_model(plan,SOURCE,expectation)
  challenge={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':'AUTHORITY',
      'request_id':'kernel-authority-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
      'previous_evidence_digest':'GENESIS'}
@@ -3211,13 +3283,18 @@ def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,*
  deny(operations.get('result')!='OPERATIONS_MINIMUM_OBSERVED','KERNEL_COMPUTE_OPERATIONS_UNPROVEN')
  interface=observe_installed_interface(plan,receipt,authority_raw,operations)
  deny(interface.get('result')!='PRIVATE_INTERFACE_DENIAL_CORRELATED','KERNEL_COMPUTE_INTERFACE_UNPROVEN')
- compute=observe_installed_compute(plan,receipt,authority_raw,operations,interface,expectation)
- deny(compute.get('result')!='MEASURED_COMPUTE_CORRELATED','KERNEL_COMPUTE_UNPROVEN')
+ if gateway:
+  compute=observe_installed_gateway(plan,receipt,authority_raw,operations,interface,gateway_expectation)
+  deny(compute.get('result')!='NATIVE_HAOS_KERNEL_ANSWER_CORRELATED','GATEWAY_UNPROVEN')
+ else:
+  compute=observe_installed_compute(plan,receipt,authority_raw,operations,interface,expectation)
+  deny(compute.get('result')!='MEASURED_COMPUTE_CORRELATED','KERNEL_COMPUTE_UNPROVEN')
  preparation={'offline_preparation':None,'preserved_runtime':preserved_runtime}
  gpu=_observe_owned_gpu(plan,compute,preparation,signed_runtime_plan=None,boundary=boundary)
  # The original observations must survive the final source/installed-closure
  # comparison. This does not create a conversation or renew any timestamp.
- envelope=prepare_compute_observation(plan,receipt,authority_raw,operations,interface,expectation)
+ envelope=(prepare_gateway_observation(plan,receipt,authority_raw,operations,interface,gateway_expectation)
+           if gateway else prepare_compute_observation(plan,receipt,authority_raw,operations,interface,expectation))
  deny(_observe_owned_gpu(plan,compute,preparation,signed_runtime_plan=None,boundary=boundary)!=gpu,
       'KERNEL_GPU_INVENTORY_CHANGED')
  fresh=current_host_gate(HOST_STATE,boot)
@@ -3253,11 +3330,18 @@ def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,*
       'KERNEL_COMPUTE_OPERATIONS_PREDECESSOR_DENIED')
  deny(_compare_interface_observation(plan,{**envelope,'interface_predecessor':sha(canonical(operations))},
       canonical(interface))!=interface,'KERNEL_COMPUTE_INTERFACE_PREDECESSOR_DENIED')
- compared=compare_retained_compute_response(canonical(compute['subject_evidence']),
+ if gateway:
+  compared=compare_gateway_correlation_response(canonical(compute['subject_evidence']),
+      query=compute['request'],source=envelope['source'],boot_id=boot,observed_at=clock,
+      installed_evidence_sha256=envelope['installed_evidence_sha256'],
+      **{k:v for k,v in envelope['gateway_expectation'].items() if k!='compute_request_id'})
+ else:
+  compared=compare_retained_compute_response(canonical(compute['subject_evidence']),
       query=compute['request'],source=envelope['source'],
       installed_evidence_sha256=envelope['installed_evidence_sha256'],boot_id=boot,
       observed_at=clock,host_state=fresh,**expectation)
  expected={**compared,'evidence_authentication':'ROOT_CREATED_PRIVATE_LISTENER',
+      **({'haos_evidence_authentication':'SEPARATE_REQUIRED'} if gateway else {}),
       'native_identity_possession':'NOT_ESTABLISHED_BY_OPERATIONS','request':compute['request'],
       'observed_at':compute['observed_at'],'subject_bytes_sha256':sha(canonical(compute['subject_evidence']))}
  deny(expected!=compute,'KERNEL_COMPUTE_OUTPUT_DENIED')
@@ -3270,15 +3354,62 @@ def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,*
      'stage1':'NOT_READY','admission':'UNADMITTED','authority_effect':'NONE','admission_effect':'NONE'}
 
 
+def _stage1_candidate(observation,plan,evidence,verifier):
+ """Compose the native owner's result with separately authenticated facts.
+
+ The callback belongs to the authenticated API acquisition owner. Evidence
+ labels, hashes and local file custody do not implement that authentication.
+ This function neither creates acquisition facts nor admits a lifecycle state.
+ """
+ from datetime import datetime,timezone
+ from outpost.kernel_direct_witness import verify_stage1_candidate
+ deny(not callable(verifier) or not isinstance(evidence,dict)
+      or set(evidence)!={'predicate_evidence','haos_witness','seen_external_request_ids'},
+      'STAGE1_EXTERNAL_EVIDENCE_REQUIRED')
+ raw=canonical(evidence)
+ deny(not 0<len(raw)<=65536,'STAGE1_EXTERNAL_EVIDENCE_SIZE_DENIED')
+ bound=strict_json(raw)
+ seen=bound['seen_external_request_ids']
+ deny(not isinstance(seen,list) or any(not isinstance(value,str) or not value or len(value)>128
+      for value in seen) or len(set(seen))!=len(seen),'STAGE1_REPLAY_HISTORY_DENIED')
+ release=plan.get('release_digest')
+ deny(not isinstance(release,str) or not re.fullmatch('sha256:[0-9a-f]{64}',release),
+      'KERNEL_OBSERVATION_PLAN_DENIED')
+ expected={'generation':release[7:],'commit':plan.get('source_commit'),
+      'tree':plan.get('source_tree'),
+      'canonical_manifest_digest':observation['source']['canonical_manifest_digest']}
+ result=verify_stage1_candidate(supporting_observation=observation,expected_source=expected,
+      predicate_evidence=bound['predicate_evidence'],
+      gateway_correlation=observation['native']['compute'],haos_witness=bound['haos_witness'],
+      evidence_verifier=verifier,observed_at=datetime.now(timezone.utc),
+      seen_external_request_ids=frozenset(seen))
+ deny(canonical(evidence)!=raw,'STAGE1_EXTERNAL_EVIDENCE_CHANGED')
+ return result
+
+
 def observe_installed_stage1(plan,receipt,expectation,*,preserved_runtime,
-                             read_public_request=None,read_public_response=None):
+                             read_public_request=None,read_public_response=None,gateway_expectation=None,
+                             stage1_evidence=None,evidence_verifier=None):
  """Explicit root/PVE one-shot read; never the construction CLI or admission."""
  plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt))
- expectation=strict_json(canonical(expectation));preserved_runtime=strict_json(canonical(preserved_runtime))
+ expectation=None if expectation is None else strict_json(canonical(expectation))
+ preserved_runtime=strict_json(canonical(preserved_runtime))
  selected=_native_observer_generation()
+ deny((stage1_evidence is None)!=(evidence_verifier is None)
+      or (stage1_evidence is not None and gateway_expectation is None),
+      'STAGE1_EXTERNAL_EVIDENCE_REQUIRED')
  with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')):
-  return _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,
-      read_public_request=read_public_request,read_public_response=read_public_response)
+  observation=_read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,
+      read_public_request=read_public_request,read_public_response=read_public_response,
+      **({'gateway_expectation':gateway_expectation} if gateway_expectation is not None else {}))
+  if stage1_evidence is None:return observation
+  result=_stage1_candidate(observation,plan,stage1_evidence,evidence_verifier)
+  deny(_native_observer_generation()!=selected or current_boot()!=observation['boot_id']
+       or current_host_gate(HOST_STATE,observation['boot_id'])['projection_digest']
+          !=observation['host_projection_digest'],'KERNEL_OBSERVATION_PRESTATE_CHANGED')
+  deny(_stage1_candidate(observation,plan,stage1_evidence,evidence_verifier)!=result,
+       'STAGE1_EXTERNAL_EVIDENCE_CHANGED')
+  return result
 
 
 def _write_native_vitals(path,value,*,boundary):
@@ -3358,7 +3489,8 @@ def _write_native_vitals(path,value,*,boundary):
 
 
 def publish_installed_stage1_vitals(plan,receipt,expectation,*,preserved_runtime,
-                                    read_public_request=None,read_public_response=None):
+                                    read_public_request=None,read_public_response=None,gateway_expectation=None,
+                                    stage1_evidence=None,evidence_verifier=None):
  """Governed root one-shot: observe itself, then publish only public evidence.
 
  No uploaded observation is accepted and no service, source, key or admission
@@ -3368,15 +3500,22 @@ def publish_installed_stage1_vitals(plan,receipt,expectation,*,preserved_runtime
  import time
  from outpost.kernel_direct_witness import kernel_vitals_projection
  plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt))
- expectation=strict_json(canonical(expectation));preserved_runtime=strict_json(canonical(preserved_runtime))
+ expectation=None if expectation is None else strict_json(canonical(expectation))
+ preserved_runtime=strict_json(canonical(preserved_runtime))
  selected=_native_observer_generation()
+ deny((stage1_evidence is None)!=(evidence_verifier is None)
+      or (stage1_evidence is not None and gateway_expectation is None),
+      'STAGE1_EXTERNAL_EVIDENCE_REQUIRED')
  with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')):
   observation=_read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,
-      read_public_request=read_public_request,read_public_response=read_public_response)
+      read_public_request=read_public_request,read_public_response=read_public_response,
+      **({'gateway_expectation':gateway_expectation} if gateway_expectation is not None else {}))
   release=plan.get('release_digest')
   deny(not isinstance(release,str) or not re.fullmatch('sha256:[0-9a-f]{64}',release),
        'KERNEL_OBSERVATION_PLAN_DENIED')
-  projection=kernel_vitals_projection(observation,outpost_generation=selected[0]['generation'],
+  candidate=(_stage1_candidate(observation,plan,stage1_evidence,evidence_verifier)
+             if stage1_evidence is not None else observation)
+  projection=kernel_vitals_projection(candidate,outpost_generation=selected[0]['generation'],
       kernel_generation=release[7:])
   def boundary():
    host=current_host_gate(HOST_STATE,observation['boot_id'])
@@ -3385,6 +3524,9 @@ def publish_installed_stage1_vitals(plan,receipt,expectation,*,preserved_runtime
    deny(host['projection_digest']!=projection['payload']['host_projection_digest'],
         'KERNEL_OBSERVATION_PRESTATE_CHANGED')
    deny(not 0<=time.time()-projection['observed_at']<=30,'KERNEL_OBSERVER_STALE')
+   if stage1_evidence is not None:
+    deny(_stage1_candidate(observation,plan,stage1_evidence,evidence_verifier)!=candidate,
+         'STAGE1_EXTERNAL_EVIDENCE_CHANGED')
   boundary()
   _write_native_vitals(Path('/var/lib/serein-outpost/domains/state.json'),projection,boundary=boundary)
   return projection

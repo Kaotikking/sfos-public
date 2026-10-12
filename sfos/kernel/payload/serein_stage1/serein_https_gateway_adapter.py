@@ -16,6 +16,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import hmac
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
@@ -29,7 +30,7 @@ from .authority_contract import canonical
 from .conversation_runtime import (_decode, MAX_TEXT_CHARS, MAX_ANSWER_CHARS,
                                    MAX_AGE_SECONDS, MAX_FUTURE_SKEW_SECONDS)
 from .kernel import (classify_request, prepare_haos_tool_round, map_haos_tool_round,
-                     exchange_private_service)
+                     exchange_private_service, record_terminal_event)
 
 CONVERSATION_PATH = '/v1/voice/conversation'
 MAX_CONVERSATION_REQUEST_BYTES = 128 * 1024
@@ -269,6 +270,35 @@ def _conversation_answer_envelope(request, internal, response, *, now):
             'continue_conversation': False, 'authority_effect': 'NONE', 'effects': []}
 
 
+def gateway_round_audit(request, internal, response_raw, answer, *, now):
+    """Retain the observed ID mapping in the existing private terminal Audit.
+
+    Digests only: no token, prompt, tools or answer text. This is source-bound
+    observation, not a signature or admission. The reader must join the exact
+    internal response to authenticated replay and the public result to HAOS.
+    """
+    response = _decode(response_raw, MAX_GATEWAY_RESPONSE_BYTES)
+    expected = _conversation_answer_envelope(request, internal, response, now=now)
+    if canonical(answer) != canonical(expected):
+        raise ValueError('gateway_correlation_answer_denied')
+    runtime = {'schema': 'SereinStage1ConversationRuntimeRequest/v1',
+               'request_id': internal['request_id'], **internal['conversation']}
+    sha = lambda value: hashlib.sha256(value).hexdigest()
+    return {'schema': 'SereinStage1Response/v1',
+        'request_id': 'gateway-correlation:' + internal['request_id'],
+        'status': 'ANSWERED', 'reason': 'gateway_haos_round_correlated',
+        'timestamp': now.isoformat(), 'gateway_correlation': {
+            'external_request_id': request['request_id'],
+            'internal_request_id': internal['request_id'],
+            'conversation_id': request['conversation_id'],
+            'external_request_sha256': sha(canonical(request)),
+            'runtime_request_sha256': sha(canonical(runtime)),
+            'internal_response_sha256': sha(canonical(response)),
+            'public_response_sha256': sha(canonical(answer)),
+            'external_request_content': 'GATEWAY_OBSERVED_NOT_INDEPENDENTLY_ACQUIRED',
+            'authority_effect': 'NONE', 'effects': []}}
+
+
 class GatewayHealthHandler(BaseHTTPRequestHandler):
     """Retain the donor handler identity; no health/admission route is exposed."""
     server_version = 'SereinGateway/1'
@@ -337,13 +367,17 @@ class GatewayHealthHandler(BaseHTTPRequestHandler):
         try:
             # The token is transport authentication, never an Authority grant.
             # The private Kernel still performs signed policy/replay/audit checks.
-            response = _decode(self.server.gateway_call(canonical(internal)),
-                               MAX_GATEWAY_RESPONSE_BYTES)
+            response_raw = self.server.gateway_call(canonical(internal))
+            response = _decode(response_raw, MAX_GATEWAY_RESPONSE_BYTES)
             completed = self.server.clock()
             if (not isinstance(completed, datetime) or completed.tzinfo is None
                     or completed.utcoffset() is None or completed < current):
                 raise ValueError('conversation_clock_invalid')
             answer = _conversation_answer_envelope(request, internal, response, now=completed)
+            # The existing owning Audit must acknowledge before public success.
+            # A failed append never licenses retrying the consumed inference.
+            self.server.audit_call(gateway_round_audit(
+                request, internal, response_raw, answer, now=completed))
         except Exception:
             self._write_json(503, {'status': 'UNAVAILABLE', 'reason': 'gateway_unavailable'})
             return
@@ -363,7 +397,7 @@ class GatewayHealthHandler(BaseHTTPRequestHandler):
         return
 
 
-def serve_private_http(connection, *, credentials_directory, gateway_call, clock):
+def serve_private_http(connection, *, credentials_directory, gateway_call, clock, audit_call):
     """Reuse the admitted HTTP contract in the existing private Kernel owner.
 
     The owner verifies AF_UNIX peer/custody before calling. No TLS listener,
@@ -372,13 +406,14 @@ def serve_private_http(connection, *, credentials_directory, gateway_call, clock
     """
     from types import SimpleNamespace
     import io
-    if not callable(gateway_call) or not callable(clock):
+    if not callable(gateway_call) or not callable(clock) or not callable(audit_call):
         raise ValueError('gateway_owner_callbacks_invalid')
     try:
         token = load_companion_token(credentials_directory)
     except (OSError, ValueError, TypeError, RuntimeError):
         token = None
-    owner = SimpleNamespace(companion_key=token, gateway_call=gateway_call, clock=clock)
+    owner = SimpleNamespace(companion_key=token, gateway_call=gateway_call,
+                            clock=clock, audit_call=audit_call)
     deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
     class DeadlineReader(io.RawIOBase):
         def readable(self):
@@ -411,6 +446,7 @@ class GatewayHttpsServer(ThreadingHTTPServer):
     This class does not claim that that service composition is commissioned.
     """
     gateway_call = staticmethod(gateway_request)
+    audit_call = staticmethod(record_terminal_event)
     clock = staticmethod(lambda: datetime.now(timezone.utc))
     # Owner teardown includes accepted requests, not just the listener. The
     # existing request and private-exchange timeouts bound their normal work.
