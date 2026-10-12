@@ -43,12 +43,13 @@ IMMUTABLE_POLICY = {
 IMAGE_FILES = {
     'install/generation_launcher.py': ('/usr/libexec/serein/outpost-generation-launcher', '0755'),
     'systemd/serein-outpost-host-witness.service': ('/etc/systemd/system/serein-outpost-host-witness.service', '0644'),
+    'systemd/serein-outpost-host-witness.timer': ('/etc/systemd/system/serein-outpost-host-witness.timer', '0644'),
     'systemd/serein-outpost.service': ('/etc/systemd/system/serein-outpost.service', '0644'),
     'systemd/serein-outpost-presentation.service': ('/etc/systemd/system/serein-outpost-presentation.service', '0644'),
     'systemd/serein-https-gateway-adapter.service': ('/etc/systemd/system/serein-https-gateway-adapter.service', '0644'),
     'systemd/serein-outpost.target': ('/etc/systemd/system/serein-outpost.target', '0644'),
 }
-IMAGE_UNITS = ('serein-outpost-host-witness.service', 'serein-outpost.service',
+IMAGE_UNITS = ('serein-outpost-host-witness.service', 'serein-outpost-host-witness.timer', 'serein-outpost.service',
                'serein-outpost-presentation.service', 'serein-https-gateway-adapter.service',
                'serein-outpost.target')
 UNIT_PROPERTIES = ('Id', 'LoadState', 'ActiveState', 'SubState', 'UnitFileState',
@@ -1484,7 +1485,12 @@ def bootstrap_candidate_precheck(release, material, source_plan_sha256, *, retai
                'verify_install_preflight.py'}
     if retained_selector is None:
         runtime.add('outpost/kernel_direct_witness.py')
-    if any(source not in material for source in set(IMAGE_FILES)|runtime):
+    image_sources = set(IMAGE_FILES)
+    if retained_selector is not None:
+        # A signed, exactly bound historical generation predates recurring
+        # collection. Its history stays valid; this never exempts a candidate.
+        image_sources.discard('systemd/serein-outpost-host-witness.timer')
+    if any(source not in material for source in image_sources|runtime):
         raise TransactionError('PUBLIC_IMAGE_PAYLOAD_MISSING')
     return {'result':'G0_SOURCE_PREDICATES_PASS','release_digest':release['self_digest'],
             'source_plan_sha256':source_plan_sha256,'selector':selector,'constitution':constitution,
@@ -1869,7 +1875,7 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
                 or units['serein-outpost.target']['UnitFileState']!='enabled'
                 or any(units[name]['ActiveState']!='active' for name in (
                     'serein-outpost.service','serein-outpost-presentation.service',
-                    'serein-https-gateway-adapter.service'))):
+                    'serein-https-gateway-adapter.service','serein-outpost-host-witness.timer'))):
             raise TransactionError('PUBLIC_TARGET_ACTIVATION_DENIED')
         witness=accept(selector,not_before)
         if (witness.get('result')!='SUPPORTING_CURRENT_BOOT_WITNESS'

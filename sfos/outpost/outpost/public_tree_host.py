@@ -69,17 +69,35 @@ def _public_blob(commit: str, tree: str, path: str, *, installed_source: Mapping
             or (installed_source is not None and (installed_source.get("repository")!=REPOSITORY
                 or installed_source.get("schema")!="SereinOutpostPublicSource/v1"))):
         raise PublicTreeHostError("PUBLIC_BASE_LINEAGE_DENIED")
-    head = _api("/commits/" + commit)
-    if head.get("sha") != commit or head.get("commit", {}).get("tree", {}).get("sha") != tree:
-        raise PublicTreeHostError("PUBLIC_COMMIT_TREE_DENIED")
-    listing = _api("/git/trees/" + tree + "?recursive=1")
-    if listing.get("sha") != tree or listing.get("truncated") is True:
-        raise PublicTreeHostError("PUBLIC_TREE_DENIED")
-    rows = [row for row in listing.get("tree", []) if isinstance(row, dict) and row.get("path") == path and row.get("type") == "blob"]
-    if len(rows) != 1 or not HEX40.fullmatch(str(rows[0].get("sha", ""))):
-        raise PublicTreeHostError("PUBLIC_BASE_PATH_DENIED")
-    value = _api("/git/blobs/" + rows[0]["sha"])
-    if value.get("sha") != rows[0]["sha"] or value.get("encoding") != "base64" or not isinstance(value.get("content"), str):
+    if installed_source is not None:
+        # The immutable installed generation already binds its signed source
+        # commit/tree/archive. Re-read that exact commit's one admitted recipe
+        # online, without three API requests for every Host observation.
+        if path != "sfos/base/host-manifest.json":
+            raise PublicTreeHostError("PUBLIC_BASE_PATH_DENIED")
+        route = "/contents/" + path + "?ref=" + commit
+        value = _api(route)
+        if (value.get("type") != "file" or value.get("path") != path
+                or value.get("name") != "host-manifest.json"
+                or "target" in value or "submodule_git_url" in value
+                or value.get("url") != "https://api.github.com/repos/" + REPOSITORY + route
+                or type(value.get("size")) is not int or not 0 < value["size"] <= 1024*1024):
+            raise PublicTreeHostError("PUBLIC_BASE_PATH_DENIED")
+        expected_blob = value.get("sha")
+    else:
+        head = _api("/commits/" + commit)
+        if head.get("sha") != commit or head.get("commit", {}).get("tree", {}).get("sha") != tree:
+            raise PublicTreeHostError("PUBLIC_COMMIT_TREE_DENIED")
+        listing = _api("/git/trees/" + tree + "?recursive=1")
+        if listing.get("sha") != tree or listing.get("truncated") is True:
+            raise PublicTreeHostError("PUBLIC_TREE_DENIED")
+        rows = [row for row in listing.get("tree", []) if isinstance(row, dict) and row.get("path") == path and row.get("type") == "blob"]
+        if len(rows) != 1 or not HEX40.fullmatch(str(rows[0].get("sha", ""))):
+            raise PublicTreeHostError("PUBLIC_BASE_PATH_DENIED")
+        expected_blob = rows[0]["sha"]
+        value = _api("/git/blobs/" + expected_blob)
+    if (not HEX40.fullmatch(str(expected_blob)) or value.get("sha") != expected_blob
+            or value.get("encoding") != "base64" or not isinstance(value.get("content"), str)):
         raise PublicTreeHostError("PUBLIC_BLOB_DENIED")
     try:
         # GitHub wraps its Base64 response in lines. Strip only transport line
@@ -88,7 +106,8 @@ def _public_blob(commit: str, tree: str, path: str, *, installed_source: Mapping
         data = __import__("base64").b64decode(encoded, validate=True)
     except Exception as exc:
         raise PublicTreeHostError("PUBLIC_BLOB_DENIED") from exc
-    if _git_blob(data) != rows[0]["sha"]:
+    if (_git_blob(data) != expected_blob
+            or (installed_source is not None and len(data) != value['size'])):
         raise PublicTreeHostError("PUBLIC_BLOB_HASH_DENIED")
     return data
 

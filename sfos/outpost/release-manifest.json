@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G7",
+  "generation": "G8",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -20,8 +20,8 @@
     },
     {
       "path": "install/public_generation_transaction.py",
-      "bytes": 115302,
-      "sha256": "d5e3a26c1bf5191a197d6c358d0a4b9ca0b38b609c1cad23d8175b392e1d68c6"
+      "bytes": 115792,
+      "sha256": "b06e858d4343eefe4f539ff3b58f645d85a50070757eddcddb3c171ac2e2cae9"
     },
     {
       "path": "install/public_installer_cli.py",
@@ -80,8 +80,8 @@
     },
     {
       "path": "outpost/public_tree_host.py",
-      "bytes": 25185,
-      "sha256": "fa4ab4a9fad918ddc05b00cd09cbb25b3d7474c062bb842c8d4591254cfaed88"
+      "bytes": 26363,
+      "sha256": "28561253a720578ef4651dc2f3e637e133bcf21f7d794cef9881004d3a0e6601"
     },
     {
       "path": "outpost/reboot_vitality.py",
@@ -124,6 +124,11 @@
       "sha256": "8ec510c06e48c9bbdcb3f0e186db4385ff5df4bc3e79ba2825d95725702bae53"
     },
     {
+      "path": "systemd/serein-outpost-host-witness.timer",
+      "bytes": 441,
+      "sha256": "d3abb7892c4bb6abd313a7da90a96c4f44f43d97a9fd3d9d160e3212e3c26477"
+    },
+    {
       "path": "systemd/serein-outpost-presentation.service",
       "bytes": 715,
       "sha256": "8428e431e767637d4fe5ea9fbd6d12c8d3714e7c1ba771352582162ed1e95052"
@@ -135,8 +140,8 @@
     },
     {
       "path": "systemd/serein-outpost.target",
-      "bytes": 441,
-      "sha256": "dd90d4c210617c84f9cafc1cbcba29166a1e52d710b2749cd2337b4910c2efa1"
+      "bytes": 475,
+      "sha256": "774c7b297200ab9da0f77a8a8c6c4d80dfcc02fc2e71f07291aa9b802ed30578"
     },
     {
       "path": "verify_install_preflight.py",
@@ -173,5 +178,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:4c3686928a2aff7e69ea7d67664539f8a0d8c7b441aafc056ebfc0895dfd179c"
+  "self_digest": "sha256:4affe8d1f082fe2d642b90704853ba8f1e6d85d5c26b4225faf9ef007b3ac950"
 }

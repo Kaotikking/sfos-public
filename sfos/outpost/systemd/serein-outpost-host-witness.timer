@@ -1,0 +1,13 @@
+[Unit]
+Description=Serein Outpost recurring signed Host observation
+PartOf=serein-outpost.target
+
+[Timer]
+# Keep the existing unprivileged oneshot collector as the sole writer.
+# Completion-relative scheduling prevents concurrent collections. Failed or
+# slow collection remains unavailable evidence; no timestamp is extended.
+Unit=serein-outpost-host-witness.service
+OnActiveSec=1s
+OnUnitInactiveSec=90s
+AccuracySec=1s
+RandomizedDelaySec=0

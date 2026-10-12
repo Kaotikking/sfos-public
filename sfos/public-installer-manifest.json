@@ -126,8 +126,8 @@
     },
     {
       "path": "outpost/install/public_generation_transaction.py",
-      "sha256": "d5e3a26c1bf5191a197d6c358d0a4b9ca0b38b609c1cad23d8175b392e1d68c6",
-      "bytes": 115302
+      "sha256": "b06e858d4343eefe4f539ff3b58f645d85a50070757eddcddb3c171ac2e2cae9",
+      "bytes": 115792
     },
     {
       "path": "outpost/install/public_installer_cli.py",
@@ -186,8 +186,8 @@
     },
     {
       "path": "outpost/outpost/public_tree_host.py",
-      "sha256": "fa4ab4a9fad918ddc05b00cd09cbb25b3d7474c062bb842c8d4591254cfaed88",
-      "bytes": 25185
+      "sha256": "28561253a720578ef4651dc2f3e637e133bcf21f7d794cef9881004d3a0e6601",
+      "bytes": 26363
     },
     {
       "path": "outpost/outpost/reboot_vitality.py",
@@ -221,8 +221,8 @@
     },
     {
       "path": "outpost/release-manifest.json",
-      "sha256": "1ede939cfc791da5066dd5261719ed01444516def07e1f4291fc742dda0e20a8",
-      "bytes": 5707
+      "sha256": "1fcb965ca8396dfdd9c8aa13bb3adf91177ee938a89b188c2dd293dd739306cc",
+      "bytes": 5882
     },
     {
       "path": "outpost/systemd/serein-https-gateway-adapter.service",
@@ -233,6 +233,11 @@
       "path": "outpost/systemd/serein-outpost-host-witness.service",
       "sha256": "8ec510c06e48c9bbdcb3f0e186db4385ff5df4bc3e79ba2825d95725702bae53",
       "bytes": 621
+    },
+    {
+      "path": "outpost/systemd/serein-outpost-host-witness.timer",
+      "bytes": 441,
+      "sha256": "d3abb7892c4bb6abd313a7da90a96c4f44f43d97a9fd3d9d160e3212e3c26477"
     },
     {
       "path": "outpost/systemd/serein-outpost-presentation.service",
@@ -246,8 +251,8 @@
     },
     {
       "path": "outpost/systemd/serein-outpost.target",
-      "sha256": "dd90d4c210617c84f9cafc1cbcba29166a1e52d710b2749cd2337b4910c2efa1",
-      "bytes": 441
+      "sha256": "774c7b297200ab9da0f77a8a8c6c4d80dfcc02fc2e71f07291aa9b802ed30578",
+      "bytes": 475
     },
     {
       "path": "outpost/verify_install_preflight.py",
@@ -255,5 +260,5 @@
       "bytes": 10463
     }
   ],
-  "self_digest": "sha256:87e98d537be5a1360f5cdd12c22d211517c275dd2ad77fa3b606173ceb02e95b"
+  "self_digest": "sha256:3c216844bab0953eefc197fcbf8c50b49a843db60676f394b19794211213d5ae"
 }

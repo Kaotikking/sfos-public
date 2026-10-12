@@ -3,7 +3,7 @@ Description=Serein Outpost independent witness and Serein Vitals
 # Recovery observability is available independently of Host admission and Serein.
 Requires=serein-outpost.service serein-outpost-presentation.service serein-https-gateway-adapter.service
 After=serein-outpost.service serein-outpost-presentation.service serein-https-gateway-adapter.service
-Wants=serein-outpost-host-witness.service
+Wants=serein-outpost-host-witness.service serein-outpost-host-witness.timer
 
 [Install]
 WantedBy=multi-user.target
