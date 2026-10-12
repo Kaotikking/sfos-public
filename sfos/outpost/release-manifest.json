@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G20",
+  "generation": "G21",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -15,8 +15,8 @@
     },
     {
       "path": "install/kernel_first_install_runner.py",
-      "bytes": 221180,
-      "sha256": "6f83516a69320d7627dc5fbf24e0c19ebf8b66d9180ba3ed7b0388f049708657"
+      "bytes": 223611,
+      "sha256": "ee812b1251ea26277d2eaa53b491e63447d930a66efc75a5e5a0abf3163705f7"
     },
     {
       "path": "install/public_generation_transaction.py",
@@ -70,8 +70,8 @@
     },
     {
       "path": "outpost/kernel_direct_witness.py",
-      "bytes": 100954,
-      "sha256": "93d3014c9974fa13899cf173410d7cd406f5543fc7f8b50d7f437701d01cb0eb"
+      "bytes": 108349,
+      "sha256": "a269ace8bc923e98c56b1d1e0ffafa88c77ad4ec4a9871ed15f67d6f9f2fb1d9"
     },
     {
       "path": "outpost/presentation_service.py",
@@ -178,5 +178,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:af9590bff9e51ed816298b911dc1fdaa6ee39fab0d82c3e5198722a2ba8e461f"
+  "self_digest": "sha256:0e6e4baea6d2bcb9221bb7b307e7c099c32e72464356546d17362a8d49a59211"
 }

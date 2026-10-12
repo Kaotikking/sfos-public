@@ -509,9 +509,9 @@ def compare_retained_compute_response(raw, *, query, source, installed_evidence_
         raise KernelWitnessError('KERNEL_COMPUTE_READBACK_DENIED') from exc
 
 
-def compare_gateway_correlation_response(raw, *, query, source, boot_id,
+def _compare_gateway_round_response(raw, *, query, source, boot_id,
         installed_evidence_sha256, haos_event, haos_result, haos_manifest_sha256, observed_at,
-        model, model_digest):
+        model, model_digest, final_round=True):
     """Join existing HAOS result/event to source-bound retained Kernel evidence.
 
     This compares semantics only. The owner must acquire HAOS evidence through
@@ -594,15 +594,33 @@ def compare_gateway_correlation_response(raw, *, query, source, boot_id,
             and internal!=external,'GATEWAY_ROUND_ID_DENIED')
         require(runtime['schema']=='SereinStage1ConversationRuntimeResponse/v2'
             and runtime['status']=='ANSWERED' and runtime['authority_effect']=='NONE'
-            and runtime['effects']==[] and runtime['continue_conversation'] is False
+            and runtime['effects']==[] and runtime['continue_conversation'] is (not final_round)
             and runtime['completed_at']==retained['observed_at']
             and runtime['invocation']=={'request_id':str(internal),'conversation_id':row['conversation_id'],
                 'runtime_request_sha256':retained['payload_sha256']},'GATEWAY_RUNTIME_BINDING_DENIED')
         message=runtime['message']
-        require(isinstance(message,dict) and set(message)=={'role','content'}
-            and message['role']=='assistant' and isinstance(message['content'],str)
-            and 0<len(message['content'])<=4096 and '\x00' not in message['content'],
-            'GATEWAY_FINAL_ANSWER_DENIED')
+        if final_round:
+            require(isinstance(message,dict) and set(message)=={'role','content'}
+                and message['role']=='assistant' and isinstance(message['content'],str)
+                and 0<len(message['content'])<=4096 and '\x00' not in message['content'],
+                'GATEWAY_FINAL_ANSWER_DENIED')
+        else:
+            require(isinstance(message,dict) and set(message)=={'role','content','tool_calls'}
+                and message['role']=='assistant' and isinstance(message['content'],str)
+                and len(message['content'])<=4096 and '\x00' not in message['content']
+                and isinstance(message['tool_calls'],list) and 0<len(message['tool_calls'])<=8,
+                'GATEWAY_TOOL_ROUND_DENIED')
+            call_ids=set()
+            for call in message['tool_calls']:
+                require(isinstance(call,dict) and set(call)=={'id','function'}
+                    and isinstance(call['id'],str) and 0<len(call['id'])<=128
+                    and '\x00' not in call['id'] and call['id'] not in call_ids
+                    and isinstance(call['function'],dict) and set(call['function'])=={'name','arguments'}
+                    and call['function']['name'] in {'llm__GetDateTime','homeassistant__GetLiveContext'}
+                    and isinstance(call['function']['arguments'],dict)
+                    and len(canonical(call['function']['arguments']))<=16384,
+                    'GATEWAY_TOOL_ROUND_DENIED')
+                call_ids.add(call['id'])
         measured=runtime['compute_observation']
         require(isinstance(model,str) and model and re.fullmatch('[0-9a-f]{64}',model_digest)
             and measured['schema']=='SereinCompanionComputeObservation/v2'
@@ -643,12 +661,12 @@ def compare_gateway_correlation_response(raw, *, query, source, boot_id,
             and event['installed_manifest_sha256']==haos_manifest_sha256
             and event['request_id']==str(external) and event['conversation_id']==row['conversation_id']
             and event['status']=='ANSWERED' and event['authority_effect']=='NONE' and event['effects']==[]
-            and type(event['rounds']) is int and event['rounds']==1,'HAOS_CORRELATION_DENIED')
-        require(isinstance(result,dict) and set(result)=={'response','conversation_id','continue_conversation'}
+            and type(event['rounds']) is int and 1<=event['rounds']<=10,'HAOS_CORRELATION_DENIED')
+        require(not final_round or (isinstance(result,dict) and set(result)=={'response','conversation_id','continue_conversation'}
             and result['conversation_id']==row['conversation_id'] and result['continue_conversation'] is False
             and result['response']['response_type']=='action_done'
             and result['response']['speech']['plain']['speech']==message['content']
-            and result['response']['data']['success']==[] and result['response']['data']['failed']==[],
+            and result['response']['data']['success']==[] and result['response']['data']['failed']==[]),
             'HAOS_NATIVE_RESULT_DENIED')
         stamps=[datetime.fromisoformat(item.replace('Z','+00:00')) for item in
             (measured['started_at'],measured['completed_at'],runtime['completed_at'],
@@ -669,6 +687,67 @@ def compare_gateway_correlation_response(raw, *, query, source, boot_id,
     except KernelWitnessError:raise
     except (TransactionError,ValueError,TypeError,KeyError,AttributeError,OverflowError) as exc:
         raise KernelWitnessError('GATEWAY_CORRELATION_DENIED') from exc
+
+
+def compare_gateway_correlation_response(raw, *, query, source, boot_id,
+        installed_evidence_sha256, haos_event, haos_result, haos_manifest_sha256, observed_at,
+        model, model_digest, prior_rounds=None):
+    """Verify the complete native conversation, using existing retained witnesses.
+
+    HAOS owns authenticated final result/event acquisition. Kernel owns the
+    replay-authenticated per-round runtime/mapping evidence. This does not
+    independently authenticate prompt or tool-result content, or admit Stage 1.
+    The ten-round ceiling is the installed HAOS MAX_TOOL_ITERATIONS contract.
+    """
+    import base64
+    try:
+        prior=copy.deepcopy([] if prior_rounds is None else prior_rounds)
+        require(isinstance(prior,list) and len(prior)<10
+            and isinstance(haos_event,dict) and type(haos_event.get('rounds')) is int
+            and haos_event['rounds']==len(prior)+1,'HAOS_CORRELATION_DENIED')
+        require(len(canonical(prior))<=65536,'GATEWAY_READBACK_SIZE_DENIED')
+        chain=prior+[{'response':strict_json(raw),'query':copy.deepcopy(query)}]
+        common=dict(source=source,boot_id=boot_id,installed_evidence_sha256=installed_evidence_sha256,
+            haos_event=haos_event,haos_result=haos_result,haos_manifest_sha256=haos_manifest_sha256,
+            observed_at=observed_at,model=model,model_digest=model_digest)
+        seen={key:set() for key in ('internal_request_id','replay_consumption_sha256',
+            'runtime_result_sha256','internal_response_sha256','tool_call_id')}
+        external=None;conversation=None;last_completed=None;digests=[]
+        for index,item in enumerate(chain):
+            require(isinstance(item,dict) and set(item)=={'response','query'},'GATEWAY_ROUND_CHAIN_DENIED')
+            is_terminal=index==len(chain)-1
+            checked=_compare_gateway_round_response(record_bytes(item['response']),
+                query=item['query'],final_round=is_terminal,**common)
+            retained=item['response']['facts']['observation']
+            runtime=strict_json(base64.b64decode(retained['runtime_response_b64'],validate=True))
+            mapping=retained['gateway_correlation']['gateway_correlation']
+            if external is None:
+                external=checked['external_request_id'];conversation=checked['conversation_id']
+            require(checked['external_request_id']==external and checked['conversation_id']==conversation,
+                'GATEWAY_ROUND_CHAIN_DENIED')
+            for key in ('internal_request_id','replay_consumption_sha256','runtime_result_sha256','internal_response_sha256'):
+                value=mapping[key] if key=='internal_response_sha256' else checked[key]
+                require(value not in seen[key],'GATEWAY_ROUND_CHAIN_DENIED');seen[key].add(value)
+            started=datetime.fromisoformat(runtime['compute_observation']['started_at'].replace('Z','+00:00'))
+            completed=datetime.fromisoformat(retained['gateway_correlation']['timestamp'].replace('Z','+00:00'))
+            require(last_completed is None or last_completed<=started,'GATEWAY_ROUND_CHAIN_DENIED')
+            last_completed=completed
+            for call in runtime['message'].get('tool_calls',[]):
+                require(call['id'] not in seen['tool_call_id'],'GATEWAY_ROUND_CHAIN_DENIED')
+                seen['tool_call_id'].add(call['id'])
+            digests.append({'internal_request_id':checked['internal_request_id'],
+                'runtime_result_sha256':checked['runtime_result_sha256'],
+                'replay_consumption_sha256':checked['replay_consumption_sha256'],
+                'internal_response_sha256':mapping['internal_response_sha256'],
+                'external_request_sha256':mapping['external_request_sha256'],
+                'public_response_sha256':checked['public_response_sha256'],
+                'subject_sha256':hashlib.sha256(record_bytes(item['response'])).hexdigest()})
+        # Preserve the exact one-round contract and carry all intermediate
+        # bytes/digests for independent runner recomparison when there are tools.
+        return {**checked,**({'prior_rounds':prior,'round_evidence':digests} if prior else {})}
+    except KernelWitnessError:raise
+    except (TransactionError,ValueError,TypeError,KeyError,AttributeError,OverflowError) as exc:
+        raise KernelWitnessError('GATEWAY_ROUND_CHAIN_DENIED') from exc
 
 
 def compare_public_conversation_response(raw, *, runtime_raw, expected_runtime_sha256, request,
@@ -1317,11 +1396,27 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
         'KERNEL_COMPUTE_EXPECTATION_DENIED')
     gateway=copy.deepcopy(gateway_expectation)
     require(gateway is None or (isinstance(gateway,dict)
-        and set(gateway)=={'compute_request_id','haos_event','haos_result','haos_manifest_sha256','model','model_digest'}
+        and set(gateway) in ({'compute_request_id','haos_event','haos_result','haos_manifest_sha256','model','model_digest'},
+            {'compute_request_id','haos_event','haos_result','haos_manifest_sha256','model','model_digest','prior_compute_request_ids'})
         and isinstance(gateway['compute_request_id'],str) and 0<len(gateway['compute_request_id'])<=128
         and '\x00' not in gateway['compute_request_id']
         and compute is None and interface_predecessor is not None),
         'GATEWAY_EXPECTATION_DENIED')
+    prior_ids=[] if gateway is None else gateway.get('prior_compute_request_ids',[])
+    require(isinstance(prior_ids,list) and len(prior_ids)<10
+        and all(isinstance(value,str) and len(value)<=128 for value in prior_ids)
+        and len(set(prior_ids))==len(prior_ids)
+        and (gateway is None or gateway['compute_request_id'] not in prior_ids),
+        'GATEWAY_EXPECTATION_DENIED')
+    if gateway is not None:
+        try:
+            require(all(str(UUID(value))==value and UUID(value).version==4
+                for value in [*prior_ids,gateway['compute_request_id']]),'GATEWAY_EXPECTATION_DENIED')
+        except (ValueError,TypeError,AttributeError) as exc:
+            raise KernelWitnessError('GATEWAY_EXPECTATION_DENIED') from exc
+        require(isinstance(gateway['haos_event'],dict)
+            and type(gateway['haos_event'].get('rounds')) is int
+            and gateway['haos_event']['rounds']==len(prior_ids)+1,'GATEWAY_EXPECTATION_DENIED')
     branch='INTERFACE' if interface_predecessor is not None and compute is None and gateway is None else 'OPERATIONS'
     request={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':branch,
         'request_id':'kernel-operations-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
@@ -1338,7 +1433,11 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
         return (item.st_dev,item.st_ino,item.st_mode,item.st_uid,item.st_gid)
     require(stat.S_ISSOCK(info.st_mode) and (info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode))
             ==(account.pw_uid,account.pw_gid,0o600), 'KERNEL_SOCKET_CUSTODY_DENIED')
+    prior_rounds=[]
+    requests=[{**request,'request_id':'kernel-operations-'+secrets.token_hex(16),
+               'nonce':secrets.token_hex(32),'compute_request_id':value} for value in prior_ids]+[request]
     try:
+      for round_request in requests:
         with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
             deadline=time.monotonic()+3
             def remaining():
@@ -1349,13 +1448,16 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
             peer=struct.unpack('3i',client.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,struct.calcsize('3i')))
             require(peer[1]==0,'KERNEL_SERVER_IDENTITY_DENIED')
             require(socket_identity(path.lstat())==socket_identity(info),'KERNEL_SOCKET_CHANGED')
-            remaining();client.sendall(record_bytes(request))
+            remaining();client.sendall(record_bytes(round_request))
             raw=b''
             while not raw.endswith(b'\n') and len(raw)<=65536:
                 remaining();part=client.recv(min(4096,65537-len(raw)))
                 if not part:break
                 raw+=part
             remaining()
+        require(raw.endswith(b'\n') and len(raw)<=65536,'KERNEL_RESPONSE_FRAMING_DENIED')
+        if round_request is not request:
+            prior_rounds.append({'response':strict_json(raw),'query':round_request})
     except OSError as exc:
         raise KernelWitnessError('KERNEL_TRANSPORT_UNAVAILABLE') from exc
     require(raw.endswith(b'\n') and len(raw)<=65536,'KERNEL_RESPONSE_FRAMING_DENIED')
@@ -1363,7 +1465,8 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
     if gateway is not None:
         result=compare_gateway_correlation_response(raw,query=request,source=source,boot_id=boot_id,
             installed_evidence_sha256=installed_evidence_sha256,observed_at=now,
-            **{k:v for k,v in gateway.items() if k!='compute_request_id'})
+            prior_rounds=prior_rounds,
+            **{k:v for k,v in gateway.items() if k not in {'compute_request_id','prior_compute_request_ids'}})
     elif compute is not None:
         result=compare_retained_compute_response(raw,query=request,source=source,boot_id=boot_id,
             installed_evidence_sha256=installed_evidence_sha256,observed_at=now,host_state=host,**compute)
@@ -1381,7 +1484,8 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
     if gateway is not None:
         result=compare_gateway_correlation_response(raw,query=request,source=source,boot_id=boot_id,
             installed_evidence_sha256=installed_evidence_sha256,observed_at=now,
-            **{k:v for k,v in gateway.items() if k!='compute_request_id'})
+            prior_rounds=prior_rounds,
+            **{k:v for k,v in gateway.items() if k not in {'compute_request_id','prior_compute_request_ids'}})
     if compute is not None:
         result=compare_retained_compute_response(raw,query=request,source=source,boot_id=boot_id,
             installed_evidence_sha256=installed_evidence_sha256,observed_at=now,

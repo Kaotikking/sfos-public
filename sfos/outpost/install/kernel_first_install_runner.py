@@ -1306,8 +1306,24 @@ def prepare_gateway_observation(plan,receipt,authority_observation,operations,in
  required fact; this material alone cannot admit Stage 1.
  """
  expectation=strict_json(canonical(expectation))
- deny(not isinstance(expectation,dict) or set(expectation)!=
-      {'compute_request_id','haos_event','haos_result','haos_manifest_sha256'},
+ required={'compute_request_id','haos_event','haos_result','haos_manifest_sha256'}
+ deny(not isinstance(expectation,dict) or set(expectation) not in
+      (required,required|{'prior_compute_request_ids'}),'GATEWAY_EXPECTATION_DENIED')
+ prior=expectation.get('prior_compute_request_ids',[])
+ try:
+  from uuid import UUID
+  final=UUID(expectation['compute_request_id'])
+  parsed=[UUID(value) for value in prior]
+ except (ValueError,TypeError,AttributeError) as exc:
+  raise RunnerDenied('GATEWAY_EXPECTATION_DENIED') from exc
+ deny(not isinstance(prior,list) or len(prior)>9 or len(set(prior))!=len(prior)
+      or str(final)!=expectation['compute_request_id'] or final.version!=4
+      or any(not isinstance(value,str) or str(item)!=value or item.version!=4
+             for value,item in zip(prior,parsed))
+      or expectation['compute_request_id'] in prior
+      or not isinstance(expectation['haos_event'],dict)
+      or type(expectation['haos_event'].get('rounds')) is not int
+      or expectation['haos_event']['rounds']!=len(prior)+1,
       'GATEWAY_EXPECTATION_DENIED')
  deny(len(canonical(expectation))>16384,'GATEWAY_EXPECTATION_BOUND_DENIED')
  envelope=prepare_interface_observation(plan,receipt,authority_observation,operations)
@@ -1324,10 +1340,20 @@ def consume_gateway_observation(plan,receipt,authority_observation,operations,in
  deny(not isinstance(raw,bytes) or not 0<len(raw)<=65536,'GATEWAY_OUTPUT_DENIED')
  value=strict_json(raw)
  deny(not isinstance(value,dict) or canonical(value)!=raw,'GATEWAY_OUTPUT_DENIED')
+ expected_gateway=envelope['gateway_expectation']
  request=value.get('request')
  deny(not isinstance(request,dict) or request.get('previous_evidence_digest')!=envelope['interface_predecessor']
-      or request.get('compute_request_id')!=expectation['compute_request_id'],
+      or request.get('compute_request_id')!=expected_gateway['compute_request_id'],
       'GATEWAY_PREDECESSOR_DENIED')
+ prior_rounds=value.get('prior_rounds',[])
+ prior_ids=expected_gateway.get('prior_compute_request_ids',[])
+ deny(not isinstance(prior_rounds,list) or len(prior_rounds)!=len(prior_ids)
+      or any(not isinstance(row,dict) or set(row)!={'response','query'}
+             or not isinstance(row['response'],dict) or not isinstance(row['query'],dict)
+             for row in prior_rounds)
+      or [row['query'].get('compute_request_id') for row in prior_rounds]!=prior_ids
+      or any(row['query'].get('previous_evidence_digest')!=envelope['interface_predecessor']
+             for row in prior_rounds),'GATEWAY_PREDECESSOR_DENIED')
  host=current_host_gate(HOST_STATE,plan['current_boot_id'])
  boot=current_boot();controls=read_operations_service_controls();anchor=regular(VERIFY_KEY)
  deny(boot!=plan['current_boot_id'] or controls!=operations['service_controls'],
@@ -1348,7 +1374,9 @@ def consume_gateway_observation(plan,receipt,authority_observation,operations,in
  subject=canonical(value['subject_evidence'])
  compared=compare_gateway_correlation_response(subject,query=request,source=envelope['source'],
      installed_evidence_sha256=envelope['installed_evidence_sha256'],boot_id=boot,observed_at=now,
-     **{k:v for k,v in envelope['gateway_expectation'].items() if k!='compute_request_id'})
+     prior_rounds=prior_rounds,
+     **{k:v for k,v in envelope['gateway_expectation'].items()
+        if k not in {'compute_request_id','prior_compute_request_ids'}})
  expected={**compared,'evidence_authentication':'ROOT_CREATED_PRIVATE_LISTENER',
      'haos_evidence_authentication':'SEPARATE_REQUIRED',
      'native_identity_possession':'NOT_ESTABLISHED_BY_OPERATIONS','request':request,
@@ -3336,10 +3364,22 @@ def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,*
  deny(_compare_interface_observation(plan,{**envelope,'interface_predecessor':sha(canonical(operations))},
       canonical(interface))!=interface,'KERNEL_COMPUTE_INTERFACE_PREDECESSOR_DENIED')
  if gateway:
+  prior_rounds=compute.get('prior_rounds',[])
+  expected_gateway=envelope['gateway_expectation']
+  prior_ids=expected_gateway.get('prior_compute_request_ids',[])
+  deny(not isinstance(prior_rounds,list) or len(prior_rounds)!=len(prior_ids)
+       or any(not isinstance(row,dict) or set(row)!={'response','query'}
+              or not isinstance(row['response'],dict) or not isinstance(row['query'],dict)
+              for row in prior_rounds)
+       or [row['query'].get('compute_request_id') for row in prior_rounds]!=prior_ids
+       or any(row['query'].get('previous_evidence_digest')!=envelope['interface_predecessor']
+              for row in prior_rounds),'GATEWAY_PREDECESSOR_DENIED')
   compared=compare_gateway_correlation_response(canonical(compute['subject_evidence']),
       query=compute['request'],source=envelope['source'],boot_id=boot,observed_at=clock,
       installed_evidence_sha256=envelope['installed_evidence_sha256'],
-      **{k:v for k,v in envelope['gateway_expectation'].items() if k!='compute_request_id'})
+      prior_rounds=prior_rounds,
+      **{k:v for k,v in envelope['gateway_expectation'].items()
+         if k not in {'compute_request_id','prior_compute_request_ids'}})
  else:
   compared=compare_retained_compute_response(canonical(compute['subject_evidence']),
       query=compute['request'],source=envelope['source'],
