@@ -72,6 +72,10 @@ class PresentationServer(socketserver.UnixStreamServer):
         # additions. A broken/absent history must not prevent recovery Vitals.
         if isinstance(store, VitalsRuntimeStore):
             try:
+                store.host.snapshot()
+            except (OSError, ValueError, TypeError):
+                pass
+            try:
                 store.chronology.read_summary()
             except (OSError, ValueError, TypeError):
                 pass
