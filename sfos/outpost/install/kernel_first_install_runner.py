@@ -243,12 +243,31 @@ def _settled_host_gate(host_path,boot_id):
  """
  import time
  from outpost.host_vitality import HostCollectionAttempts
+ from outpost.reboot_vitality import RebootVitalityError
  deadline=time.monotonic()+10.0
- try:return current_host_gate(host_path,boot_id)
+ def read_unlocked(reader):
+  # The collector's exclusive flock is transient, not invalid evidence.
+  # Retry only that exact lock result; every read still validates all bytes.
+  # All reads share the original deadline and no cached state is returned.
+  while True:
+   deny(time.monotonic()>=deadline,'KERNEL_HOST_ATTEMPT_DENIED')
+   try:
+    value=reader()
+   except (RunnerDenied,RebootVitalityError) as exc:
+    cause=exc.__cause__ if isinstance(exc,RunnerDenied) else exc
+    if (isinstance(exc,RunnerDenied) and str(exc)!='KERNEL_HOST_GATE_DENIED'
+        or not isinstance(cause,RebootVitalityError)
+        or str(cause)!='VITALITY_CHRONOLOGY_BUSY'):raise
+    deny(time.monotonic()>=deadline,'KERNEL_HOST_ATTEMPT_DENIED')
+    time.sleep(0.1)
+   else:
+    deny(time.monotonic()>=deadline,'KERNEL_HOST_ATTEMPT_DENIED')
+    return value
+ try:return read_unlocked(lambda:current_host_gate(host_path,boot_id))
  except RunnerDenied as exc:
   if str(exc)!='KERNEL_HOST_ATTEMPT_DENIED':raise
   attempts=HostCollectionAttempts(Path(host_path).parent)
-  latest=attempts.latest()
+  latest=read_unlocked(attempts.latest)
   if not latest:raise
   pinned=latest['start']
   while True:
@@ -260,12 +279,12 @@ def _settled_host_gate(host_path,boot_id):
     if terminal['event_kind']!='HOST_COLLECTION_SUCCEEDED':raise
     # It completed after the failed read. The unchanged strict reader must
     # still prove the exact latest state; this is not a cached PASS.
-    result=current_host_gate(host_path,boot_id)
-    deny(attempts.latest()!=latest,'KERNEL_HOST_OBSERVATION_CHANGED')
+    result=read_unlocked(lambda:current_host_gate(host_path,boot_id))
+    deny(read_unlocked(attempts.latest)!=latest,'KERNEL_HOST_OBSERVATION_CHANGED')
     deny(time.monotonic()>=deadline,'KERNEL_HOST_ATTEMPT_DENIED')
     return result
    time.sleep(0.1)
-   latest=attempts.latest()
+   latest=read_unlocked(attempts.latest)
 def load_installer(source,manifest,*,expected_release):
  """Compile only the exact installer bytes in the verified source manifest."""
  import types
