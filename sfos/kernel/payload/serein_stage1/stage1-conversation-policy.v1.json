@@ -15,7 +15,7 @@
   "readonly_chat": {
     "requested_operation": "conversation_tools",
     "provider": "http://127.0.0.1:11434/api/chat",
-    "tools": ["GetDateTime", "GetLiveContext"],
+    "tools": ["llm__GetDateTime", "homeassistant__GetLiveContext"],
     "tool_execution": "DENY",
     "external_actions": "DENY"
   },

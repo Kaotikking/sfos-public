@@ -62,7 +62,7 @@ def validate_stage1_conversation_policy(raw, *, expected_sha256):
             # advertised by an authenticated caller. HAOS alone executes its
             # official tools under its existing type/provenance checks.
             expected['readonly_chat']={'requested_operation':'conversation_tools',
-                'provider':CHAT_ENDPOINT,'tools':['GetDateTime','GetLiveContext'],
+                'provider':CHAT_ENDPOINT,'tools':['llm__GetDateTime','homeassistant__GetLiveContext'],
                 'tool_execution':'DENY','external_actions':'DENY'}
         if canonical(value)!=canonical(expected):
             raise ValueError('conversation policy widened or incomplete')
@@ -329,10 +329,12 @@ def match_installed_stage1_conversation(payload, *, authenticated_caller, root, 
             if not scope or scope['requested_operation']!=operation:
                 raise ValueError('installed informational chat scope required')
             allowed=set(scope['tools'])
-            offered={tool['function']['name'] for tool in conversation['tools']}
             historical={call['function']['name'] for message in conversation['messages']
                         for call in message.get('tool_calls',[])}
-            if not offered<=allowed or not historical<=allowed:
+            # Native HAOS advertises its complete capability metadata. A
+            # declaration is not action authority. Preserve it byte-for-byte;
+            # historical and newly returned calls require the installed scope.
+            if not historical<=allowed:
                 raise ValueError('consequential or unknown tools denied')
         elif operation!=policy['policy']['requested_operation']:
             raise ValueError('installed conversation scope required')

@@ -585,7 +585,7 @@ def handle_installed_companion(payload: bytes, *, client, root, replay_store,
     from .conversation_runtime import _decode
     from .kernel_operations import dispatch_installed_conversation,OperationsDenied
     import base64
-    current=clock();request_id=None;compute_evidence=None
+    current=clock();request_id=None;compute_evidence=None;denial_evidence=None
     if not isinstance(current,datetime) or current.utcoffset() is None:
         raise ValueError('gateway_clock_invalid')
     def denied(reason,status='DENIED'):
@@ -619,8 +619,17 @@ def handle_installed_companion(payload: bytes, *, client, root, replay_store,
                     'runtime_response_sha256':dispatched['result_sha256'],
                     'replay_consumption_sha256':replay_store.contract.receipt_hash(dispatched['replay'][-1])}
     except OperationsDenied as exc:
-        # Unknown-after-reservation evidence stays durable. Never retry the
-        # private inference because its response or final witness failed.
+        # The reservation is durable; retain only the bounded policy-denial
+        # class and result digest in the existing private terminal audit.
+        # Never return raw rejected tool data or retry the private inference.
+        evidence=getattr(exc,'evidence',None)
+        if (isinstance(evidence,dict)
+                and evidence.get('policy_denial')=='CONVERSATION_RETURNED_TOOL_SCOPE_DENIED'):
+            digest=evidence.get('result_sha256')
+            if (isinstance(digest,str) and len(digest)==64
+                    and all(c in '0123456789abcdef' for c in digest)):
+                denial_evidence={'reason':evidence['policy_denial'],
+                    'runtime_response_sha256':digest}
         response=denied('gateway_transaction_unavailable','UNAVAILABLE') if hasattr(exc,'evidence') else denied('gateway_current_policy_denied')
     except (ValueError,TypeError,KeyError,UnicodeError):
         response=denied('gateway_request_or_policy_denied')
@@ -630,6 +639,8 @@ def handle_installed_companion(payload: bytes, *, client, root, replay_store,
     event=json.loads(encoded)
     if event['status']=='ANSWERED' and compute_evidence is not None:
         event['compute_evidence']=compute_evidence
+    if denial_evidence is not None:
+        event['denial_evidence']=denial_evidence
     try:audit_call(event)
     except Exception:encoded=canonical(denied('gateway_audit_unavailable','UNAVAILABLE'))
     return encoded

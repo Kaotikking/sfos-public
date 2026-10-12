@@ -93,8 +93,8 @@
     ],
     [
       "payload/serein_stage1/authority_contract.py",
-      53730,
-      "a48ad53b0de26bc97db02667a70e663c83847878308e0fcae454a87d9426c8d9",
+      53875,
+      "c6d377ff708e31912b2f6a5866ad7d1d0718bfe9b83bc5e23d2d5023695c10f7",
       "0644"
     ],
     [
@@ -147,8 +147,8 @@
     ],
     [
       "payload/serein_stage1/kernel.py",
-      55150,
-      "4bb2e4534576c5387658b47083c42f96e414c5511182352e02c8ab71159bb810",
+      55815,
+      "2db3e6881d5d799c4908b491f4ec6c95d501b48484db6647f3d4dc697ba5ead8",
       "0644"
     ],
     [
@@ -159,8 +159,8 @@
     ],
     [
       "payload/serein_stage1/kernel_operations.py",
-      86173,
-      "3902d2987bd218efac4cc5ec9d48a5a41abae63bee59ca537770047b6ed1c118",
+      86853,
+      "4c466352b83739d5bceeba8c622681c21e607b745600dd7b9fb910d0f3dec46d",
       "0644"
     ],
     [
@@ -195,8 +195,8 @@
     ],
     [
       "payload/serein_stage1/stage1-conversation-policy.v1.json",
-      928,
-      "e7c16ad54cedb99b10b1d9ab4fd1e94ba6c53b50b18648e4ae36d8abc709be26",
+      948,
+      "90d84e0fe12579e5186a115a40a5852eea2496466556e08391c3fa7915118263",
       "0644"
     ],
     [
@@ -272,8 +272,8 @@
       "0644"
     ]
   ],
-  "payload_digest": "sha256:ed451d7a82000f5dc035a112e06d8667971244e41013b2936f57b9e3b729a378",
-  "install_denominator_digest": "sha256:26d1104370eb591c0809435dc4d2e93babf1f055af8b67d3f31b99b35329ba3b",
+  "payload_digest": "sha256:5532111587678f116ccf3cc3ce0f54cb289b9c003aa1b9c5a5183b59b33a01f3",
+  "install_denominator_digest": "sha256:07d291b25ba5f61d8e50fcf42902c103b2dcf23b4a50d1ed7a19f12a659ee476",
   "generated_secrets": [
     "/var/lib/serein/kernel/authority/replay.key",
     "/var/lib/serein/kernel/authority/domain-identity.pem"
@@ -315,5 +315,5 @@
   ],
   "activation": "OUTPOST_ONLY_AFTER_INACTIVE_PROOF",
   "admission_effect": "NONE",
-  "self_digest": "sha256:38ceb36efbd569281f74656cc32eee78f6ed5f2efc23e8a541ecb558e5d3d7c5"
+  "self_digest": "sha256:a98e1b0772309ecf1d118b3659de7a10ecffc00664fdaeddf89f2f09d246dbb6"
 }

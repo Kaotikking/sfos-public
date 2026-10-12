@@ -397,14 +397,24 @@ def validate_compute_inputs(*,request,expected_provider_request_sha256,model,mod
                 'KERNEL_COMPUTE_REQUEST_DENIED')
     if chat:
         require(isinstance(request['messages'],list) and 0<len(request['messages'])<=128
-                and isinstance(request['tools'],list),'KERNEL_COMPUTE_CHAT_DENIED')
-        allowed={'GetDateTime','GetLiveContext'};offered=set();pending=set();seen=set()
+                and isinstance(request['tools'],list) and len(request['tools'])<=64,
+                'KERNEL_COMPUTE_CHAT_DENIED')
+        allowed={'llm__GetDateTime','homeassistant__GetLiveContext'}
+        offered=set();pending=set();seen=set()
         for tool in request['tools']:
             require(isinstance(tool,dict) and set(tool)=={'type','function'}
                     and tool['type']=='function' and isinstance(tool['function'],dict),
                     'KERNEL_COMPUTE_CHAT_DENIED')
             name=tool['function'].get('name')
-            require(isinstance(name,str) and name in allowed and name not in offered,
+            # Offered native definitions are metadata, not call authority.
+            # The independent witness still rejects unadmitted actual calls.
+            function=tool['function']
+            require(set(function) in ({'name','parameters'},{'name','parameters','description'})
+                    and isinstance(function.get('parameters'),dict)
+                    and ('description' not in function or isinstance(function['description'],str)
+                         and len(function['description'])<=8192 and '\x00' not in function['description'])
+                    and isinstance(name,str) and 0<len(name)<=128 and '\x00' not in name
+                    and name not in offered,
                     'KERNEL_COMPUTE_CHAT_SCOPE_DENIED');offered.add(name)
         for message in request['messages']:
             require(isinstance(message,dict) and message.get('role') in ('system','user','assistant','tool')
@@ -503,7 +513,9 @@ def compare_compute_response(raw, *, request, host_state, boot_id, observed_at,
                 require(isinstance(call,dict) and set(call)=={'id','function'}
                         and isinstance(call['id'],str) and call['id'] and call['id'] not in seen
                         and isinstance(call['function'],dict) and set(call['function'])=={'name','arguments'}
-                        and call['function']['name'] in offered and isinstance(call['function']['arguments'],dict)
+                        and call['function']['name'] in offered
+                        and call['function']['name'] in {'llm__GetDateTime','homeassistant__GetLiveContext'}
+                        and isinstance(call['function']['arguments'],dict)
                         and len(canonical(call['function']['arguments']))<=16384,
                         'KERNEL_COMPUTE_ANSWER_DENIED');seen.add(call['id'])
             require(sum(len(canonical(call['function']['arguments'])) for call in calls)<=32768,

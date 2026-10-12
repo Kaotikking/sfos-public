@@ -614,6 +614,15 @@ def dispatch_installed_conversation(payload, *, authenticated_caller, root, repl
         result=call_expected(runtime_payload,runtime_call=forward,clock=clock)
         evidence['result_sha256']=hashlib.sha256(result).hexdigest()
         returned=json.loads(result)
+        if (returned['status']=='ANSWERED'
+                and matched['runtime_request']['requested_operation']=='conversation_tools'):
+            # Offered definitions are context, never authorization. Do not
+            # return an inadmissible call to HAOS, where it could be executed.
+            allowed=set(matched['installed_policy']['policy']['readonly_chat']['tools'])
+            if any(call['function']['name'] not in allowed
+                    for call in returned['message'].get('tool_calls',[])):
+                evidence['policy_denial']='CONVERSATION_RETURNED_TOOL_SCOPE_DENIED'
+                raise OperationsDenied('CONVERSATION_RETURNED_TOOL_SCOPE_DENIED')
         if returned['status']=='ANSWERED' and any(
                 returned['compute_observation'][name]['boot_id']!=matched['installed_policy']['boot_id']
                 for name in ('gpu_before','gpu_after')):
