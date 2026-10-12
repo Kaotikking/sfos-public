@@ -162,14 +162,19 @@ def _atomic(path: Path, value: dict[str, Any]) -> None:
         if os.path.exists(temporary):os.unlink(temporary)
 
 
-def coordinator_witness(*,host_root:Path,state_path:Path,boot_id_path:Path,observed_at:float|None=None)->dict[str,Any]:
+def coordinator_witness(*,host_root:Path,state_path:Path,boot_id_path:Path,observed_at:float|None=None,
+                        host_store:HostVitalityStore|None=None,host_attempts:HostCollectionAttempts|None=None)->dict[str,Any]:
     now=time.time() if observed_at is None else observed_at
     if boot_id_path.is_symlink():raise OutpostServiceError("OUTPOST_COORDINATOR_SOURCE_DENIED")
     boot_id=boot_id_path.read_text(encoding="ascii").strip()
     registry=registry_snapshot(boot_id=boot_id,observed_at=now)
     try:
-        host=HostVitalityStore(host_root).snapshot()
-        current=host_attempt_matches(host,HostCollectionAttempts(host_root).latest(),boot_id,now)
+        store=HostVitalityStore(host_root) if host_store is None else host_store
+        attempts=HostCollectionAttempts(host_root) if host_attempts is None else host_attempts
+        if store.root != Path(host_root) or attempts.log.path != Path(host_root)/'collection-attempts.jsonl':
+            raise OutpostServiceError('OUTPOST_COORDINATOR_SOURCE_DENIED')
+        host=store.snapshot()
+        current=host_attempt_matches(host,attempts.latest(),boot_id,now)
     except (OSError,ValueError,TypeError):
         host={};current=False
     value={"schema":"SereinOutpostCoordinatorWitness/v2","boot_id":boot_id,
@@ -207,12 +212,18 @@ def run_coordinator(*, host_root: Path, state_path: Path, boot_id_path: Path,
     activation, signing, token access or predecessor fallback is performed.
     """
     stop = threading.Event() if stop is None else stop
+    # Retain only the existing hash-verified parse caches. Each consumer still
+    # rereads/rehashes current bytes and derives its own fresh Host verdict.
+    host_store = HostVitalityStore(host_root)
+    host_attempts = HostCollectionAttempts(host_root)
     while not stop.is_set():
         state = coordinator_witness(host_root=host_root, state_path=state_path,
-                                    boot_id_path=boot_id_path)
+                                    boot_id_path=boot_id_path, host_store=host_store,
+                                    host_attempts=host_attempts)
         witness_once(state_root=state_path.parent.parent / "watchdog",
                      host_root=host_root, boot_id_path=boot_id_path,
-                     observed_at=state["observed_at"])
+                     observed_at=state["observed_at"], host_store=host_store,
+                     host_attempts=host_attempts)
         _notify("READY=1\nWATCHDOG=1\nSTATUS=" + state["host_gate"])
         stop.wait(5.0)
 

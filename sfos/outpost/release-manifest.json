@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G21",
+  "generation": "G22",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -90,8 +90,8 @@
     },
     {
       "path": "outpost/service.py",
-      "bytes": 12538,
-      "sha256": "3fe787766337e515f4f6ae431d9f9ae568d4bde05b3a0f8460b287d92e25b055"
+      "bytes": 13379,
+      "sha256": "77fc168995d70f399990cfc82d9e2bd370d7c20438c4163c3963386e324e8af5"
     },
     {
       "path": "outpost/vitals_aggregation.py",
@@ -110,8 +110,8 @@
     },
     {
       "path": "outpost/watchdog.py",
-      "bytes": 7330,
-      "sha256": "1a832efdc3d8a658e15782836645416949925fbe1d739f5ab34478a3db770f9f"
+      "bytes": 8020,
+      "sha256": "f797bd8612faf66abe5cd909ddd1884289dbba7438d266a6395a73fc612ac027"
     },
     {
       "path": "systemd/serein-https-gateway-adapter.service",
@@ -178,5 +178,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:0e6e4baea6d2bcb9221bb7b307e7c099c32e72464356546d17362a8d49a59211"
+  "self_digest": "sha256:77ffbc027dec2646f850f387c81158e200a6bf0dfc7fa1f4dec8b73f5b3118cf"
 }

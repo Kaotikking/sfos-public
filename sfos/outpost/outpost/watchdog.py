@@ -46,7 +46,8 @@ def _write_atomic(path: Path, value: dict[str, Any]) -> None:
             os.unlink(temporary)
 
 
-def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, boot_id_path: Path = BOOT_ID_PATH, observed_at: float | None = None) -> dict[str, Any]:
+def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, boot_id_path: Path = BOOT_ID_PATH, observed_at: float | None = None,
+                 host_store: HostVitalityStore | None = None, host_attempts: HostCollectionAttempts | None = None) -> dict[str, Any]:
     now = time.time() if observed_at is None else observed_at
     try:
         boot_id = boot_id_path.read_text(encoding="ascii").strip()
@@ -56,11 +57,17 @@ def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, 
     except (OSError, UnicodeError, ValueError) as error:
         raise WatchdogError("WATCHDOG_SOURCE_UNAVAILABLE") from error
     try:
-        host = HostVitalityStore(host_root).snapshot()
+        store = HostVitalityStore(host_root) if host_store is None else host_store
+        if store.root != Path(host_root):
+            raise WatchdogError('WATCHDOG_SOURCE_UNAVAILABLE')
+        host = store.snapshot()
     except (OSError, UnicodeError, ValueError, TypeError):
         host = {"status": "NO_OBSERVATION"}
     try:
-        current = host_attempt_matches(host, HostCollectionAttempts(host_root).latest(), boot_id, now)
+        attempts = HostCollectionAttempts(host_root) if host_attempts is None else host_attempts
+        if attempts.log.path != Path(host_root) / 'collection-attempts.jsonl':
+            raise WatchdogError('WATCHDOG_SOURCE_UNAVAILABLE')
+        current = host_attempt_matches(host, attempts.latest(), boot_id, now)
     except (OSError, ValueError, TypeError):
         current = False
     healthy = current and host.get("latest", {}).get("schema") in {JOINED_SCHEMA, RECIPE_SCHEMA} and host.get("classification") in {"FIRST_BOOT_OBSERVED", "CURRENT_BOOT_STABLE", "RECOVERED_AFTER_BOOT_CHANGE"}
@@ -142,11 +149,12 @@ def _notify(message: str) -> None:
 
 
 def serve() -> None:
-    first = witness_once()
+    host_store, host_attempts = HostVitalityStore(HOST_ROOT), HostCollectionAttempts(HOST_ROOT)
+    first = witness_once(host_store=host_store, host_attempts=host_attempts)
     _notify("READY=1\nSTATUS=" + first["watchdog_state"])
     interval = 5.0
     while True:
-        state = witness_once()
+        state = witness_once(host_store=host_store, host_attempts=host_attempts)
         _notify("WATCHDOG=1\nSTATUS=" + state["watchdog_state"])
         time.sleep(interval)
 
