@@ -35,6 +35,8 @@ OTHER_KERNEL_UNITS=('serein-observation-audit.service','serein-observation-audit
                     'serein-kernel-operations-heartbeat.service',
                     'serein-kernel-operations-api.service','serein-kernel-operations-api.socket')
 OPERATIONS_SERVICES=('serein-kernel-operations-heartbeat.service','serein-observation-audit.service')
+OPERATIONS_ENDPOINT=('serein-kernel-operations-api.service','serein-kernel-operations-api.socket')
+SUCCESSOR_FAILURE_UNITS=OPERATIONS_SERVICES+OPERATIONS_ENDPOINT
 OPERATIONS_UNITS=('serein-kernel-operations-api.socket','serein-kernel-operations-api.service',
                   'serein-kernel-operations-heartbeat.service',
                   'serein-observation-audit.socket','serein-observation-audit.service')
@@ -1490,7 +1492,7 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False):
  import subprocess
  deny(type(service_controls) is not bool or type(allow_transitional) is not bool
       or (service_controls and allow_transitional) or
-      (names!=OPERATIONS_SERVICES if service_controls else names not in (AUTHORITY_UNITS,OTHER_KERNEL_UNITS)),
+      (names not in (OPERATIONS_SERVICES,OPERATIONS_ENDPOINT[:1]) if service_controls else names not in (AUTHORITY_UNITS,OTHER_KERNEL_UNITS)),
       'KERNEL_UNIT_SET_DENIED')
  properties=('Id','LoadState','ActiveState','SubState','UnitFileState',
              'FragmentPath','DropInPaths','NeedDaemonReload')
@@ -2629,6 +2631,38 @@ def _restore_kernel_source_inputs(*,root,source,receipt_path,prior_source,prior_
  return parked
 
 
+def _read_failed_operations_endpoint(rows):
+ """Bound the observed socket-activation start-limit failure, never arbitrary reset."""
+ import subprocess
+ service,socket=OPERATIONS_ENDPOINT
+ failed=lambda name:(rows[name]['ActiveState'],rows[name]['SubState'])==('failed','failed')
+ if not any(failed(name) for name in OPERATIONS_ENDPOINT):return {}
+ deny(not failed(service),'KERNEL_SUCCESSOR_ENDPOINT_FAILURE_DENIED')
+ controls=_read_kernel_units((service,),service_controls=True)
+ value=controls[service]
+ deny(value['MainPID']!='0' or value['Result']!='start-limit-hit'
+      or any(value[key]!=rows[service][key] for key in rows[service]),
+      'KERNEL_SUCCESSOR_ENDPOINT_FAILURE_DENIED')
+ if failed(socket):
+  try:
+   result=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
+       '--property=Id,ActiveState,SubState,Result',socket],capture_output=True,text=True,
+       timeout=15,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+       stdin=subprocess.DEVNULL,close_fds=True)
+  except (OSError,subprocess.SubprocessError) as exc:
+   raise RunnerDenied('KERNEL_SUCCESSOR_ENDPOINT_FAILURE_DENIED') from exc
+  deny(len(result.stdout)>1024,'KERNEL_SUCCESSOR_ENDPOINT_FAILURE_DENIED')
+  observed={}
+  for line in result.stdout.splitlines():
+   key,separator,item=line.partition('=')
+   deny(not separator or key in observed,'KERNEL_SUCCESSOR_ENDPOINT_FAILURE_DENIED')
+   observed[key]=item
+  deny(observed!={'Id':socket,'ActiveState':'failed','SubState':'failed',
+                  'Result':'service-start-limit-hit'},'KERNEL_SUCCESSOR_ENDPOINT_FAILURE_DENIED')
+  controls[socket]=observed
+ return controls
+
+
 @contextmanager
 def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restored,publication,
                              predecessor_boot_id,current_boot_id,retain_prestate=None):
@@ -2652,7 +2686,7 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
  for name,row in prestate.items():
   deny(row['LoadState']!='loaded' or row['NeedDaemonReload']!='no'
        or not (_unit_active(name,row) or (row['ActiveState'],row['SubState'])==('inactive','dead')
-               or (name in OPERATIONS_SERVICES and (row['ActiveState'],row['SubState'])==('failed','failed'))),
+               or (name in SUCCESSOR_FAILURE_UNITS and (row['ActiveState'],row['SubState'])==('failed','failed'))),
        'KERNEL_SUCCESSOR_UNIT_PRESTATE_DENIED')
  original=strict_json(canonical(prestate));attempted=False;restart_errors=[]
  def read(*,cleanup=False):
@@ -2689,12 +2723,15 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
   guard()
  guard();verify_predecessor()
  deny(read()!=original,'KERNEL_SUCCESSOR_UNIT_PRESTATE_CHANGED')
- failed=tuple(name for name in OPERATIONS_SERVICES if original[name]['ActiveState']=='failed')
+ failed=tuple(name for name in SUCCESSOR_FAILURE_UNITS if original[name]['ActiveState']=='failed')
+ endpoint_controls=_read_failed_operations_endpoint(original)
  if failed or not restart_predecessor:
   deny(not callable(retain_prestate),'KERNEL_SUCCESSOR_FAILURE_EVIDENCE_REQUIRED')
   retain_prestate(original)
   guard();verify_predecessor()
   deny(read()!=original,'KERNEL_SUCCESSOR_UNIT_PRESTATE_CHANGED')
+  deny(_read_failed_operations_endpoint(original)!=endpoint_controls,
+       'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
  try:
   for units in reversed(groups):
    definitions(read());attempted=True;command('stop',units)
@@ -2866,6 +2903,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
     return restored_guard
    def retain_prestate(rows):
     controls=read_operations_service_controls()
+    endpoint_controls=_read_failed_operations_endpoint(rows)
     failed=[name for name in OPERATIONS_SERVICES if rows[name]['ActiveState']=='failed']
     deny(any(controls[name]['MainPID']!='0' or any(controls[name][key]!=rows[name][key]
              for key in rows[name]) for name in failed),'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
@@ -2875,12 +2913,15 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
                                else 'DENIED_HISTORICAL_BOOT'),
         'request_sha256':sha(request_raw),'plan_sha256':sha(canonical(plan)),
         'rollback_selector':plan['rollback_selector'],'unit_prestate':rows,
-        'operations_service_controls':controls,'failed_predecessors':failed,
+        'operations_service_controls':controls,
+        'failed_predecessors':[name for name in SUCCESSOR_FAILURE_UNITS if rows[name]['ActiveState']=='failed'],
+        'operations_endpoint_failure_controls':endpoint_controls,
         'failed_predecessor_compensation':'REMAIN_INACTIVE_NEVER_RESTART'}
     evidence['evidence_digest']=sha(canonical(evidence))
     def evidence_boundary():
      material_boundary();verify_predecessor()
      deny(read_operations_service_controls()!=controls,'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
+     deny(_read_failed_operations_endpoint(rows)!=endpoint_controls,'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
     atomic(STATE/('kernel-successor-quiescence-'+sha(request_raw)+'.json'),
         evidence,witness_fd,evidence_boundary)
    successor_scope.enter_context(_quiesce_installed_kernel(unit_prestate,guard=material_boundary,

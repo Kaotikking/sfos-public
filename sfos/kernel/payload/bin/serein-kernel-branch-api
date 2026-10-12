@@ -6,14 +6,24 @@ from pathlib import Path
 # fixed; isolated Python ignores caller-controlled PYTHONPATH/user packages.
 sys.dont_write_bytecode=True
 sys.path.insert(0,str(Path(__file__).absolute().parents[2]/'lib/python3/dist-packages/serein_stage1'))
-from kernel_branch_api import serve_authority
+from kernel_branch_api import serve_authority,BranchDenied
 p=argparse.ArgumentParser();p.add_argument("--branch",choices=("AUTHORITY","OPERATIONS"),required=True);a=p.parse_args()
 if a.branch=='OPERATIONS':
- from serein_stage1.kernel_branch_api import serve_operations
+ from serein_stage1.kernel_branch_api import serve_operations,BranchDenied
  handler=serve_operations
 else:
  handler=serve_authority
-listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM,0,fileno=3);connection,_=listener.accept()
-with connection:
- handler(connection)
+listener=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM,0,fileno=3)
+# Accept=no passes one listener for every connection. Keep its existing owner
+# alive: repeated read-only witnesses must not exhaust systemd's start limit.
+# Each handler retains its own peer, deadline, source and current-boot checks.
+while True:
+ connection,_=listener.accept()
+ with connection:
+  try:
+   handler(connection)
+  except (BranchDenied,OSError):
+   # Deny only this connection; never reuse its evidence or emit a success.
+   # Listener/configuration errors outside the handler still fail the service.
+   continue
 
