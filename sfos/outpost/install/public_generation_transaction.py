@@ -55,6 +55,39 @@ IMAGE_UNITS = ('serein-outpost-host-witness.service', 'serein-outpost-host-witne
 UNIT_PROPERTIES = ('Id', 'LoadState', 'ActiveState', 'SubState', 'UnitFileState',
                    'FragmentPath', 'DropInPaths', 'NeedDaemonReload')
 
+# Only these observed oneshot/timer phases can change without a configuration
+# effect. This classification never admits a sample or relaxes promotion CAS.
+HOST_READ_PHASES = {
+    'serein-outpost-host-witness.service': {('inactive', 'dead'), ('activating', 'start')},
+    'serein-outpost-host-witness.timer': {('active', 'waiting'), ('active', 'running')},
+}
+
+
+class HostPhaseReadChanged(TransactionError):
+    """Rejected two-read sample; only pre-placement preflight may reacquire."""
+    def __init__(self, before):
+        super().__init__('PUBLIC_BOOTSTRAP_CHANGED_DURING_READ')
+        self.before = before
+
+
+def _bootstrap_phase_invariant(sample):
+    return {'files': sample.get('files'), 'units': {
+        name: {key: value for key, value in unit.items()
+               if name not in HOST_READ_PHASES or key not in {'ActiveState', 'SubState'}}
+        for name, unit in sample['units'].items()}}
+
+
+def _only_host_read_phase_changed(before, after):
+    if _bootstrap_phase_invariant(before) != _bootstrap_phase_invariant(after):
+        return False
+    for name, unit in before['units'].items():
+        other = after['units'][name]
+        if unit != other and (name not in HOST_READ_PHASES
+                or (unit['ActiveState'], unit['SubState']) not in HOST_READ_PHASES[name]
+                or (other['ActiveState'], other['SubState']) not in HOST_READ_PHASES[name]):
+            return False
+    return before != after
+
 
 @contextmanager
 def public_generation_lock(root, source_plan_sha256, boot_id):
@@ -264,18 +297,39 @@ def preflight_target(plan):
     destination = (retained_recovery_prestate(Path('/'),plan.as_dict()) if recovery
                    else prospective_generation_prestate(Path('/'),plan.as_dict()['release_digest']))
     installed = successor_generation_prestate(Path("/"))
-    bootstrap = bootstrap_prestate(Path('/'), read_bootstrap_unit)
     # A timer-driven oneshot can be activating during an otherwise healthy
     # predecessor read. Promotion cannot accept that transient state. Wait
     # read-only BEFORE staging/placement instead of orphaning a generation
     # which was already known to be ineligible for promotion.
     deadline = time.monotonic() + 30
-    while any(unit['ActiveState'] not in {'active', 'inactive', 'failed'}
-              for unit in bootstrap['units'].values()):
+    invariant = None
+    previous_sample = None
+    while True:
+        try:
+            bootstrap = bootstrap_prestate(Path('/'), read_bootstrap_unit)
+            settled = all(unit['ActiveState'] in {'active', 'inactive', 'failed'}
+                          for unit in bootstrap['units'].values())
+            sample = bootstrap
+        except HostPhaseReadChanged as changed:
+            # A rejected read is not expected-before evidence. Retain its
+            # static projection only to reject drift across reacquisitions.
+            sample, settled = changed.before, False
+        current_invariant = _bootstrap_phase_invariant(sample)
+        if invariant is not None and current_invariant != invariant:
+            raise TransactionError('PUBLIC_BOOTSTRAP_CHANGED_DURING_READ')
+        comparable = {'files': sample.get('files'), 'units': sample['units']}
+        if (previous_sample is not None and comparable != previous_sample
+                and not _only_host_read_phase_changed(previous_sample, comparable)):
+            raise TransactionError('PUBLIC_BOOTSTRAP_CHANGED_DURING_READ')
+        previous_sample = comparable
+        invariant = current_invariant
+        if time.monotonic() > deadline:
+            raise TransactionError('PUBLIC_TRANSIENT_UNIT_PREFLIGHT_DENIED')
+        if settled:
+            break
         if time.monotonic() >= deadline:
             raise TransactionError('PUBLIC_TRANSIENT_UNIT_PREFLIGHT_DENIED')
         time.sleep(0.25)
-        bootstrap = bootstrap_prestate(Path('/'), read_bootstrap_unit)
     if any(unit['UnitFileState'] not in {'', 'enabled', 'disabled', 'static'}
            for unit in bootstrap['units'].values()):
         raise TransactionError('PUBLIC_PROMOTION_UNIT_PRESTATE_DENIED')
@@ -437,7 +491,10 @@ def bootstrap_prestate(root, read_unit):
         return {'files': files, 'units': units}
     try:
         before = collect()
-        if collect() != before:
+        after = collect()
+        if after != before:
+            if _only_host_read_phase_changed(before, after):
+                raise HostPhaseReadChanged(before)
             raise TransactionError('PUBLIC_BOOTSTRAP_CHANGED_DURING_READ')
     except OSError:
         raise TransactionError('PUBLIC_BOOTSTRAP_READ_DENIED') from None
