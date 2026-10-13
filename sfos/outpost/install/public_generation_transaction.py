@@ -6,12 +6,15 @@ not included. Archive verification returns bytes, never extracts to disk.
 import io
 import gzip
 import hashlib
+import ipaddress
 import base64
 import json
 import math
 import os
 import re
+import socket
 import stat
+import struct
 import subprocess
 import time
 import tarfile
@@ -54,6 +57,148 @@ IMAGE_UNITS = ('serein-outpost-host-witness.service', 'serein-outpost-host-witne
                'serein-outpost.target')
 UNIT_PROPERTIES = ('Id', 'LoadState', 'ActiveState', 'SubState', 'UnitFileState',
                    'FragmentPath', 'DropInPaths', 'NeedDaemonReload')
+
+# Site values remain in the signed private installation plan, never in the
+# public recipe. This is the existing Debian daemon, not another time client.
+HOST_TIME_CONFIG = '/etc/systemd/timesyncd.conf'
+HOST_TIME_UNIT = 'systemd-timesyncd.service'
+
+
+def host_time_configuration(policy):
+    """Render only the explicitly bound pfSense source; confer no effects.
+
+    Both lists are reset and bound to the same source. In particular, no
+    compiled-in public fallback is implicitly accepted. Endpoint identity and
+    live synchronization must still be independently verified before admission.
+    """
+    if (not isinstance(policy, dict) or set(policy) != {'authority', 'server'}
+            or policy.get('authority') != 'pfSense'
+            or not isinstance(policy.get('server'), str)):
+        raise TransactionError('PUBLIC_HOST_TIME_POLICY_DENIED')
+    try:
+        server = ipaddress.IPv4Address(policy['server'])
+    except ipaddress.AddressValueError:
+        raise TransactionError('PUBLIC_HOST_TIME_POLICY_DENIED') from None
+    private_ranges = ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16')
+    if (str(server) != policy['server']
+            or not any(server in ipaddress.IPv4Network(net) for net in private_ranges)):
+        raise TransactionError('PUBLIC_HOST_TIME_POLICY_DENIED')
+    return ('[Time]\nNTP=\nNTP=' + str(server)
+            + '\nFallbackNTP=\nFallbackNTP=' + str(server) + '\n').encode('ascii')
+
+
+def read_host_time_observation(policy):
+    """Read the existing daemon and one source-bound RFC5905 sample, no settime.
+
+    This is an unauthenticated LAN-source observation, not a new trust anchor,
+    authority grant, or a replacement for Kernel request/replay validation.
+    """
+    host_time_configuration(policy)
+    def properties(command):
+        try:
+            result = subprocess.run(command, capture_output=True, text=True,
+                                    check=True, timeout=10, env={**os.environ, 'LC_ALL':'C'})
+            values = {}
+            for line in result.stdout.splitlines():
+                key, separator, value = line.partition('=')
+                if not separator or key in values:
+                    raise ValueError('properties')
+                values[key] = value
+            return values
+        except (OSError, subprocess.SubprocessError, ValueError):
+            raise TransactionError('PUBLIC_HOST_TIME_READ_DENIED') from None
+    daemon = properties(['/usr/bin/timedatectl', 'show-timesync', '--all', '--no-pager'])
+    clock = properties(['/usr/bin/timedatectl', 'show', '--all', '--no-pager'])
+    required = {'LinkNTPServers','RuntimeNTPServers','SystemNTPServers',
+                'FallbackNTPServers','ServerName','ServerAddress'}
+    if not required <= set(daemon) or 'NTPSynchronized' not in clock:
+        raise TransactionError('PUBLIC_HOST_TIME_READ_DENIED')
+    if daemon['LinkNTPServers'] or daemon['RuntimeNTPServers']:
+        raise TransactionError('PUBLIC_HOST_TIME_ALTERNATE_SOURCE_DENIED')
+    epoch = 2208988800
+    packet = bytearray(48); packet[0] = 0x23
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as channel:
+        channel.settimeout(3)
+        try:
+            channel.connect((policy['server'], 123))
+            before = time.time(); stamp = before + epoch
+            struct.pack_into('!II', packet, 40, int(stamp), int((stamp % 1) * 2**32))
+            monotonic_before = time.monotonic()
+            channel.send(packet); raw = channel.recv(512)
+            monotonic_after = time.monotonic(); after = time.time()
+        except OSError:
+            raise TransactionError('PUBLIC_HOST_TIME_SOURCE_UNAVAILABLE') from None
+    if (len(raw) < 48 or raw[24:32] != packet[40:48]
+            or raw[0] & 7 != 4 or (raw[0] >> 3) & 7 not in (3,4)
+            or raw[0] >> 6 == 3 or not 1 <= raw[1] <= 15):
+        raise TransactionError('PUBLIC_HOST_TIME_SAMPLE_DENIED')
+    def timestamp(at):
+        seconds, fraction = struct.unpack_from('!II', raw, at)
+        return seconds + fraction / 2**32 - epoch
+    received, transmitted = timestamp(32), timestamp(40)
+    delay = (after - before) - (transmitted - received)
+    offset = ((received - before) + (transmitted - after)) / 2
+    elapsed = monotonic_after - monotonic_before
+    if (received <= 0 or transmitted < received or not 0 <= elapsed <= 1
+            or delay < -0.001 or delay > 1
+            or abs((after-before)-elapsed) > 0.01):
+        raise TransactionError('PUBLIC_HOST_TIME_SAMPLE_DENIED')
+    return {'authority':'pfSense', 'server':policy['server'], 'observed_at':after,
+            'offset_seconds':offset, 'round_trip_seconds':elapsed, 'stratum':raw[1],
+            'source_authenticated':False, 'daemon':{key:daemon[key] for key in sorted(required)},
+            'synchronized':clock['NTPSynchronized'] == 'yes'}
+
+
+def validate_host_time_witness(policy, observation):
+    host_time_configuration(policy)
+    if not isinstance(observation, dict):
+        raise TransactionError('PUBLIC_HOST_TIME_WITNESS_DENIED')
+    daemon = observation.get('daemon', {})
+    if (observation.get('authority') != 'pfSense' or observation.get('server') != policy['server']
+            or observation.get('synchronized') is not True
+            or not isinstance(daemon, dict)
+            or type(observation.get('observed_at')) not in (int,float)
+            or not math.isfinite(observation['observed_at']) or observation['observed_at'] <= 0
+            or type(observation.get('round_trip_seconds')) not in (int,float)
+            or not math.isfinite(observation['round_trip_seconds'])
+            or not 0 <= observation['round_trip_seconds'] <= 1
+            or type(observation.get('stratum')) is not int or not 1 <= observation['stratum'] <= 15
+            or observation.get('source_authenticated') is not False
+            or daemon.get('LinkNTPServers') != '' or daemon.get('RuntimeNTPServers') != ''
+            or any(daemon.get(key) != policy['server'] for key in
+                   ('SystemNTPServers','FallbackNTPServers','ServerName','ServerAddress'))
+            or type(observation.get('offset_seconds')) not in (int,float)
+            or not math.isfinite(observation['offset_seconds'])
+            or abs(observation['offset_seconds']) > 1):
+        raise TransactionError('PUBLIC_HOST_TIME_WITNESS_DENIED')
+    return dict(observation)
+
+
+def validate_host_clock_interval(before, after, boot_id):
+    """Bound observed net UTC adjustment, not control the native daemon.
+
+    Monotonic brackets retain measurement uncertainty. They cannot exclude an
+    unobserved intermediate step or promise future daemon behavior. No code
+    here rewinds time, including after configuration compensation.
+    """
+    for sample in (before, after):
+        if (not isinstance(sample, dict) or sample.get('boot_id') != boot_id
+                or any(type(sample.get(key)) not in (int,float)
+                       or not math.isfinite(sample[key]) for key in
+                       ('utc','monotonic_before','monotonic_after'))
+                or not 0 <= sample['monotonic_after']-sample['monotonic_before'] <= .01):
+            raise TransactionError('PUBLIC_HOST_CLOCK_OBSERVATION_DENIED')
+    if after['monotonic_before'] < before['monotonic_after']:
+        raise TransactionError('PUBLIC_HOST_CLOCK_OBSERVATION_DENIED')
+    delta = after['utc'] - before['utc']
+    lower = delta - (after['monotonic_after'] - before['monotonic_before'])
+    upper = delta - (after['monotonic_before'] - before['monotonic_after'])
+    # One millisecond permits finite clock sampling resolution, not a rewind.
+    if lower < -.001 or upper > 10.001:
+        raise TransactionError('PUBLIC_HOST_CLOCK_EFFECT_DENIED')
+    return {'before':dict(before), 'after':dict(after),
+            'net_adjustment_lower_seconds':lower,'net_adjustment_upper_seconds':upper,
+            'sampling_tolerance_seconds':.001,'continuous_trajectory_proven':False}
 
 # Only these observed oneshot/timer phases can change without a configuration
 # effect. This classification never admits a sample or relaxes promotion CAS.
@@ -184,9 +329,13 @@ def _verify_plan_bytes(plan, authority_bytes, expected_authority_sha256):
     anchors do not confer installed authority or prove native file custody.
     """
     required = {"schema", "repository", "repo_url", "ref", "commit", "tree", "archive_url", "archive_sha256", "release_digest", "authority_key_id", "authority_sha256", "signature", "current_boot_id", "immutable_rows", "rollback_selector"}
-    if not isinstance(plan, dict) or set(plan) not in (required, required | {'recovery'}) or plan.get("schema") != "SereinPublicOutpostGenerationPlan/v1":
+    if (not isinstance(plan, dict) or not required <= set(plan)
+            or set(plan) - required not in (set(), {'recovery'}, {'host_time'})
+            or plan.get("schema") != "SereinPublicOutpostGenerationPlan/v1"):
         raise TransactionError("PUBLIC_PLAN_SHAPE_DENIED")
     plan = strict_json(canonical(plan))
+    if 'host_time' in plan:
+        host_time_configuration(plan['host_time'])
     if 'recovery' in plan:
         recovery = plan['recovery']
         names = {'commit','tree','archive_sha256','release_digest','source_plan_sha256',
@@ -306,7 +455,8 @@ def preflight_target(plan):
     previous_sample = None
     while True:
         try:
-            bootstrap = bootstrap_prestate(Path('/'), read_bootstrap_unit)
+            bootstrap = (bootstrap_prestate(Path('/'), read_bootstrap_unit, host_time=plan.as_dict()['host_time'])
+                         if 'host_time' in plan.as_dict() else bootstrap_prestate(Path('/'), read_bootstrap_unit))
             settled = all(unit['ActiveState'] in {'active', 'inactive', 'failed'}
                           for unit in bootstrap['units'].values())
             sample = bootstrap
@@ -399,7 +549,8 @@ def _placed_target_prestate(root, fields, selector, candidate_record, source_dig
                 'parent':{'device':info.st_dev,'inode':info.st_ino,'uid':0,'gid':0,'mode':'0755'}}
     before=_target_prestate(root,fields); destination=observe()
     installed=successor_generation_prestate(root)
-    bootstrap=bootstrap_prestate(root,read_unit)
+    bootstrap=(bootstrap_prestate(root,read_unit,host_time=fields['host_time'])
+               if 'host_time' in fields else bootstrap_prestate(root,read_unit))
     if _target_prestate(root,fields)!=before or observe()!=destination:
         raise TransactionError('PUBLIC_TARGET_CHANGED_DURING_PREFLIGHT')
     return {**before,'installed_prestate':installed,'bootstrap_prestate':bootstrap,
@@ -408,7 +559,7 @@ def _placed_target_prestate(root, fields, selector, candidate_record, source_dig
 
 def _bootstrap_file_state(root, absolute, *, capture=False):
     """Read the donor image prestate, never private keys or arbitrary paths."""
-    if absolute not in {item[0] for item in IMAGE_FILES.values()}:
+    if absolute not in {item[0] for item in IMAGE_FILES.values()} | {HOST_TIME_CONFIG}:
         raise TransactionError('PUBLIC_IMAGE_PATH_DENIED')
     path = root / absolute.lstrip('/')
     nofollow_ancestors(Path(root.anchor), path)
@@ -439,7 +590,7 @@ def _bootstrap_file_state(root, absolute, *, capture=False):
 
 def read_bootstrap_unit(name):
     """Native read-only machine interface; no status-text parsing or defaults."""
-    if name not in IMAGE_UNITS:
+    if name not in (*IMAGE_UNITS, HOST_TIME_UNIT):
         raise TransactionError('PUBLIC_UNIT_PATH_DENIED')
     try:
         result = subprocess.run(['/usr/bin/systemctl', 'show', '--all', '--no-pager',
@@ -467,13 +618,13 @@ def _checked_unit_state(name, value):
         if (value['FragmentPath'] or value['UnitFileState']
                 or value['ActiveState'] != 'inactive' or value['SubState'] != 'dead'):
             raise TransactionError('PUBLIC_UNIT_PRESTATE_DENIED')
-    elif (value['FragmentPath'] != '/etc/systemd/system/' + name
+    elif (value['FragmentPath'] != ('/usr/lib/systemd/system/' if name == HOST_TIME_UNIT else '/etc/systemd/system/') + name
           or not value['UnitFileState']):
         raise TransactionError('PUBLIC_UNIT_PRESTATE_DENIED')
     return dict(value)
 
 
-def bootstrap_prestate(root, read_unit):
+def bootstrap_prestate(root, read_unit, *, host_time=None):
     """Exact bootstrap files and native unit state, reread without mutation.
 
     Adapts donor _file_state/_unit_state to G0. Missing image files remain
@@ -481,6 +632,8 @@ def bootstrap_prestate(root, read_unit):
     expected-before evidence, not a transaction lock or permission to promote.
     """
     root = Path(os.path.abspath(root))
+    if host_time is not None:
+        host_time_configuration(host_time)
     def collect():
         files = [_bootstrap_file_state(root, target) for target, _ in IMAGE_FILES.values()]
         units = {name: _checked_unit_state(name, read_unit(name)) for name in IMAGE_UNITS}
@@ -488,6 +641,13 @@ def bootstrap_prestate(root, read_unit):
             row = next(item for item in files if item['target'] == '/etc/systemd/system/' + name)
             if (row['state'] == 'PRESENT') != (unit['LoadState'] == 'loaded'):
                 raise TransactionError('PUBLIC_UNIT_FILE_BINDING_DENIED')
+        if host_time is not None:
+            host_time_dropin_preflight(root)
+            files.append(_bootstrap_file_state(root, HOST_TIME_CONFIG))
+            unit = _checked_unit_state(HOST_TIME_UNIT, read_unit(HOST_TIME_UNIT))
+            if (unit['LoadState'], unit['ActiveState'], unit['SubState'], unit['UnitFileState']) != ('loaded', 'active', 'running', 'enabled'):
+                raise TransactionError('PUBLIC_HOST_TIME_EXISTING_DAEMON_REQUIRED')
+            units[HOST_TIME_UNIT] = unit
         return {'files': files, 'units': units}
     try:
         before = collect()
@@ -498,7 +658,22 @@ def bootstrap_prestate(root, read_unit):
             raise TransactionError('PUBLIC_BOOTSTRAP_CHANGED_DURING_READ')
     except OSError:
         raise TransactionError('PUBLIC_BOOTSTRAP_READ_DENIED') from None
-    return {**before, 'mutation_effect': 'NONE', 'admission': 'UNPROVEN'}
+    return {**before, **({'host_time':dict(host_time)} if host_time is not None else {}),
+            'mutation_effect': 'NONE', 'admission': 'UNPROVEN'}
+
+
+def host_time_dropin_preflight(root):
+    """Do not override unknown administrator/runtime/vendor time policy."""
+    root = Path(os.path.abspath(root))
+    for directory in ('etc', 'run', 'usr/local/lib', 'usr/lib'):
+        path = root / directory / 'systemd/timesyncd.conf.d'
+        nofollow_ancestors(Path(root.anchor), path)
+        if os.path.lexists(path):
+            info = path.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0
+                    or info.st_gid != 0 or stat.S_IMODE(info.st_mode) != 0o755
+                    or any(path.iterdir())):
+                raise TransactionError('PUBLIC_HOST_TIME_DROPIN_CONFLICT')
 
 
 def capture_bootstrap_predecessor(root, expected, read_unit):
@@ -509,16 +684,18 @@ def capture_bootstrap_predecessor(root, expected, read_unit):
     evidence. This function performs no write, service action or restoration.
     """
     root = Path(os.path.abspath(root))
-    if bootstrap_prestate(root, read_unit) != expected:
+    policy = expected.get('host_time')
+    if bootstrap_prestate(root, read_unit, host_time=policy) != expected:
         raise TransactionError('PUBLIC_BOOTSTRAP_PRESTATE_CHANGED')
     captured = {}
     try:
-        for (target, _), before in zip(IMAGE_FILES.values(), expected['files']):
+        for before in expected['files']:
+            target = before['target']
             row, data = _bootstrap_file_state(root, target, capture=True)
             if row != before:
                 raise TransactionError('PUBLIC_BOOTSTRAP_PRESTATE_CHANGED')
             captured[target] = data
-        if bootstrap_prestate(root, read_unit) != expected:
+        if bootstrap_prestate(root, read_unit, host_time=policy) != expected:
             raise TransactionError('PUBLIC_BOOTSTRAP_PRESTATE_CHANGED')
     except OSError:
         raise TransactionError('PUBLIC_BOOTSTRAP_READ_DENIED') from None
@@ -567,7 +744,7 @@ def prepared_prestate_receipt(evidence, release, material, capture):
             or not isinstance(boot, str)
             or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', boot)
             or set(capture) != {'image_bytes','selector_bytes'}
-            or set(capture['image_bytes']) != {item[0] for item in IMAGE_FILES.values()}
+            or set(capture['image_bytes']) != {row['target'] for row in image}
             or set(capture['selector_bytes']) != {'current','lkg'}):
         raise TransactionError('PUBLIC_PRESTATE_CAPTURE_BINDING_DENIED')
     def content(row, raw):
@@ -589,12 +766,13 @@ def prepared_prestate_receipt(evidence, release, material, capture):
         selectors[name] = content(row, raw)
     files = [{'target':row['target'],
               'pre':content(row['pre'],capture['image_bytes'][row['target']]),
-              'post':content(row['post'],material[row['source']])} for row in image]
+              'post':content(row['post'],host_time_configuration(target['bootstrap_prestate']['host_time'])
+                             if row['target'] == HOST_TIME_CONFIG else material[row['source']])} for row in image]
     return {'schema':'SereinPublicOutpostPrestateReceipt/v1',
             'source_plan_sha256':digest, 'boot_id':boot,
             'generation_target':'/usr/share/serein/outpost-generations/' + release['self_digest'].removeprefix('sha256:'),
             'selector_pre':selectors, 'image_files':files,
-            'unit_prestate':{name:dict(target['bootstrap_prestate']['units'][name]) for name in IMAGE_UNITS}}
+            'unit_prestate':{name:dict(value) for name,value in target['bootstrap_prestate']['units'].items()}}
 
 
 def seal_prestate_receipt(body, private, public):
@@ -1606,6 +1784,10 @@ def prepared_bootstrap_image(release, material, target_prestate):
         raise TransactionError('PREPARED_BOOTSTRAP_PRESTATE_REQUIRED')
     installed = target_prestate.get('installed_prestate')
     bootstrap = target_prestate.get('bootstrap_prestate')
+    policy = bootstrap.get('host_time') if isinstance(bootstrap, dict) else None
+    time_bytes = host_time_configuration(policy) if policy is not None else None
+    expected_units = set(IMAGE_UNITS) | ({HOST_TIME_UNIT} if policy is not None else set())
+    expected_paths = [item[0] for item in IMAGE_FILES.values()] + ([HOST_TIME_CONFIG] if policy is not None else [])
     if (not isinstance(installed, dict)
             or installed.get('classification') != 'SUCCESSOR_GENERATION_REPLACEMENT'
             or not isinstance(installed.get('selectors'), dict)
@@ -1614,16 +1796,17 @@ def prepared_bootstrap_image(release, material, target_prestate):
             or bootstrap.get('mutation_effect') != 'NONE'
             or not isinstance(bootstrap.get('files'), list)
             or not isinstance(bootstrap.get('units'), dict)
-            or set(bootstrap['units']) != set(IMAGE_UNITS)):
+            or set(bootstrap['units']) != expected_units):
         raise TransactionError('PREPARED_BOOTSTRAP_PRESTATE_REQUIRED')
     rows = bootstrap['files']
-    if (len(rows) != len(IMAGE_FILES)
+    if (len(rows) != len(expected_paths)
             or any(not isinstance(row, dict) for row in rows)
-            or [row.get('target') for row in rows] != [item[0] for item in IMAGE_FILES.values()]):
+            or [row.get('target') for row in rows] != expected_paths):
         raise TransactionError('PREPARED_BOOTSTRAP_DENOMINATOR_DENIED')
     image = []
-    for (source, (target, mode)), before in zip(IMAGE_FILES.items(), rows):
-        if source not in material:
+    sources = list(IMAGE_FILES.items()) + ([('@signed-host-time', (HOST_TIME_CONFIG, '0644'))] if policy is not None else [])
+    for (source, (target, mode)), before in zip(sources, rows):
+        if source != '@signed-host-time' and source not in material:
             raise TransactionError('PREPARED_BOOTSTRAP_PAYLOAD_MISSING')
         if before.get('state') == 'ABSENT':
             if set(before) != {'target', 'state'}:
@@ -1642,7 +1825,7 @@ def prepared_bootstrap_image(release, material, target_prestate):
             unit = _checked_unit_state(name, bootstrap['units'][name])
             if (before['state'] == 'PRESENT') != (unit['LoadState'] == 'loaded'):
                 raise TransactionError('PREPARED_BOOTSTRAP_UNIT_BINDING_DENIED')
-        data = material[source]
+        data = time_bytes if source == '@signed-host-time' else material[source]
         image.append({'source':source, 'target':target, 'pre':dict(before),
                       'post':{'target':target, 'state':'PRESENT', 'bytes':len(data),
                               'sha256':sha(data), 'mode':mode, 'uid':0, 'gid':0}})
@@ -1751,17 +1934,22 @@ class _GenerationFileIO:
     Existing parent permissions are preserved; no privilege repair is hidden
     here. All replacements use same-directory rename and durable readback.
     """
-    def __init__(self, root, receipt_directory):
+    def __init__(self, root, receipt_directory, *, host_time=None):
         self.root = Path(os.path.abspath(root))
         if not re.fullmatch(r'/var/lib/serein/rollback/outpost-public-generation-\d{8}T\d{6}Z-[0-9a-f]{12}', receipt_directory):
             raise TransactionError('PUBLIC_TRANSACTION_DIRECTORY_DENIED')
         self.receipt_directory = receipt_directory
+        if host_time is not None:
+            host_time_configuration(host_time)
+        self.host_time = dict(host_time) if host_time is not None else None
         self.allowed = {item[0] for item in IMAGE_FILES.values()} | {
             '/var/lib/serein-outpost/generation-state/current.json',
             '/var/lib/serein-outpost/generation-state/lkg.json',
             receipt_directory+'/forward-state.json',
             receipt_directory+'/transaction-receipt.json',
             receipt_directory+'/failure-receipt.json'}
+        if self.host_time is not None:
+            self.allowed.add(HOST_TIME_CONFIG)
 
     @contextmanager
     def parent(self, absolute):
@@ -1848,12 +2036,35 @@ class _GenerationFileIO:
 
     def unit(self,action,name=None):
         if action=='daemon-reload' and name is None:args=[action]
-        elif action in {'stop','start'} and name in IMAGE_UNITS:args=[action,name]
+        elif action in {'stop','start'} and name in (*IMAGE_UNITS, *((HOST_TIME_UNIT,) if self.host_time is not None else ())):args=[action,name]
         else:raise TransactionError('PUBLIC_SERVICE_EFFECT_DENIED')
         try:subprocess.run(['/usr/bin/systemctl',*args],check=True,capture_output=True,timeout=90)
         except (OSError,subprocess.SubprocessError):raise TransactionError('PUBLIC_SERVICE_EFFECT_FAILED') from None
 
     def unit_state(self,name):return read_bootstrap_unit(name)
+
+    def time_observation(self):
+        if self.host_time is None:
+            raise TransactionError('PUBLIC_HOST_TIME_POLICY_DENIED')
+        host_time_dropin_preflight(self.root)
+        return read_host_time_observation(self.host_time)
+
+    def clock_observation(self):
+        boot = _read_target_fact(self.root,'/proc/sys/kernel/random/boot_id').strip().decode('ascii')
+        before = time.monotonic(); utc = time.time(); after = time.monotonic()
+        if _read_target_fact(self.root,'/proc/sys/kernel/random/boot_id').strip().decode('ascii') != boot:
+            raise TransactionError('PUBLIC_HOST_CLOCK_OBSERVATION_DENIED')
+        return {'boot_id':boot,'utc':utc,'monotonic_before':before,'monotonic_after':after}
+
+    def time_witness(self):
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                return validate_host_time_witness(self.host_time, self.time_observation())
+            except TransactionError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(1)
 
 
 def _effect_row(absolute,raw,mode='0600'):
@@ -1879,6 +2090,28 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
     old journal. Current/LKG custody and unprivileged units remain unchanged.
     """
     verify_prestate_receipt(prestate_raw,body,public)
+    policy = io.host_time
+    unit_names = (*IMAGE_UNITS, *((HOST_TIME_UNIT,) if policy is not None else ()))
+    if set(body['unit_prestate']) != set(unit_names):
+        raise TransactionError('PUBLIC_HOST_TIME_BINDING_DENIED')
+    time_rows = [row for row in body['image_files'] if row['target'] == HOST_TIME_CONFIG]
+    time_before = None
+    clock_before = None
+    if policy is not None:
+        if (retained is not None or len(time_rows) != 1
+                or time_rows[0]['post'] != _effect_row(HOST_TIME_CONFIG, host_time_configuration(policy), '0644')):
+            raise TransactionError('PUBLIC_HOST_TIME_BINDING_DENIED')
+        time_before = io.time_observation()
+        offset = time_before.get('offset_seconds')
+        # A large/backward correction is not this observed bounded repair.
+        # The native daemon may step forward; history is never rewritten and
+        # compensation must never pretend it can rewind the passage of time.
+        if (time_before.get('server') != policy['server'] or type(offset) not in (int,float)
+                or not math.isfinite(offset) or not 0 <= offset <= 10):
+            raise TransactionError('PUBLIC_HOST_TIME_CORRECTION_BOUND_DENIED')
+        clock_before = io.clock_observation()
+    elif time_rows:
+        raise TransactionError('PUBLIC_HOST_TIME_BINDING_DENIED')
     selector=prepared['candidate_selector']
     source_digest = body['source_plan_sha256']
     if retained is not None:
@@ -1926,13 +2159,18 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
             raise TransactionError('PUBLIC_RETAINED_SELECTOR_DENIED')
     started=False
     try:
-        for index,name in enumerate(reversed(IMAGE_UNITS),1):
+        for index,name in enumerate(reversed(unit_names),1):
             verify_invariants()
             if body['unit_prestate'][name]['ActiveState']=='active':io.unit('stop',name)
             advance('PREPARED',index)
         for index,row in enumerate(body['image_files'],1):
             verify_invariants();io.replace(row['target'],row['pre'],row['post']);advance('IMAGE',index)
         io.unit('daemon-reload');advance('DAEMON_RELOAD')
+        time_witness = None
+        if policy is not None:
+            io.unit('start', HOST_TIME_UNIT)
+            time_witness = validate_host_time_witness(policy, io.time_witness())
+            advance('HOST_TIME_VERIFIED')
         # Preserve the last known-good selector: the captured current may be
         # unadmitted. Only current moves, atomically, after all image writes.
         if io.read(lkg['target'])!=lkg:raise TransactionError('PUBLIC_LKG_SELECTOR_CAS_DENIED')
@@ -1960,6 +2198,13 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
             if io.read(row['target'])!=row['post']:raise TransactionError('PUBLIC_IMAGE_READBACK_DENIED')
         if io.read(current['target'])!=selected or io.read(lkg['target'])!=lkg:
             raise TransactionError('PUBLIC_SELECTOR_READBACK_DENIED')
+        if policy is not None:
+            # Acceptance can take time. Never reuse the pre-promotion time
+            # sample as terminal proof of source, daemon or clock state.
+            if io.unit_state(HOST_TIME_UNIT) != body['unit_prestate'][HOST_TIME_UNIT]:
+                raise TransactionError('PUBLIC_HOST_TIME_TERMINAL_UNIT_DENIED')
+            time_witness = validate_host_time_witness(policy, io.time_observation())
+            clock_effect = validate_host_clock_interval(clock_before,io.clock_observation(),body['boot_id'])
         verify_invariants();advance('TERMINAL_ACCEPTED')
         result={'schema':'SereinOutpostBootstrapInstallReceipt/v1','result':('RESTORED_CURRENT_BOOT_OBSERVED' if retained is not None else 'INSTALLED_CURRENT_BOOT_OBSERVED'),
                 'source_plan_sha256':body['source_plan_sha256'],'boot_id':body['boot_id'],
@@ -1967,6 +2212,10 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
                 'prestate_receipt_digest':strict_json(prestate_raw)['receipt_digest'],
                 'current_boot_witness':witness,'outpost_admission':'UNPROVEN',
                 'sfos_admission':'UNPROVEN','stage1':'UNPROVEN','downstream_activation':'NONE'}
+        if policy is not None:
+            result['host_time'] = {'before':time_before, 'after':time_witness,
+                                  'clock_effect':clock_effect,
+                                  'history_rewritten':False, 'clock_rewind_permitted':False}
         if retained is not None:
             result['preserved_lkg_selector'] = strict_json(base64.b64decode(lkg['content_b64']))
             result['preserved_lkg_sha256'] = lkg['sha256']
@@ -1981,17 +2230,19 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
             verify_invariants()
             if io.read(lkg['target'])!=lkg:raise TransactionError('PUBLIC_RECOVERY_LKG_CHANGED')
             if started:
-                for name in reversed(IMAGE_UNITS):io.unit('stop',name)
+                for name in reversed(unit_names):io.unit('stop',name)
+            elif policy is not None:
+                io.unit('stop', HOST_TIME_UNIT)
             for row in [dict(target=current['target'],pre=current,post=selected),*reversed(body['image_files'])]:
                 observed=io.read(row['target'])
                 if observed==row['post']:io.replace(row['target'],observed,row['pre'])
                 elif observed!=row['pre']:raise TransactionError('PUBLIC_RECOVERY_CAS_DENIED')
             io.unit('daemon-reload')
-            for name in IMAGE_UNITS:
+            for name in unit_names:
                 if body['unit_prestate'][name]['ActiveState']=='active':io.unit('start',name)
             # Starting the captured target may pull in a dependency that was
             # inactive before this transaction. Command success isn't parity.
-            for name in reversed(IMAGE_UNITS):
+            for name in reversed(unit_names):
                 if (body['unit_prestate'][name]['ActiveState']=='inactive'
                         and io.unit_state(name)['ActiveState']!='inactive'):
                     io.unit('stop',name)

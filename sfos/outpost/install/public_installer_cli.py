@@ -403,7 +403,8 @@ def recorded_prepared_generation(plan_path, expected_plan_sha256, evidence,
                     except TransactionError:
                         if time.monotonic()>=deadline:raise
                         time.sleep(0.5)
-            io=_GenerationFileIO(Path('/'),str(Path(receipt['path']).parent))
+            io=(_GenerationFileIO(Path('/'),str(Path(receipt['path']).parent),host_time=fields['host_time'])
+                if 'host_time' in fields else _GenerationFileIO(Path('/'),str(Path(receipt['path']).parent)))
             result=_complete_bootstrap_promotion(io,prepared,body,raw,private,public,precheck,invariants,accept)
             yield result
         else:

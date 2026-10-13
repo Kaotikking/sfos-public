@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G29",
+  "generation": "G30",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -20,13 +20,13 @@
     },
     {
       "path": "install/public_generation_transaction.py",
-      "bytes": 119299,
-      "sha256": "3711741c465a8944d523327f4efba81521ed76c375d4e149cd22dbaa641eb5f3"
+      "bytes": 133705,
+      "sha256": "f4b73b81807a3db8879f2c85961ea0d096f7d325b838a4ba75db8d588dabb068"
     },
     {
       "path": "install/public_installer_cli.py",
-      "bytes": 33295,
-      "sha256": "d1a238fb8c6499dd31953215080255ad81f69b0dbff72e25bba5f72e3f0311e7"
+      "bytes": 33436,
+      "sha256": "e91464ce5f55d45508aa8f9fe5e11ed53b7e8596cec88307cb52503f8c894d70"
     },
     {
       "path": "install/transaction.py",
@@ -152,6 +152,12 @@
   "source_only_files": [],
   "runtime_dependencies": [
     {
+      "executable": "/usr/bin/timedatectl",
+      "debian_package": "systemd-timesyncd",
+      "purpose": "Existing native time daemon; signed pfSense-only configuration and source observation for bounded whole-generation Host time correction",
+      "required_when": "signed install plan contains host_time"
+    },
+    {
       "python_module": "cryptography",
       "purpose": "Ed25519 witness signing",
       "required_before_install": true
@@ -178,5 +184,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:b2dc5f0712273e2fd183a3b34f6bb4eb8379b0a87a0e526b2a4763e1c0d4bc01"
+  "self_digest": "sha256:e8ead63631bd45cf421881d6fb91cb2959c4fcf667e1f006e850856e1d31831a"
 }
