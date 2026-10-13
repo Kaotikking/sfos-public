@@ -318,7 +318,12 @@ class VitalsRuntimeStore:
         ))
         coordinator = None
         try:
-            coordinator=validate_coordinator_witness(self._read_json(self.coordinator_path),boot_id=boot_id,observed_at=now)
+            coordinator_sample = self._read_json(self.coordinator_path)
+            # The coordinator can atomically publish while earlier producers
+            # are being read. Bound it to its actual completed acquisition,
+            # not the earlier snapshot timestamp. Future claims still fail;
+            # the producer timestamp and Host/boot checks remain unchanged.
+            coordinator=validate_coordinator_witness(coordinator_sample,boot_id=boot_id,observed_at=time.time())
             if (coordinator["host_gate"] != ("CURRENT_BOOT_OBSERVED" if completed else "HOST_GATE_UNAVAILABLE")
                     or coordinator["previous_boot_id"] != host.get("previous_boot_id")):
                 raise VitalsRuntimeError("VITALS_COORDINATOR_BINDING_DENIED")

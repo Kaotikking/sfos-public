@@ -211,8 +211,8 @@
     },
     {
       "path": "outpost/outpost/vitals_runtime.py",
-      "sha256": "a35d5f990fc330f16ffdbec879cd600a847b2089e3a36beacaacdf9f5e05b075",
-      "bytes": 22032
+      "sha256": "5f62a83c8c03b4ccddcc091296c35683a782161c389bf01024fc2b91ff7cdf90",
+      "bytes": 22397
     },
     {
       "path": "outpost/outpost/watchdog.py",
@@ -221,7 +221,7 @@
     },
     {
       "path": "outpost/release-manifest.json",
-      "sha256": "1a13f7d8eb8c50a0a9ae414df82d80ed404ffa9a793a681ceea130e9bb0a4606",
+      "sha256": "58d1f2c26bf6ac278302adbd9a97d71e33da6709d90279cac9d2a327031a066c",
       "bytes": 5884
     },
     {
@@ -260,5 +260,5 @@
       "bytes": 10463
     }
   ],
-  "self_digest": "sha256:15f681927aab5e1338b392500296f3105b14677cd451abb5dcb1f2e8cf0e3635"
+  "self_digest": "sha256:5e114c8667fe5b2e7d810a56c7364a9070bb3c56cacd00062d78f8936346c2a8"
 }

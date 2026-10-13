@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G24",
+  "generation": "G25",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -105,8 +105,8 @@
     },
     {
       "path": "outpost/vitals_runtime.py",
-      "bytes": 22032,
-      "sha256": "a35d5f990fc330f16ffdbec879cd600a847b2089e3a36beacaacdf9f5e05b075"
+      "bytes": 22397,
+      "sha256": "5f62a83c8c03b4ccddcc091296c35683a782161c389bf01024fc2b91ff7cdf90"
     },
     {
       "path": "outpost/watchdog.py",
@@ -178,5 +178,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:fbafdee2fe8b65a2e59b861b0ad7c958aa61fdbfb1743013cce629520138e002"
+  "self_digest": "sha256:5434697160f7580965ab008ee04257fb8b60a1827234a8a8cf3a6c0b21111096"
 }
