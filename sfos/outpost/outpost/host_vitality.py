@@ -249,13 +249,16 @@ class HostVitalityStore:
   def identity(info):
    return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,
            info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
-  with self._history_lock:
-   try:
+  # The lock protects only the immutable verified-prefix cache reference.
+  # Each reader independently reads and hashes all bytes and checks custody;
+  # expensive IO/hash must not serialize concurrent Vitals/Host consumers.
+  with self._history_lock:cached=self._history_cache
+  try:
     fd=os.open(self.samples,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
     with os.fdopen(fd,'rb') as stream:
      before=os.fstat(stream.fileno())
      if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
-     raw=stream.read();cached=self._history_cache;rows=[];offset=0
+     raw=stream.read();rows=[];offset=0
      complete_hash=hashlib.sha256()
      if cached is not None:
       size,hashed,validated,terminated=cached
@@ -270,11 +273,12 @@ class HostVitalityStore:
      if (identity(before)!=identity(os.fstat(stream.fileno()))
          or identity(before)!=identity(self.samples.lstat()) or len(raw)!=before.st_size):
       raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
-     self._history_cache=(len(raw),complete_hash.hexdigest(),rows,raw.endswith(b'\n'))
+     with self._history_lock:
+      self._history_cache=(len(raw),complete_hash.hexdigest(),rows,raw.endswith(b'\n'))
      return rows
-   except (OSError,ValueError,TypeError):
-    self._history_cache=None
-    raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED') from None
+  except (OSError,ValueError,TypeError):
+   with self._history_lock:self._history_cache=None
+   raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED') from None
  @staticmethod
  def _projection(current,previous,count):
   return {"schema":"SereinOutpostHostVitalityState/v1","projection_revision":1,"projection_digest":digest(current),"previous_boot_id":previous["boot_id"] if previous else None,"current_boot_id":current["boot_id"],"sample_count":count,"latest":current,"classification":classify(current,previous),"authority_effect":"NONE","mutation_effect":"NONE"}
