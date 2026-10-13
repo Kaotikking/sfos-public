@@ -110,6 +110,7 @@ def read_host_time_observation(policy):
             raise TransactionError('PUBLIC_HOST_TIME_READ_DENIED') from None
     daemon = properties(['/usr/bin/timedatectl', 'show-timesync', '--all', '--no-pager'])
     clock = properties(['/usr/bin/timedatectl', 'show', '--all', '--no-pager'])
+    native = properties(['/usr/bin/dpkg-query', '-W', '-f=NativeVersion=${Version}\n', 'systemd-timesyncd'])
     required = {'LinkNTPServers','RuntimeNTPServers','SystemNTPServers',
                 'FallbackNTPServers','ServerName','ServerAddress'}
     if not required <= set(daemon) or 'NTPSynchronized' not in clock:
@@ -162,7 +163,8 @@ def read_host_time_observation(policy):
     if abs((after-before)-elapsed) > 0.01: deny_sample('CLOCK_CHANGED_DURING_SAMPLE')
     return {'authority':'pfSense', 'server':policy['server'], 'observed_at':after,
             'offset_seconds':offset, 'round_trip_seconds':elapsed, 'stratum':raw[1],
-            'source_authenticated':False, 'daemon':{key:daemon[key] for key in sorted(required)},
+            'source_authenticated':False, 'native_version':native.get('NativeVersion'),
+            'daemon':{key:daemon[key] for key in sorted(required)},
             'synchronized':clock['NTPSynchronized'] == 'yes'}
 
 
@@ -191,13 +193,35 @@ def validate_host_time_witness(policy, observation):
     return dict(observation)
 
 
-def validate_host_clock_interval(before, after, boot_id):
+def validate_host_time_correction(policy, observation):
+    """Bind native small-delta discipline, not an arbitrary clock-set road."""
+    offset = observation.get('offset_seconds')
+    if (observation.get('server') != policy['server'] or type(offset) not in (int,float)
+            or not math.isfinite(offset) or not -.4 < offset <= 10):
+        raise TransactionError('PUBLIC_HOST_TIME_CORRECTION_BOUND_DENIED')
+    # Exact public Base systemd 257.13 source: fabs(offset)<0.4 uses STA_PLL /
+    # ADJ_OFFSET; larger offsets use ADJ_SETOFFSET. Do not generalize this
+    # negative-offset permission to another native package or a backward step.
+    negative_slew = offset < 0
+    if negative_slew:
+        rtt = observation.get('round_trip_seconds')
+        if (observation.get('native_version') != '257.13-1~deb13u1'
+                or type(rtt) not in (int,float) or not math.isfinite(rtt)
+                or not 0 <= rtt <= 1
+                or offset-rtt/2 <= -.4 or offset+rtt/2 >= .4):
+            raise TransactionError('PUBLIC_HOST_TIME_CORRECTION_BOUND_DENIED')
+    return negative_slew
+
+
+def validate_host_clock_interval(before, after, boot_id, *, negative_slew=False):
     """Bound observed net UTC adjustment, not control the native daemon.
 
     Monotonic brackets retain measurement uncertainty. They cannot exclude an
     unobserved intermediate step or promise future daemon behavior. No code
     here rewinds time, including after configuration compensation.
     """
+    if type(negative_slew) is not bool:
+        raise TransactionError('PUBLIC_HOST_CLOCK_OBSERVATION_DENIED')
     for sample in (before, after):
         if (not isinstance(sample, dict) or sample.get('boot_id') != boot_id
                 or any(type(sample.get(key)) not in (int,float)
@@ -210,12 +234,16 @@ def validate_host_clock_interval(before, after, boot_id):
     delta = after['utc'] - before['utc']
     lower = delta - (after['monotonic_after'] - before['monotonic_before'])
     upper = delta - (after['monotonic_before'] - before['monotonic_after'])
-    # One millisecond permits finite clock sampling resolution, not a rewind.
-    if lower < -.001 or upper > 10.001:
+    # A native gradual negative slew reduces UTC-minus-monotonic without
+    # rewinding realtime. Contain the entire observed interval strictly in
+    # the source-bound small-delta range; do not claim continuous trajectory.
+    if ((negative_slew and (lower <= -.4 or upper >= .4))
+            or (not negative_slew and (lower < -.001 or upper > 10.001))):
         raise TransactionError('PUBLIC_HOST_CLOCK_EFFECT_DENIED')
     return {'before':dict(before), 'after':dict(after),
             'net_adjustment_lower_seconds':lower,'net_adjustment_upper_seconds':upper,
-            'sampling_tolerance_seconds':.001,'continuous_trajectory_proven':False}
+            'sampling_tolerance_seconds':.001,'continuous_trajectory_proven':False,
+            'native_negative_slew_bound':negative_slew}
 
 # Only these observed oneshot/timer phases can change without a configuration
 # effect. This classification never admits a sample or relaxes promotion CAS.
@@ -2106,7 +2134,8 @@ def _host_time_failure_record(error, checks):
     row = {'code':code if code in {
         'PUBLIC_HOST_TIME_READ_DENIED','PUBLIC_HOST_TIME_ALTERNATE_SOURCE_DENIED',
         'PUBLIC_HOST_TIME_SOURCE_UNAVAILABLE','PUBLIC_HOST_TIME_SAMPLE_DENIED',
-        'PUBLIC_HOST_TIME_WITNESS_DENIED','PUBLIC_HOST_TIME_DROPIN_CONFLICT'
+        'PUBLIC_HOST_TIME_WITNESS_DENIED','PUBLIC_HOST_TIME_DROPIN_CONFLICT',
+        'PUBLIC_HOST_TIME_CORRECTION_BOUND_DENIED'
     } else 'UNCLASSIFIED_HOST_TIME_FAILURE'}
     row['checks'] = {key:value for key,value in checks.items()
         if key in {'observation_read','synchronized','offset_in_bounds','LinkNTPServers',
@@ -2156,18 +2185,13 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
     time_rows = [row for row in body['image_files'] if row['target'] == HOST_TIME_CONFIG]
     time_before = None
     clock_before = None
+    negative_slew = False
     if policy is not None:
         if (retained is not None or len(time_rows) != 1
                 or time_rows[0]['post'] != _effect_row(HOST_TIME_CONFIG, host_time_configuration(policy), '0644')):
             raise TransactionError('PUBLIC_HOST_TIME_BINDING_DENIED')
         time_before = io.time_observation()
-        offset = time_before.get('offset_seconds')
-        # A large/backward correction is not this observed bounded repair.
-        # The native daemon may step forward; history is never rewritten and
-        # compensation must never pretend it can rewind the passage of time.
-        if (time_before.get('server') != policy['server'] or type(offset) not in (int,float)
-                or not math.isfinite(offset) or not 0 <= offset <= 10):
-            raise TransactionError('PUBLIC_HOST_TIME_CORRECTION_BOUND_DENIED')
+        negative_slew = validate_host_time_correction(policy, time_before)
         clock_before = io.clock_observation()
     elif time_rows:
         raise TransactionError('PUBLIC_HOST_TIME_BINDING_DENIED')
@@ -2267,7 +2291,10 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
             if io.unit_state(HOST_TIME_UNIT) != body['unit_prestate'][HOST_TIME_UNIT]:
                 raise TransactionError('PUBLIC_HOST_TIME_TERMINAL_UNIT_DENIED')
             time_witness = validate_host_time_witness(policy, io.time_observation())
-            clock_effect = validate_host_clock_interval(clock_before,io.clock_observation(),body['boot_id'])
+            if negative_slew and time_witness.get('native_version') != time_before['native_version']:
+                raise TransactionError('PUBLIC_HOST_TIME_CORRECTION_BOUND_DENIED')
+            clock_effect = validate_host_clock_interval(clock_before,io.clock_observation(),body['boot_id'],
+                                                       negative_slew=negative_slew)
         verify_invariants();advance('TERMINAL_ACCEPTED')
         result={'schema':'SereinOutpostBootstrapInstallReceipt/v1','result':('RESTORED_CURRENT_BOOT_OBSERVED' if retained is not None else 'INSTALLED_CURRENT_BOOT_OBSERVED'),
                 'source_plan_sha256':body['source_plan_sha256'],'boot_id':body['boot_id'],
@@ -2294,6 +2321,7 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
             'PUBLIC_HOST_TIME_SOURCE_UNAVAILABLE','PUBLIC_HOST_TIME_SAMPLE_DENIED',
             'PUBLIC_HOST_TIME_WITNESS_DENIED','PUBLIC_HOST_TIME_DROPIN_CONFLICT',
             'PUBLIC_HOST_TIME_TERMINAL_UNIT_DENIED','PUBLIC_HOST_CLOCK_OBSERVATION_DENIED',
+            'PUBLIC_HOST_TIME_CORRECTION_BOUND_DENIED',
             'PUBLIC_HOST_CLOCK_EFFECT_DENIED','PUBLIC_LKG_SELECTOR_CAS_DENIED',
             'PUBLIC_TARGET_ACTIVATION_DENIED','PUBLIC_POSTPROMOTION_WITNESS_DENIED',
             'PUBLIC_IMAGE_READBACK_DENIED','PUBLIC_SELECTOR_READBACK_DENIED',
