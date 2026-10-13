@@ -139,10 +139,16 @@ def read_host_time_observation(policy):
             failure = TransactionError('PUBLIC_HOST_TIME_SOURCE_UNAVAILABLE')
             failure.host_time_source_error = {'operation':operation,'reason':reason}
             raise failure from None
-    if (len(raw) < 48 or raw[24:32] != packet[40:48]
-            or raw[0] & 7 != 4 or (raw[0] >> 3) & 7 not in (3,4)
-            or raw[0] >> 6 == 3 or not 1 <= raw[1] <= 15):
-        raise TransactionError('PUBLIC_HOST_TIME_SAMPLE_DENIED')
+    def deny_sample(predicate):
+        failure = TransactionError('PUBLIC_HOST_TIME_SAMPLE_DENIED')
+        failure.host_time_sample_predicate = predicate
+        raise failure
+    if len(raw) < 48: deny_sample('LENGTH')
+    if raw[24:32] != packet[40:48]: deny_sample('ORIGIN')
+    if raw[0] & 7 != 4: deny_sample('MODE')
+    if (raw[0] >> 3) & 7 not in (3,4): deny_sample('VERSION')
+    if raw[0] >> 6 == 3: deny_sample('LEAP')
+    if not 1 <= raw[1] <= 15: deny_sample('STRATUM')
     def timestamp(at):
         seconds, fraction = struct.unpack_from('!II', raw, at)
         return seconds + fraction / 2**32 - epoch
@@ -150,10 +156,10 @@ def read_host_time_observation(policy):
     delay = (after - before) - (transmitted - received)
     offset = ((received - before) + (transmitted - after)) / 2
     elapsed = monotonic_after - monotonic_before
-    if (received <= 0 or transmitted < received or not 0 <= elapsed <= 1
-            or delay < -0.001 or delay > 1
-            or abs((after-before)-elapsed) > 0.01):
-        raise TransactionError('PUBLIC_HOST_TIME_SAMPLE_DENIED')
+    if received <= 0 or transmitted < received: deny_sample('TIMESTAMP_ORDER')
+    if not 0 <= elapsed <= 1: deny_sample('MONOTONIC_RTT')
+    if delay < -0.001 or delay > 1: deny_sample('NETWORK_DELAY')
+    if abs((after-before)-elapsed) > 0.01: deny_sample('CLOCK_CHANGED_DURING_SAMPLE')
     return {'authority':'pfSense', 'server':policy['server'], 'observed_at':after,
             'offset_seconds':offset, 'round_trip_seconds':elapsed, 'stratum':raw[1],
             'source_authenticated':False, 'daemon':{key:daemon[key] for key in sorted(required)},
@@ -2112,6 +2118,11 @@ def _host_time_failure_record(error, checks):
             and source['reason'] in ('TIMEOUT','CONNECTION_REFUSED','CONNECTION_RESET',
                 'NETWORK_UNREACHABLE','HOST_UNREACHABLE','PERMISSION','OTHER')):
         row['source_error'] = dict(source)
+    predicate = getattr(error, 'host_time_sample_predicate', None)
+    if (row['code'] == 'PUBLIC_HOST_TIME_SAMPLE_DENIED' and isinstance(predicate,str)
+            and predicate in ('LENGTH','ORIGIN','MODE','VERSION','LEAP','STRATUM',
+                'TIMESTAMP_ORDER','MONOTONIC_RTT','NETWORK_DELAY','CLOCK_CHANGED_DURING_SAMPLE')):
+        row['sample_predicate'] = predicate
     return row
 
 
