@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hmac
 import hashlib
+import logging
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
 from pathlib import Path
@@ -36,6 +37,39 @@ CONVERSATION_PATH = '/v1/voice/conversation'
 MAX_CONVERSATION_REQUEST_BYTES = 128 * 1024
 MAX_GATEWAY_RESPONSE_BYTES = 64 * 1024
 REQUEST_TIMEOUT_SECONDS = 2.0
+
+# Fixed codes only. Never journal exception text, headers, token, or context.
+# Journald supplies the boot/unit/PID/time binding; installed-source readback
+# binds that process to its complete generation. This is not admission.
+_REQUEST_DENIAL_CODES = frozenset({
+    'framing', 'size', 'deadline', 'incomplete', 'clock',
+    'conversation_envelope_invalid', 'conversation_identity_invalid',
+    'conversation_runtime_payload_size_invalid',
+    'conversation_runtime_duplicate_field', 'conversation_runtime_nonfinite_value',
+    'haos_tool_envelope_invalid', 'haos_tool_request_id_invalid', 'haos_tool_identity_invalid',
+    'companion_envelope_invalid', 'companion_input_invalid',
+    'companion_conversation_id_invalid', 'companion_machine_identity_invalid',
+    'companion_operation_not_admitted', 'companion_observed_at_invalid',
+    'companion_observation_stale', 'companion_observation_future',
+    'ollama_request_fields_invalid', 'ollama_request_size_invalid',
+    'ollama_messages_invalid', 'ollama_tools_invalid',
+    'conversation_tool_call_id_invalid', 'conversation_tool_result_correlation_invalid',
+    'conversation_tool_result_missing',
+})
+
+
+def _request_denial_witness(stage, error, body):
+    """Best-effort private diagnostic; never change an ingress decision."""
+    code = error.args[0] if error.args and type(error.args[0]) is str else None
+    if code not in _REQUEST_DENIAL_CODES:
+        code = ('io_error' if isinstance(error, OSError) else 'invalid_input')
+    row = {'event': 'serein_http_request_denied', 'stage': stage, 'predicate': code}
+    if body is not None:
+        row.update(body_bytes=len(body), body_sha256=hashlib.sha256(body).hexdigest())
+    try:
+        logging.getLogger(__name__).warning('%s', canonical(row).decode('ascii').strip())
+    except Exception:
+        pass  # Failed diagnostics cannot authorize a rejected request.
 
 
 def gateway_request(payload, *, root=Path('/')):
@@ -336,6 +370,8 @@ class GatewayHealthHandler(BaseHTTPRequestHandler):
                 or self.headers.get_content_type() != 'application/json'):
             self._write_json(415, {'status': 'DENIED', 'reason': 'conversation_content_type_invalid'})
             return
+        stage = 'KERNEL_HTTP_FRAMING'
+        complete_body = None
         try:
             lengths = self.headers.get_all('Content-Length', [])
             if (len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit()
@@ -356,12 +392,15 @@ class GatewayHealthHandler(BaseHTTPRequestHandler):
                 if not part:
                     raise ValueError('incomplete')
                 payload.extend(part)
+            complete_body = bytes(payload)
             current = self.server.clock()
             if not isinstance(current, datetime) or current.tzinfo is None:
                 raise ValueError('clock')
-            request, internal = validate_conversation_request(bytes(payload), tokens[0],
+            stage = 'KERNEL_ENVELOPE_VALIDATION'
+            request, internal = validate_conversation_request(complete_body, tokens[0],
                 token=self.server.companion_key, now=current)
-        except (OSError, ValueError, TypeError, AttributeError, RecursionError):
+        except (OSError, ValueError, TypeError, AttributeError, RecursionError) as error:
+            _request_denial_witness(stage, error, complete_body)
             self._write_json(400, {'status': 'DENIED', 'reason': 'conversation_request_invalid'})
             return
         try:

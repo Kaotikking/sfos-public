@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import math
 import os
 import grp
@@ -43,6 +44,16 @@ MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 class VitalsEdgeError(ValueError):
     pass
+
+
+def _request_denial_witness(predicate):
+    # No caller data. Journal boot/unit/PID/time join independent generation
+    # readback; no new store, listener, credential, or admission authority.
+    try:
+        logging.getLogger(__name__).warning(
+            'serein_http_request_denied stage=OUTPOST_HTTP_FRAMING predicate=%s', predicate)
+    except Exception:
+        pass  # The original rejection remains effective if logging fails.
 
 
 def _gateway_exchange(wire: bytes, *, root=Path('/')) -> tuple[int, bytes]:
@@ -335,6 +346,7 @@ class VitalsHandler(BaseHTTPRequestHandler):
     def handle_expect_100(self):
         # BaseHTTPRequestHandler otherwise sends an interim success before
         # do_POST can reject this unsupported framing.
+        _request_denial_witness('expect_not_admitted')
         self._gateway_reply(400, b'{"status":"DENIED","reason":"conversation_request_invalid"}')
         return False
 
@@ -354,6 +366,7 @@ class VitalsHandler(BaseHTTPRequestHandler):
             self._readonly()
             return
         self.close_connection = True
+        predicate = 'framing_invalid'
         try:
             lengths = self.headers.get_all('Content-Length', [])
             types = self.headers.get_all('Content-Type', [])
@@ -368,26 +381,31 @@ class VitalsHandler(BaseHTTPRequestHandler):
                     or any(self.headers.get_all(name) for name in
                            ('Transfer-Encoding', 'Content-Encoding', 'Expect'))):
                 raise ValueError('framing')
+            predicate = 'body_read_failed'
             deadline = time.monotonic() + self.timeout
             body = bytearray()
             length = int(lengths[0])
             while len(body) < length:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    predicate = 'body_deadline'
                     raise TimeoutError
                 self.connection.settimeout(remaining)
                 part = self.rfile.read1(min(16384, length - len(body)))
                 if not part:
+                    predicate = 'body_incomplete'
                     raise ValueError('incomplete')
                 body.extend(part)
             # Fresh fixed framing; no caller-selected host, hop-by-hop header,
             # path or extra/pipelined bytes enter the private Kernel connection.
+            predicate = 'header_encoding_invalid'
             head = (f'POST {CONVERSATION_PATH} HTTP/1.0\r\n'
                     f'Content-Type: {types[0]}\r\nContent-Length: {length}\r\nConnection: close\r\n')
             if tokens:
                 head += f'X-Serein-Client-Token: {tokens[0]}\r\n'
             wire = (head + '\r\n').encode('ascii') + bytes(body)
         except (OSError, ValueError, UnicodeError):
+            _request_denial_witness(predicate)
             self._gateway_reply(400, b'{"status":"DENIED","reason":"conversation_request_invalid"}')
             return
         try:
