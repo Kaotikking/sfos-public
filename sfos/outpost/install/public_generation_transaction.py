@@ -1942,6 +1942,7 @@ class _GenerationFileIO:
         if host_time is not None:
             host_time_configuration(host_time)
         self.host_time = dict(host_time) if host_time is not None else None
+        self.last_time_checks = {}
         self.allowed = {item[0] for item in IMAGE_FILES.values()} | {
             '/var/lib/serein-outpost/generation-state/current.json',
             '/var/lib/serein-outpost/generation-state/lkg.json',
@@ -2046,8 +2047,19 @@ class _GenerationFileIO:
     def time_observation(self):
         if self.host_time is None:
             raise TransactionError('PUBLIC_HOST_TIME_POLICY_DENIED')
+        self.last_time_checks = {'observation_read':False}
         host_time_dropin_preflight(self.root)
-        return read_host_time_observation(self.host_time)
+        observation = read_host_time_observation(self.host_time)
+        daemon = observation['daemon']
+        self.last_time_checks = {
+            'observation_read':True,
+            'synchronized':observation['synchronized'] is True,
+            'offset_in_bounds':abs(observation['offset_seconds']) <= 1,
+            **{key:daemon[key] == ('' if key in ('LinkNTPServers','RuntimeNTPServers')
+                                  else self.host_time['server']) for key in
+               ('LinkNTPServers','RuntimeNTPServers','SystemNTPServers',
+                'FallbackNTPServers','ServerName','ServerAddress')}}
+        return observation
 
     def clock_observation(self):
         boot = _read_target_fact(self.root,'/proc/sys/kernel/random/boot_id').strip().decode('ascii')
@@ -2144,12 +2156,16 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
     verify_invariants()
     initial=strict_json(base64.b64decode(journal['content_b64']))
     unsigned={key:value for key,value in initial.items() if key not in {'state_signature','state_digest'}}
+    failure_record = None
+    last_phase, last_step = initial['phase'], initial['step']
     def advance(phase,step=0):
-        nonlocal journal
+        nonlocal journal, last_phase, last_step
         verify_invariants()
-        raw=_signed_transition_record({**unsigned,'phase':phase,'step':step},private,public)
+        raw=_signed_transition_record({**unsigned,'phase':phase,'step':step,
+                                      **({'failure':failure_record} if failure_record is not None else {})},private,public)
         after=_effect_row(journal_path,raw)
         io.replace(journal_path,journal,after);journal=after
+        last_phase, last_step = phase, step
     current=body['selector_pre']['current'];lkg=body['selector_pre']['lkg']
     selected=_effect_row(current['target'],canonical(selector)+b'\n','0644')
     if retained is not None:
@@ -2224,6 +2240,31 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
         advance('COMPLETE')
         return result
     except BaseException as failure:
+        # Retain fixed predicates in the existing signed journal. Never persist
+        # arbitrary exception text, traceback, private inputs or source packets.
+        allowed_codes = {
+            'PUBLIC_HOST_TIME_READ_DENIED','PUBLIC_HOST_TIME_ALTERNATE_SOURCE_DENIED',
+            'PUBLIC_HOST_TIME_SOURCE_UNAVAILABLE','PUBLIC_HOST_TIME_SAMPLE_DENIED',
+            'PUBLIC_HOST_TIME_WITNESS_DENIED','PUBLIC_HOST_TIME_DROPIN_CONFLICT',
+            'PUBLIC_HOST_TIME_TERMINAL_UNIT_DENIED','PUBLIC_HOST_CLOCK_OBSERVATION_DENIED',
+            'PUBLIC_HOST_CLOCK_EFFECT_DENIED','PUBLIC_LKG_SELECTOR_CAS_DENIED',
+            'PUBLIC_TARGET_ACTIVATION_DENIED','PUBLIC_POSTPROMOTION_WITNESS_DENIED',
+            'PUBLIC_IMAGE_READBACK_DENIED','PUBLIC_SELECTOR_READBACK_DENIED',
+            'PUBLIC_EFFECT_CAS_DENIED','PUBLIC_VITALS_PROJECTION_DENIED',
+            'PUBLIC_VITALS_GENERATION_DENIED','PUBLIC_VITALS_TLS_IDENTITY_DENIED',
+            'PUBLIC_VITALS_ENDPOINT_DENIED','PUBLIC_VITALS_SOCKET_DENIED',
+            'PUBLIC_VITALS_TYPE_DENIED','PUBLIC_VITALS_HTML_DENIED',
+            'PUBLIC_VITALS_READINESS_DENIED','PUBLIC_VITALS_ACCEPTANCE_DENIED'}
+        code = (failure.args[0] if isinstance(failure,TransactionError)
+                and len(failure.args)==1 and isinstance(failure.args[0],str) else None)
+        failure_record = {'code':code if code in allowed_codes else 'UNCLASSIFIED_INSTALL_FAILURE',
+                          'last_completed_phase':last_phase,'last_completed_step':last_step}
+        if policy is not None:
+            failure_record['host_time_checks'] = {
+                key:value for key,value in io.last_time_checks.items()
+                if key in {'observation_read','synchronized','offset_in_bounds',
+                           'LinkNTPServers','RuntimeNTPServers','SystemNTPServers',
+                           'FallbackNTPServers','ServerName','ServerAddress'} and type(value) is bool}
         # No speculative cleanup, predecessor selection, disk restore or reboot.
         # If concurrent state/immutable identity changed, stop without overwrite.
         try:
