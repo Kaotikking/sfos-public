@@ -161,8 +161,8 @@
     },
     {
       "path": "outpost/outpost/host_vitality.py",
-      "sha256": "ec57911cc8708cae8baa7e6abb982b80bab6d9d205b02410b0dc5d54f364329c",
-      "bytes": 29732
+      "sha256": "8eda9b38eefeba79c07a5bf75e39f4567fba71c37cdb6cceab975c62493eb299",
+      "bytes": 30217
     },
     {
       "path": "outpost/outpost/host_witness_runner.py",
@@ -221,7 +221,7 @@
     },
     {
       "path": "outpost/release-manifest.json",
-      "sha256": "467a272bee14b348897cee9029b55bfae493625f9d22bffd21957bbe74dc569c",
+      "sha256": "589d23a497416802591bebcc6b91d4b4fca86a34bb3752be4e0273e1b854a903",
       "bytes": 5884
     },
     {
@@ -260,5 +260,5 @@
       "bytes": 10463
     }
   ],
-  "self_digest": "sha256:f880821c09472a4edd8982c3fdfd8e78f43eef23adcc5a39722aaaa09d8770ac"
+  "self_digest": "sha256:89b382b2aa3171db7dfcdf1bcd3af5e512577395f54cfb1614c0d5a011345ada"
 }

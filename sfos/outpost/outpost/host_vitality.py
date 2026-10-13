@@ -258,23 +258,32 @@ class HostVitalityStore:
     with os.fdopen(fd,'rb') as stream:
      before=os.fstat(stream.fileno())
      if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
-     raw=stream.read();rows=[];offset=0
+     rows=[];offset=0;terminated=False
      complete_hash=hashlib.sha256()
      if cached is not None:
-      size,hashed,validated,terminated=cached
-      if len(raw)>=size and (terminated or len(raw)==size):
-       prefix_hash=hashlib.sha256(raw[:size])
+      size,hashed,validated,cached_terminated=cached
+      if before.st_size>=size and (cached_terminated or before.st_size==size):
+       # Reuse chronology's bounded full-prefix hashing road. Never allocate
+       # or copy the entire validated history for each concurrent reader.
+       prefix_hash=hashlib.sha256();remaining=size
+       while remaining:
+        block=stream.read(min(remaining,1024*1024))
+        if not block:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
+        prefix_hash.update(block);remaining-=len(block)
        if prefix_hash.hexdigest()==hashed:
         complete_hash=prefix_hash.copy();rows=list(validated);offset=size
+        terminated=cached_terminated
        else:
-        complete_hash=hashlib.sha256()
-     complete_hash.update(raw[offset:])
-     rows.extend(validate(json.loads(line)) for line in raw[offset:].splitlines())
+        stream.seek(0)
+     raw=stream.read(before.st_size-offset)
+     complete_hash.update(raw)
+     rows.extend(validate(json.loads(line)) for line in raw.splitlines())
+     if raw:terminated=raw.endswith(b'\n')
      if (identity(before)!=identity(os.fstat(stream.fileno()))
-         or identity(before)!=identity(self.samples.lstat()) or len(raw)!=before.st_size):
+         or identity(before)!=identity(self.samples.lstat()) or offset+len(raw)!=before.st_size):
       raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
      with self._history_lock:
-      self._history_cache=(len(raw),complete_hash.hexdigest(),rows,raw.endswith(b'\n'))
+      self._history_cache=(offset+len(raw),complete_hash.hexdigest(),rows,terminated)
      return rows
   except (OSError,ValueError,TypeError):
    with self._history_lock:self._history_cache=None
