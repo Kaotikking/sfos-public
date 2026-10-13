@@ -341,12 +341,26 @@ class OfflineOllamaRealAdapter(RealAdapter):
         subprocess.run(['systemctl','daemon-reload'],check=True,timeout=30)
     def read_native_allocation_definition(self):
         result=subprocess.run(['systemctl','show','ollama.service',
-            '--property=FragmentPath,DropInPaths,NeedDaemonReload,Environment,EnvironmentFiles'],
+            '--property=FragmentPath,DropInPaths,NeedDaemonReload,Environment'],
             capture_output=True,text=True,check=True,timeout=10)
-        rows=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
-        if (set(rows)!={'FragmentPath','DropInPaths','NeedDaemonReload','Environment','EnvironmentFiles'}
+        rows={}
+        for line in result.stdout.splitlines():
+            name,separator,value=line.partition('=')
+            if not separator or name in rows:
+                raise TransactionError('NATIVE_ALLOCATION_DEFINITION_DENIED')
+            rows[name]=value
+        if (set(rows)!={'FragmentPath','DropInPaths','NeedDaemonReload','Environment'}
                 or result.stderr.strip() or rows['NeedDaemonReload'] not in {'yes','no'}):
             raise TransactionError('NATIVE_ALLOCATION_DEFINITION_DENIED')
+        # systemd 257's systemctl formatter omits an empty EnvironmentFiles
+        # array even with --all. Absence is not evidence of emptiness: read
+        # the typed native property and admit only the proven empty array.
+        files=subprocess.run(['/usr/bin/busctl','--system','--no-pager','get-property',
+            'org.freedesktop.systemd1','/org/freedesktop/systemd1/unit/ollama_2eservice',
+            'org.freedesktop.systemd1.Service','EnvironmentFiles'],
+            capture_output=True,text=True,check=True,timeout=10)
+        if files.stdout.strip()!='a(sb) 0' or files.stderr.strip():
+            raise TransactionError('NATIVE_ALLOCATION_DEFINITION_ENVIRONMENT_FILES_DENIED')
         environment={}
         for pair in shlex.split(rows['Environment']):
             name,sep,value=pair.partition('=')
@@ -355,7 +369,7 @@ class OfflineOllamaRealAdapter(RealAdapter):
             environment[name]=value
         return {'fragment':rows['FragmentPath'],'dropins':rows['DropInPaths'].split(),
             'need_reload':rows['NeedDaemonReload'],'environment':environment,
-            'environment_files':rows['EnvironmentFiles']}
+            'environment_files':''}
     def preload_native_allocation(self):
         # Same source-bound empty-prompt preload as complete Kernel residency.
         # It supplies no synthetic answer and changes no model or context.

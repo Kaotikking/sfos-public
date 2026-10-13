@@ -221,7 +221,7 @@
     },
     {
       "path": "outpost/release-manifest.json",
-      "sha256": "b5f7309e67593ebfea5ea5d3b3987f1a4218238a43e8ae4ac9beee5205d85538",
+      "sha256": "4d03040759ffed0b3887f9f5467b600b9e0f6184b6fc95024e331a121b3a3677",
       "bytes": 6206
     },
     {
@@ -260,5 +260,5 @@
       "bytes": 10463
     }
   ],
-  "self_digest": "sha256:63645f2caf23395c22a15e39dd9a6091dc5cb8faaa8c535fa2198ebfbcc3714e"
+  "self_digest": "sha256:64207393bc7e48ab87c2ceea338998061b8540369af9116ad375b704c98a229c"
 }

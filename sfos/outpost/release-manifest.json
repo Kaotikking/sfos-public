@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G35",
+  "generation": "G36",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -184,5 +184,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:7b10f3e8d4bb56683ce1316aa6ccdecefbd555be80c002718328562483645cbf"
+  "self_digest": "sha256:adb2cd0ec951209fc7c9c16537a11c900e3a16b1daca54ac815ba9595155f443"
 }

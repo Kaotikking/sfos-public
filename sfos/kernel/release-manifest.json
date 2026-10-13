@@ -314,8 +314,8 @@
     ],
     [
       "install/offline_ollama_transaction.py",
-      111105,
-      "12c8165ebe8a64fc823648cfbea7236ae28e0246942de4c55e7c1ede2bab785a",
+      111924,
+      "85c2a6fd54d95c78f8483d70be77f4c1a906083610a26172d538d7267aff2fc7",
       "0755"
     ]
   ],
@@ -341,5 +341,5 @@
   ],
   "activation": "OUTPOST_ONLY_AFTER_INACTIVE_PROOF",
   "admission_effect": "NONE",
-  "self_digest": "sha256:c5bb35e13251bc59c227f1463019d4b25d5370e1e3471bb8fd7b7164bc5b83c6"
+  "self_digest": "sha256:326858907b06ba91d22c079534b12fa2b4d4c9ec17ebefb7915cd1527ac65d43"
 }
