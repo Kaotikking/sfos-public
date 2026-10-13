@@ -13,6 +13,7 @@ import math
 import os
 import re
 import socket
+import errno
 import stat
 import struct
 import subprocess
@@ -119,15 +120,25 @@ def read_host_time_observation(policy):
     packet = bytearray(48); packet[0] = 0x23
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as channel:
         channel.settimeout(3)
+        operation = 'CONNECT'
         try:
             channel.connect((policy['server'], 123))
             before = time.time(); stamp = before + epoch
             struct.pack_into('!II', packet, 40, int(stamp), int((stamp % 1) * 2**32))
             monotonic_before = time.monotonic()
-            channel.send(packet); raw = channel.recv(512)
+            operation = 'SEND'
+            channel.send(packet)
+            operation = 'RECEIVE'
+            raw = channel.recv(512)
             monotonic_after = time.monotonic(); after = time.time()
-        except OSError:
-            raise TransactionError('PUBLIC_HOST_TIME_SOURCE_UNAVAILABLE') from None
+        except OSError as error:
+            reason = ('TIMEOUT' if isinstance(error, TimeoutError) else
+                      {errno.ECONNREFUSED:'CONNECTION_REFUSED', errno.ECONNRESET:'CONNECTION_RESET',
+                       errno.ENETUNREACH:'NETWORK_UNREACHABLE', errno.EHOSTUNREACH:'HOST_UNREACHABLE',
+                       errno.EACCES:'PERMISSION', errno.EPERM:'PERMISSION'}.get(error.errno,'OTHER'))
+            failure = TransactionError('PUBLIC_HOST_TIME_SOURCE_UNAVAILABLE')
+            failure.host_time_source_error = {'operation':operation,'reason':reason}
+            raise failure from None
     if (len(raw) < 48 or raw[24:32] != packet[40:48]
             or raw[0] & 7 != 4 or (raw[0] >> 3) & 7 not in (3,4)
             or raw[0] >> 6 == 3 or not 1 <= raw[1] <= 15):
@@ -1943,6 +1954,7 @@ class _GenerationFileIO:
             host_time_configuration(host_time)
         self.host_time = dict(host_time) if host_time is not None else None
         self.last_time_checks = {}
+        self.first_time_failure = None
         self.allowed = {item[0] for item in IMAGE_FILES.values()} | {
             '/var/lib/serein-outpost/generation-state/current.json',
             '/var/lib/serein-outpost/generation-state/lkg.json',
@@ -2073,10 +2085,34 @@ class _GenerationFileIO:
         while True:
             try:
                 return validate_host_time_witness(self.host_time, self.time_observation())
-            except TransactionError:
+            except TransactionError as error:
+                if self.first_time_failure is None:
+                    self.first_time_failure = _host_time_failure_record(error, self.last_time_checks)
                 if time.monotonic() >= deadline:
                     raise
                 time.sleep(1)
+
+
+def _host_time_failure_record(error, checks):
+    """Fixed, bounded diagnostic values only; never exception text or inputs."""
+    code = (error.args[0] if isinstance(error, TransactionError) and len(error.args)==1
+            and isinstance(error.args[0],str) else None)
+    row = {'code':code if code in {
+        'PUBLIC_HOST_TIME_READ_DENIED','PUBLIC_HOST_TIME_ALTERNATE_SOURCE_DENIED',
+        'PUBLIC_HOST_TIME_SOURCE_UNAVAILABLE','PUBLIC_HOST_TIME_SAMPLE_DENIED',
+        'PUBLIC_HOST_TIME_WITNESS_DENIED','PUBLIC_HOST_TIME_DROPIN_CONFLICT'
+    } else 'UNCLASSIFIED_HOST_TIME_FAILURE'}
+    row['checks'] = {key:value for key,value in checks.items()
+        if key in {'observation_read','synchronized','offset_in_bounds','LinkNTPServers',
+                   'RuntimeNTPServers','SystemNTPServers','FallbackNTPServers','ServerName','ServerAddress'}
+        and type(value) is bool}
+    source = getattr(error, 'host_time_source_error', None)
+    if (isinstance(source,dict) and set(source)=={'operation','reason'}
+            and source['operation'] in ('CONNECT','SEND','RECEIVE')
+            and source['reason'] in ('TIMEOUT','CONNECTION_REFUSED','CONNECTION_RESET',
+                'NETWORK_UNREACHABLE','HOST_UNREACHABLE','PERMISSION','OTHER')):
+        row['source_error'] = dict(source)
+    return row
 
 
 def _effect_row(absolute,raw,mode='0600'):
@@ -2260,6 +2296,9 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
         failure_record = {'code':code if code in allowed_codes else 'UNCLASSIFIED_INSTALL_FAILURE',
                           'last_completed_phase':last_phase,'last_completed_step':last_step}
         if policy is not None:
+            failure_record['host_time_failure'] = _host_time_failure_record(failure, io.last_time_checks)
+            if io.first_time_failure is not None:
+                failure_record['host_time_first_failure'] = dict(io.first_time_failure)
             failure_record['host_time_checks'] = {
                 key:value for key,value in io.last_time_checks.items()
                 if key in {'observation_read','synchronized','offset_in_bounds',
