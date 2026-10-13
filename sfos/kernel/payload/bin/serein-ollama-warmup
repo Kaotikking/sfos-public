@@ -1,0 +1,56 @@
+#!/usr/bin/python3
+"""Preload the pinned Serein model through Ollama's loopback API."""
+
+from __future__ import annotations
+
+import json
+import time
+import urllib.error
+import urllib.request
+
+
+ENDPOINT = "http://127.0.0.1:11434/api/generate"
+MODEL = "qwen3:4b-instruct"
+MAX_ATTEMPTS = 30
+
+
+def main() -> int:
+    payload = json.dumps(
+        {
+            "model": MODEL,
+            "prompt": "",
+            "stream": False,
+            "keep_alive": -1,
+            "options": {"num_ctx": 8192},
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        ENDPOINT,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    last_error: Exception | None = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                value = json.loads(response.read(1_048_577))
+            if (
+                response.status == 200
+                and isinstance(value, dict)
+                and value.get("model") == MODEL
+                and value.get("done") is True
+            ):
+                print("SEREIN_OLLAMA_WARMUP_READY model=qwen3:4b-instruct")
+                return 0
+            last_error = RuntimeError("warmup_response_invalid")
+        except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
+            last_error = error
+        if attempt != MAX_ATTEMPTS:
+            time.sleep(2)
+    raise RuntimeError("ollama_warmup_unavailable") from last_error
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

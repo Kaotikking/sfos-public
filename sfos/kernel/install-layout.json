@@ -76,6 +76,9 @@
     "payload/systemd": "/etc/systemd/system"
   },
   "payload_branches": {
+    "payload/bin/serein-ollama-warmup": "INTERFACE",
+    "payload/systemd/serein-ollama-warmup.service": "INTERFACE",
+    "payload/systemd/serein-ollama-warmup.timer": "INTERFACE",
     "payload/runtime/kernel-observer-access.conf": "AUTHORITY",
     "payload/serein_stage1/outpost_evidence/__init__.py": "OPERATIONS",
     "payload/serein_stage1/outpost_evidence/host_vitality.py": "OPERATIONS",

@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh canonical Serein model residency before HAOS expiry
+# An old timers.target link cannot construct a missing or unadmitted Kernel.
+Requisite=ollama.service serein-kernel-operations-api.service
+After=ollama.service serein-kernel-operations-api.service
+
+[Timer]
+# The complete owner performs the first preload; no elapsed boot trigger races it.
+OnUnitInactiveSec=4min
+AccuracySec=10s
+Unit=serein-ollama-warmup.service

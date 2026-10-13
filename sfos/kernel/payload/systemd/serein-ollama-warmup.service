@@ -1,0 +1,16 @@
+[Unit]
+Description=Preload the canonical Serein local inference model
+# Outpost owns ordered Kernel construction; never start prerequisites implicitly.
+Requisite=ollama.service serein-kernel-operations-api.service
+After=ollama.service serein-kernel-operations-api.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/serein/serein-ollama-warmup
+User=ollama
+Group=ollama
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_INET AF_UNIX

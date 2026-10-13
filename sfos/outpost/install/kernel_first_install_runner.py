@@ -29,14 +29,21 @@ VERIFY_KEY=Path("/usr/share/serein/outpost/cognition-verification.pem")
 SOURCE_RECEIPT=STATE/"source-receipt.json"
 ORDER=("AUTHORITY","OPERATIONS","INTERFACE")
 AUTHORITY_UNITS=('serein-kernel-authority-api.service','serein-kernel-authority-api.socket')
+RESIDENCY_UNITS=('serein-ollama-warmup.timer','serein-ollama-warmup.service')
+# Exact historical b8760b4 payload; only these omitted public artifacts may be
+# incorporated into an already-installed Kernel. No arbitrary file adoption.
+RESIDENCY_PREDECESSORS={
+ '/usr/libexec/serein/serein-ollama-warmup':(1634,'4a8971d72739c161d2f082a67814ad3646065a3a77011fd978311ffdf98cc89e','0755'),
+ '/etc/systemd/system/serein-ollama-warmup.service':(401,'888747ad8cb0d0979f7e5d37c1f293bd4a84bcc16e6b4c94a09af409b708a1c9','0644'),
+ '/etc/systemd/system/serein-ollama-warmup.timer':(271,'2ae487882607a7d0468ec074d144f0d1fd805dbca1002ccea0c80be57a28ad6c','0644')}
 OTHER_KERNEL_UNITS=('serein-observation-audit.service','serein-observation-audit.socket',
                     'serein-conversation-runtime.service','serein-conversation-runtime.socket',
                     'serein-kernel-client-gateway@haos.service','serein-kernel-client-gateway-haos.socket',
                     'serein-kernel-operations-heartbeat.service',
-                    'serein-kernel-operations-api.service','serein-kernel-operations-api.socket')
+                    'serein-kernel-operations-api.service','serein-kernel-operations-api.socket')+RESIDENCY_UNITS
 OPERATIONS_SERVICES=('serein-kernel-operations-heartbeat.service','serein-observation-audit.service')
 OPERATIONS_ENDPOINT=('serein-kernel-operations-api.service','serein-kernel-operations-api.socket')
-SUCCESSOR_FAILURE_UNITS=OPERATIONS_SERVICES+OPERATIONS_ENDPOINT
+SUCCESSOR_FAILURE_UNITS=OPERATIONS_SERVICES+OPERATIONS_ENDPOINT+RESIDENCY_UNITS
 OPERATIONS_UNITS=('serein-kernel-operations-api.socket','serein-kernel-operations-api.service',
                   'serein-kernel-operations-heartbeat.service',
                   'serein-observation-audit.socket','serein-observation-audit.service')
@@ -640,7 +647,8 @@ def capture_recovered_kernel_prestate(root,module,expected,*,verify_path=VERIFY_
    name=row['target']
    deny(not isinstance(name,str) or '\x00' in name or not Path(name).is_absolute()
         or '..' in Path(name).parts or Path(name).as_posix()!=name or name in names or name in module.GENERATED
-        or not any(name.startswith(prefix) for prefix in module.ROOTS)
+        or not (any(name.startswith(prefix) for prefix in module.ROOTS)
+                or name in getattr(module,'RESIDENCY_TARGETS',()))
         or row['branch'] not in ORDER or row['mode'] not in {'0644','0755'}
         or type(row['bytes']) is not int or not 0<=row['bytes']<=MAX_FILE_BYTES
         or not isinstance(row['sha256'],str) or not HEX64.fullmatch(row['sha256']),
@@ -752,7 +760,8 @@ def build_plan(source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,verify_pa
        'KERNEL_SUCCESSOR_SOURCE_RECEIPT_DENIED')
   origin=installed['plan'].get('installation_origin',installed['plan'])
   deny(reserved!=origin['reserved_domain_ids'],'KERNEL_SUCCESSOR_RESERVED_CHANGED')
-  deny(set(installed['public_payload'])!={row['target'] for row in rows},
+  old_targets=set(installed['public_payload']);new_targets={row['target'] for row in rows}
+  deny(not old_targets<=new_targets or not new_targets-old_targets<=set(RESIDENCY_PREDECESSORS),
        'KERNEL_SUCCESSOR_PAYLOAD_SET_CHANGED')
   plan['installed_predecessor']=bound
   plan['installation_origin']=strict_json(canonical(origin))
@@ -764,9 +773,11 @@ def build_plan(source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,verify_pa
        'sha256':digest,'uid':uid,'gid':gid,'mode':format(mode,'04o'),'bytes':size,
        'device':device,'inode':inode,'nlink':nlink})
   for row in rows:
-   fact=installed['public_payload'][row['target']]['prestate']
-   changed=any(fact[k]!=row[k] for k in ('bytes','sha256','mode'))
-   prestate.append({**fact,'state':'PRESENT_REPLACE' if changed else 'PRESENT_PRESERVED'})
+   if row['target'] in installed['public_payload']:
+    fact=installed['public_payload'][row['target']]['prestate']
+    changed=any(fact[k]!=row[k] for k in ('bytes','sha256','mode'))
+    prestate.append({**fact,'state':'PRESENT_REPLACE' if changed else 'PRESENT_PRESERVED'})
+   else:prestate.append(_capture_added_residency_prestate(root,module,row))
   plan['target_prestate']=module.capture_install_prestate(root,rows,prestate,preserve_generated=True)
  elif 'recovered_predecessor' in request:
   recovered=capture_recovered_kernel_prestate(root,module,request['recovered_predecessor'],verify_path=verify_path,
@@ -787,6 +798,19 @@ def build_plan(source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,verify_pa
  else:plan['target_prestate']=module.capture_target_prestate(Path(root),rows)
  deny(capture_outpost_generation(root)!=plan['outpost_generation'],'KERNEL_OUTPOST_GENERATION_CHANGED')
  return plan,host
+def _capture_added_residency_prestate(root,module,row):
+ """Absent or exact proven historical bytes only, before signing any effect."""
+ name=row['target']
+ deny(name not in RESIDENCY_PREDECESSORS or row['branch']!='INTERFACE',
+      'KERNEL_RESIDENCY_ADOPTION_DENIED')
+ size,digest,mode=RESIDENCY_PREDECESSORS[name]
+ deny(row['mode']!=mode,'KERNEL_RESIDENCY_ADOPTION_DENIED')
+ previous=module.target_prestate(Path(root),{'target':name,'bytes':size,'sha256':digest,'mode':mode})
+ if previous['state']=='ABSENT':return previous
+ changed=any(previous[key]!=row[key] for key in ('bytes','sha256','mode'))
+ return {**previous,'state':'PRESENT_REPLACE' if changed else 'PRESENT_PRESERVED'}
+
+
 def verify_install(root,plan,receipt,*,source):
  deny(capture_outpost_generation(root)!=plan['outpost_generation'],'KERNEL_OUTPOST_GENERATION_CHANGED')
  return _verify_install_material(root,plan,receipt,source=source)
@@ -1573,11 +1597,15 @@ def recover_failed_construction(root,source,receipt_path,expected):
          'KERNEL_RECOVERY_DEFINITION_CHANGED')
     if name in stopped:deny((row['ActiveState'],row['SubState'])!=('inactive','dead'),
                            'KERNEL_RECOVERY_STOP_UNPROVEN')
-  for names in (INTERFACE_UNITS,OPERATIONS_UNITS,(AUTHORITY_UNITS[1],AUTHORITY_UNITS[0])):
+  for names in (RESIDENCY_UNITS,INTERFACE_UNITS,OPERATIONS_UNITS,(AUTHORITY_UNITS[1],AUTHORITY_UNITS[0])):
    units_boundary()
-   subprocess.run(['/usr/bin/systemctl','--no-ask-password','--job-mode=replace','stop',*names],
-       check=True,timeout=90,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
-       stderr=subprocess.DEVNULL,close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
+   # Older complete generations did not own residency units. An absent unit
+   # is already quiescent; do not turn its absence into a failed stop command.
+   loaded=tuple(name for name in names if before[name]['LoadState']=='loaded')
+   if loaded:
+    subprocess.run(['/usr/bin/systemctl','--no-ask-password','--job-mode=replace','stop',*loaded],
+        check=True,timeout=90,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
    stopped.update(names);units_boundary()
   def inactive_boundary():
    material_boundary()
@@ -1613,14 +1641,15 @@ def _unit_active(name,row):
  # systemd keeps a socket active/running while its service owns the listener.
  # This is manager state only, never a domain verification/admission verdict.
  return row['ActiveState']=='active' and row['SubState'] in (
-     {'listening','running'} if name.endswith('.socket') else {'running'})
+     {'listening','running'} if name.endswith('.socket') else
+     {'waiting','running','elapsed'} if name==RESIDENCY_UNITS[0] else {'running'})
 
 
 def _read_kernel_units(names,*,service_controls=False,allow_transitional=False):
  import subprocess
  deny(type(service_controls) is not bool or type(allow_transitional) is not bool
       or (service_controls and allow_transitional) or
-      (names not in (OPERATIONS_SERVICES,OPERATIONS_ENDPOINT[:1]) if service_controls else names not in (AUTHORITY_UNITS,OTHER_KERNEL_UNITS)),
+      (names not in (OPERATIONS_SERVICES,OPERATIONS_ENDPOINT[:1]) if service_controls else names not in (AUTHORITY_UNITS,OTHER_KERNEL_UNITS,RESIDENCY_UNITS)),
       'KERNEL_UNIT_SET_DENIED')
  properties=('Id','LoadState','ActiveState','SubState','UnitFileState',
              'FragmentPath','DropInPaths','NeedDaemonReload')
@@ -1656,7 +1685,8 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False):
              if name=='serein-kernel-client-gateway@haos.service' else name)
    deny(value['FragmentPath']!='/etc/systemd/system/'+fragment or not value['UnitFileState'],
         'KERNEL_AUTHORITY_UNIT_PRESTATE_DENIED')
-   settled=_unit_active(name,value) or (value['ActiveState'],value['SubState']) in {
+   settled=_unit_active(name,value) or (name==RESIDENCY_UNITS[1] and
+           (value['ActiveState'],value['SubState'])==('activating','start')) or (value['ActiveState'],value['SubState']) in {
            ('inactive','dead'),('failed','failed')}
    # Cleanup must be able to cancel this attempt's still-pending start/stop.
    # This is NOT a ready state; only exception cleanup opts into this read.
@@ -2554,6 +2584,109 @@ def _observe_owned_gpu(plan,compute,preparation,*,signed_runtime_plan,boundary):
      'stage1':'NOT_READY','authority_effect':'NONE','admission_effect':'NONE'}
 
 
+@contextmanager
+def _companion_residency_lifecycle(plan,*,boundary,owner):
+ """Restore the proven preload/refresh path inside the whole Kernel owner.
+
+ Historical source: Project-Serein b8760b420796ae54fa788c7bdd8be2e1f3a787e0,
+ sfos/stage2/performance/haos-latency. No binary/model installation, download,
+ unit enablement, public request, identity write or admission occurs here.
+ Called only after Authority/Operations/Interface and runtime preparation.
+ """
+ import subprocess
+ boot=current_boot()
+ deny(os.geteuid()!=0 or boot!=plan.get('current_boot_id') or owner is None,
+      'KERNEL_RESIDENCY_TARGET_DENIED')
+ expected={
+  'payload/bin/serein-ollama-warmup':'/usr/libexec/serein/serein-ollama-warmup',
+  'payload/systemd/serein-ollama-warmup.service':'/etc/systemd/system/serein-ollama-warmup.service',
+  'payload/systemd/serein-ollama-warmup.timer':'/etc/systemd/system/serein-ollama-warmup.timer'}
+ for source,target in expected.items():
+  rows=[row for row in plan['payload'] if row.get('source')==source]
+  deny(len(rows)!=1 or rows[0].get('target')!=target or rows[0].get('branch')!='INTERFACE',
+       'KERNEL_RESIDENCY_SOURCE_DENIED')
+  raw=regular(SOURCE/source)
+  deny(len(raw)!=rows[0].get('bytes') or sha(raw)!=rows[0].get('sha256')
+       or regular(Path(target))!=raw,'KERNEL_RESIDENCY_SOURCE_DENIED')
+ boundary()
+ before=_read_kernel_units(RESIDENCY_UNITS)
+ deny(any(row['LoadState']!='loaded' or row['NeedDaemonReload']!='no'
+          or (row['ActiveState'],row['SubState'])!=('inactive','dead')
+          for row in before.values()),'KERNEL_RESIDENCY_PRESTATE_DENIED')
+ attempted=False
+ def definitions(rows):
+  deny(set(rows)!=set(before) or any(any(row[key]!=before[name][key] for key in
+      ('Id','LoadState','UnitFileState','FragmentPath','DropInPaths','NeedDaemonReload'))
+      for name,row in rows.items()),'KERNEL_RESIDENCY_DEFINITION_CHANGED')
+ def command(action,units):
+  try:
+   subprocess.run(['/usr/bin/systemctl','--no-ask-password',
+       '--job-mode=fail' if action=='start' else '--job-mode=replace',action,*units],
+       check=True,timeout=90,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+       stderr=subprocess.DEVNULL,close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
+  except (OSError,subprocess.SubprocessError) as exc:
+   raise RunnerDenied('KERNEL_RESIDENCY_COMMAND_FAILED') from exc
+ def stop_owned():
+  if not attempted:return
+  deny(current_boot()!=boot,'KERNEL_RESIDENCY_BOOT_CHANGED')
+  definitions(_read_kernel_units(RESIDENCY_UNITS,allow_transitional=True))
+  # Timer first prevents it queuing another preload during teardown.
+  command('stop',RESIDENCY_UNITS)
+  stopped=_read_kernel_units(RESIDENCY_UNITS);definitions(stopped)
+  failed=tuple(name for name in RESIDENCY_UNITS
+               if (stopped[name]['ActiveState'],stopped[name]['SubState'])==('failed','failed'))
+  if failed:
+   # Reuse the existing successor failure pattern: durable exact evidence
+   # before clearing only this attempted generation's stopped manager latch.
+   _retain_residency_failure(plan,stopped,boundary=boundary)
+   command('reset-failed',failed)
+   stopped=_read_kernel_units(RESIDENCY_UNITS);definitions(stopped)
+  deny(any((row['ActiveState'],row['SubState'])!=('inactive','dead')
+           for row in stopped.values()),'KERNEL_RESIDENCY_STOP_UNPROVEN')
+ def verify_owned():
+  boundary();deny(current_boot()!=boot,'KERNEL_RESIDENCY_BOOT_CHANGED')
+  rows=_read_kernel_units(RESIDENCY_UNITS);definitions(rows)
+  deny(not _unit_active(RESIDENCY_UNITS[0],rows[RESIDENCY_UNITS[0]])
+       or rows[RESIDENCY_UNITS[1]]['ActiveState']=='failed','KERNEL_RESIDENCY_UNPROVEN')
+ owner.retain(stop_owned,verify_owned)
+ try:
+  boundary();deny(current_boot()!=boot or _read_kernel_units(RESIDENCY_UNITS)!=before,
+                  'KERNEL_RESIDENCY_PRESTATE_CHANGED')
+  attempted=True
+  # Blocking oneshot success precedes refresh-timer activation. Its fixed
+  # program checks the model identity and completion; no synthetic inference.
+  command('start',(RESIDENCY_UNITS[1],))
+  rows=_read_kernel_units(RESIDENCY_UNITS);definitions(rows)
+  deny(any((row['ActiveState'],row['SubState'])!=('inactive','dead')
+           for row in rows.values()),'KERNEL_RESIDENCY_PRELOAD_UNPROVEN')
+  boundary();deny(current_boot()!=boot,'KERNEL_RESIDENCY_BOOT_CHANGED')
+  command('start',(RESIDENCY_UNITS[0],));verify_owned()
+  yield {'result':'LOCAL_MODEL_PRELOAD_COMPLETED_REFRESH_STARTED','boot_id':boot,
+         'model':'qwen3:4b-instruct','context':8192,'refresh_seconds':240,
+         'source':'COMPLETE_KERNEL_PAYLOAD','stage1':'NOT_READY','admission_effect':'NONE'}
+  verify_owned()
+ except BaseException:
+  owner.abort()
+  raise
+
+
+def _retain_residency_failure(plan,rows,*,boundary):
+ """Existing atomic witness road, scoped to this whole-generation selector."""
+ directory=Path(plan['rollback_selector'])
+ deny(directory.parent!=Path('/var/lib/serein/rollback')
+      or not re.fullmatch(r'kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',directory.name)
+      or set(rows)!=set(RESIDENCY_UNITS),'KERNEL_RESIDENCY_FAILURE_SELECTOR_DENIED')
+ value={'schema':'SereinKernelResidencyFailure/v1','boot_id':plan['current_boot_id'],
+        'plan_sha256':sha(canonical(plan)),'release_digest':plan['release_digest'],
+        'units':strict_json(canonical(rows)),'admission_effect':'NONE'}
+ with witness_directory(directory) as (fd,unchanged):
+  def guard():
+   unchanged();boundary()
+   deny(current_boot()!=plan['current_boot_id'] or _read_kernel_units(RESIDENCY_UNITS)!=rows,
+        'KERNEL_RESIDENCY_FAILURE_STATE_CHANGED')
+  atomic(directory/'residency-failure.json',value,fd,guard)
+
+
 def _complete_kernel_lifecycle(plan,receipt,request,preparation,expectation,*,boundary,
                                read_compute_expectation=None,signed_runtime_plan=None,runtime_disposition=None,
                                read_public_response=None,read_public_request=None,finalize=None):
@@ -2669,12 +2802,16 @@ def _complete_kernel_lifecycle(plan,receipt,request,preparation,expectation,*,bo
   pending.gpu_observation=gpu_observation
   raise pending
  owner=_KernelLifecycleOwnership()
+ def resident_observation(authority,operations,interface):
+  with _companion_residency_lifecycle(plan,boundary=boundary,owner=owner) as residency:
+   result=observe(authority,operations,interface)
+   return {**result,'residency':residency}
  try:
   with _authority_lifecycle(plan,receipt,challenge,boundary=boundary,owner=owner) as authority:
    with _operations_lifecycle(plan,receipt,canonical(authority),boundary=boundary,owner=owner) as operations:
     with _interface_lifecycle(plan,receipt,canonical(authority),operations,boundary=boundary,owner=owner) as interface:
      if replacement is None:
-      observations=observe(authority,operations,interface['denial_observation'])
+      observations=resident_observation(authority,operations,interface['denial_observation'])
      else:
       with _offline_companion_lifecycle(plan,receipt,canonical(authority),operations,
           request,replacement,signed_runtime_plan,boundary=boundary,
@@ -2682,7 +2819,7 @@ def _complete_kernel_lifecycle(plan,receipt,request,preparation,expectation,*,bo
           owner=owner) as runtime:
        authority=runtime['authority'];operations=runtime['operations']
        interface=observe_installed_interface(plan,receipt,canonical(authority),operations)
-       observations=observe(authority,operations,interface)
+       observations=resident_observation(authority,operations,interface)
   # All constituent exit guards have now passed, but their cleanup remains
   # armed. Publish only within this whole-domain ownership, not after return.
   deny(not callable(finalize),'KERNEL_TERMINAL_WRITER_REQUIRED')
@@ -2811,11 +2948,13 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
           for value in (predecessor_boot_id,current_boot_id)),
       'KERNEL_SUCCESSOR_BOOT_BINDING_DENIED')
  restart_predecessor=predecessor_boot_id==current_boot_id
- groups=(AUTHORITY_UNITS,OPERATIONS_UNITS,INTERFACE_UNITS)
+ groups=(AUTHORITY_UNITS,OPERATIONS_UNITS,INTERFACE_UNITS,RESIDENCY_UNITS)
  names=set(AUTHORITY_UNITS+OTHER_KERNEL_UNITS)
  deny(set(prestate)!=names,'KERNEL_SUCCESSOR_UNIT_SET_DENIED')
  for name,row in prestate.items():
-  deny(row['LoadState']!='loaded' or row['NeedDaemonReload']!='no'
+  missing_residency=(name in RESIDENCY_UNITS and row['LoadState']=='not-found'
+                     and (row['ActiveState'],row['SubState'])==('inactive','dead'))
+  deny((row['LoadState']!='loaded' and not missing_residency) or row['NeedDaemonReload']!='no'
        or not (_unit_active(name,row) or (row['ActiveState'],row['SubState'])==('inactive','dead')
                or (name in SUCCESSOR_FAILURE_UNITS and (row['ActiveState'],row['SubState'])==('failed','failed'))),
        'KERNEL_SUCCESSOR_UNIT_PRESTATE_DENIED')
@@ -2865,7 +3004,8 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
        'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
  try:
   for units in reversed(groups):
-   definitions(read());attempted=True;command('stop',units)
+   definitions(read());attempted=True
+   command('stop',tuple(name for name in units if original[name]['LoadState']=='loaded'))
    observed=read();definitions(observed)
    # systemd stop leaves an already-failed unit failed. Preserve its exact
    # original evidence first, then clear only that owned predecessor's latch.

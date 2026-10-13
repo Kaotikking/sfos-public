@@ -19,6 +19,9 @@ LATER_CORES=("PLATFORM","ROOT","MEMORY","KNOWLEDGE","UI","AUDIO","PERSONALITY","
 # Mechanical closure of the existing private Companion destination. These
 # paths do not prove authenticated Gateway ingress or whole-Kernel readiness.
 COMPANION_PACKAGE={
+ "payload/bin/serein-ollama-warmup":("INTERFACE","/usr/libexec/serein/serein-ollama-warmup","0755"),
+ "payload/systemd/serein-ollama-warmup.service":("INTERFACE","/etc/systemd/system/serein-ollama-warmup.service","0644"),
+ "payload/systemd/serein-ollama-warmup.timer":("INTERFACE","/etc/systemd/system/serein-ollama-warmup.timer","0644"),
  "payload/runtime/kernel-observer-access.conf":("AUTHORITY","/usr/lib/serein/kernel/kernel-observer-access.conf","0644"),
  "payload/runtime/replay_store.py":("OPERATIONS","/usr/lib/serein/kernel/replay_store.py","0644"),
  "payload/runtime/persistent_replay_store.py":("OPERATIONS","/usr/lib/serein/kernel/persistent_replay_store.py","0644"),
@@ -62,6 +65,14 @@ ROLLBACK_AUTH="rollback-auth.key"
 ROLLBACK_JOURNAL="phase-journal.json"
 ROOTS=("/usr/lib/serein/kernel/","/usr/lib/python3/dist-packages/serein_stage1/","/usr/libexec/serein/serein-kernel-","/etc/systemd/system/serein-kernel-","/usr/libexec/serein/serein-observation-audit","/etc/systemd/system/serein-observation-audit.","/usr/libexec/serein/serein-conversation-runtime","/etc/systemd/system/serein-conversation-runtime.")
 class Denied(RuntimeError):pass
+
+RESIDENCY_TARGETS=frozenset((
+ "/usr/libexec/serein/serein-ollama-warmup",
+ "/etc/systemd/system/serein-ollama-warmup.service",
+ "/etc/systemd/system/serein-ollama-warmup.timer"))
+
+def payload_target_allowed(name):
+ return isinstance(name,str) and (name in RESIDENCY_TARGETS or name.startswith(ROOTS))
 
 RUNTIME_DIRECTORY='/run/serein/stage1'
 RUNTIME_ACCESS_SOURCE='payload/runtime/kernel-observer-access.conf'
@@ -351,7 +362,7 @@ def capture_successor_payload(root,rows):
   name=row['target'];source=row['source']
   deny(not isinstance(name,str) or '\x00' in name or not Path(name).is_absolute() or '..' in Path(name).parts
        or Path(name).as_posix()!=name or name in names or name in GENERATED
-       or not any(name.startswith(prefix) for prefix in ROOTS)
+       or not payload_target_allowed(name)
        or not isinstance(source,str) or not source or source=='.' or '\\' in source or '\x00' in source
        or Path(source).is_absolute() or '..' in Path(source).parts or Path(source).as_posix()!=source
        or not isinstance(row['branch'],str) or row['branch'] not in ORDER
@@ -548,7 +559,7 @@ def validate(source,root,plan,identity_lookup=None):
        'KERNEL_RECOVERED_HOST_DENIED')
  for row in rows:
   deny(not isinstance(row,dict) or set(row)!={"branch","source","target","bytes","sha256","mode"} or row["branch"] not in ORDER,"KERNEL_PAYLOAD_DENIED")
-  deny(not any(row["target"].startswith(x) for x in ROOTS) or row["target"] in seen or row["mode"] not in {"0644","0755"},"KERNEL_PAYLOAD_TARGET_DENIED");seen.add(row["target"])
+  deny(not payload_target_allowed(row["target"]) or row["target"] in seen or row["mode"] not in {"0644","0755"},"KERNEL_PAYLOAD_TARGET_DENIED");seen.add(row["target"])
   source_data(source,row)
  deny([b for b in ORDER if any(r["branch"]==b for r in rows)]!=list(ORDER),"KERNEL_BRANCH_ORDER_DENIED")
  for name,expected in COMPANION_PACKAGE.items():
@@ -776,7 +787,7 @@ def rollback_transaction(root,receipt_path,boundary=lambda:None):
  root=Path(root);receipt_path=Path(receipt_path);deny(receipt_path.name!="receipt.json" or receipt_path.parent.parent!=target(root,"/var/lib/serein/rollback"),"KERNEL_RECEIPT_PATH_DENIED");info=receipt_path.lstat();deny(receipt_path.is_symlink() or not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode)!=0o600,"KERNEL_RECEIPT_CUSTODY_DENIED");receipt=json.loads(receipt_path.read_text());digest=receipt.pop("receipt_digest",None);deny(digest!=sha(canonical(receipt)),"KERNEL_RECEIPT_DIGEST_DENIED");body={k:v for k,v in receipt.items() if k!="receipt_signature"}
  rollback_dir=receipt_path.parent;dir_info=rollback_dir.lstat();deny(rollback_dir.is_symlink() or not rollback_dir.is_dir() or stat.S_IMODE(dir_info.st_mode)!=0o700 or (os.name!="nt" and (dir_info.st_uid!=0 or dir_info.st_gid!=0)),"KERNEL_ROLLBACK_DIR_CUSTODY_DENIED");auth=rollback_dir/ROLLBACK_AUTH;auth_info=auth.lstat();deny(auth.is_symlink() or not stat.S_ISREG(auth_info.st_mode) or stat.S_IMODE(auth_info.st_mode)!=0o600 or (os.name!="nt" and (auth_info.st_uid!=0 or auth_info.st_gid!=0)),"KERNEL_ROLLBACK_AUTH_CUSTODY_DENIED");key=auth.read_bytes();deny(sha(key)!=receipt.get("rollback_auth_sha256"),"KERNEL_ROLLBACK_AUTH_DENIED")
  expected=base64.urlsafe_b64encode(hmac.new(key,canonical(body),hashlib.sha256).digest()).decode().rstrip("=");deny(not hmac.compare_digest(expected,receipt.get("receipt_signature","")),"KERNEL_RECEIPT_SIGNATURE_DENIED")
- deny(receipt.get("branch_order")!=list(ORDER) or any(row.get("target") not in GENERATED and not any(row.get("target","").startswith(prefix) for prefix in ROOTS) for row in receipt.get("replacements",[])),"KERNEL_RECEIPT_TARGET_DENIED")
+ deny(receipt.get("branch_order")!=list(ORDER) or any(row.get("target") not in GENERATED and not payload_target_allowed(row.get("target")) for row in receipt.get("replacements",[])),"KERNEL_RECEIPT_TARGET_DENIED")
  journal=journal_read(rollback_dir,digest);completed=list(journal['completed']);ownership=journal.get('ownership')
  rows={row['target']:row for row in receipt['replacements']}
  prestate=receipt.get('prestate');deny(not isinstance(prestate,list) or any(not isinstance(row,dict) for row in prestate) or [row.get('target') for row in prestate]!=list(rows) or any(row.get('state') not in {'ABSENT','PRESENT_PRESERVED','PRESENT_REPLACE'} for row in prestate),"KERNEL_RECEIPT_PRESTATE_DENIED")

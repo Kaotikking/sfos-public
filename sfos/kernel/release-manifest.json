@@ -2,9 +2,17 @@
   "schema": "SereinPortableKernelRelease/v1",
   "classification": "PUBLIC_KERNEL_COMPANION_FOUNDATION_INACTIVE",
   "source_basis": {
-    "public_parent": "d63060065cadd8c581523a570b615f1dd7f6770f",
-    "public_tree": "ad04de281048c787ee04c6b5fa5cca58b892e8bc",
+    "public_parent": "9ee2a05c74b545538899ed5d992bcc1d227f8dad",
+    "public_tree": "eaa83f56de79155fd30b4ebbbbbd079c39f40ef1",
     "donor_commit": "0dca6bd7a22b83b04ddf353df901d2c7ea15c294",
+    "residency_donor": {
+      "repository": "Kaotikking/Project-Serein",
+      "commit": "b8760b420796ae54fa788c7bdd8be2e1f3a787e0",
+      "tree": "7060176217867b16481553720b2fe2e979dfec89",
+      "path": "sfos/stage2/performance/haos-latency",
+      "receipt": "PRO-61/1a2397f8-231c-4be5-abaf-1323dfec2dd0",
+      "adaptation_receipt": "PRO-132/55a4f87e-d95c-45d8-a4de-e54dd38c2216"
+    },
     "definition": [
       "PRO-132",
       "PRO-120",
@@ -47,6 +55,12 @@
       "payload/bin/serein-observation-audit",
       151,
       "ec085cc64882f8b070eb298a0bb1c2444802f3c102a8378ec22c7c91f4d45178",
+      "0755"
+    ],
+    [
+      "payload/bin/serein-ollama-warmup",
+      1634,
+      "4a8971d72739c161d2f082a67814ad3646065a3a77011fd978311ffdf98cc89e",
       "0755"
     ],
     [
@@ -171,8 +185,8 @@
     ],
     [
       "payload/serein_stage1/outpost_evidence/host_vitality.py",
-      29274,
-      "9ce0f50d6352555dca2e3aacaeedb8b61ebe05041cbcd4d67cf366c480b58b9c",
+      29456,
+      "49fd19f495e94f885e654ab492f807ea30f5c14cdd21642441863ffd98b7d490",
       "0644"
     ],
     [
@@ -270,10 +284,22 @@
       204,
       "d673394ad9a38086b207548de77990c87bcd5138712bd3a5af209d9c37a38503",
       "0644"
+    ],
+    [
+      "payload/systemd/serein-ollama-warmup.service",
+      484,
+      "a35cb32ed4e21510bafee3f2d9bb81124096f55993fbdfd4cf9b6cae4b9b6eb8",
+      "0644"
+    ],
+    [
+      "payload/systemd/serein-ollama-warmup.timer",
+      441,
+      "b2e2c0394cc3b03939fbe3ad97cbe81be1990d6cab16b54a5139f8ca4dfa9341",
+      "0644"
     ]
   ],
-  "payload_digest": "sha256:8839e52aa97fd5574eac608fb49ce9a784059adad1289146a87e875d35d5027c",
-  "install_denominator_digest": "sha256:84aaa6a76fe95c879a9cf63a296578f8cc462715ed86a6048f0ddab055b40684",
+  "payload_digest": "sha256:288d9b491b7c59bfd044b3bd4d6f068fcb5551d55f4663ed99d69ee961d65fd7",
+  "install_denominator_digest": "sha256:097ae33cfd82ba2af51cd61bf026d6ca4b99359082afb28826742006def8adc4",
   "generated_secrets": [
     "/var/lib/serein/kernel/authority/replay.key",
     "/var/lib/serein/kernel/authority/domain-identity.pem"
@@ -282,8 +308,8 @@
   "installer_files": [
     [
       "install/kernel_first_install.py",
-      65676,
-      "2919059d91d33588c94f780ed7b6b23a9f0ea5cc73bb5c1d2c08d04b71d075e6",
+      66265,
+      "cd674ebaad194fc4472e9ebecc4bd5a8e1c4599c9e75d39e41253b875f9c684a",
       "0755"
     ],
     [
@@ -315,5 +341,5 @@
   ],
   "activation": "OUTPOST_ONLY_AFTER_INACTIVE_PROOF",
   "admission_effect": "NONE",
-  "self_digest": "sha256:bff31504f41b51cb4408d0b4bdacde6cd70916cf341a97ac04a46161d4a70cde"
+  "self_digest": "sha256:d57829c8ccafc4b71b79a1306b68bb10e6cac3bcf37097f04e78af7b03ef7803"
 }
