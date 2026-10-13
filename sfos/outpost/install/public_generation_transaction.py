@@ -265,6 +265,20 @@ def preflight_target(plan):
                    else prospective_generation_prestate(Path('/'),plan.as_dict()['release_digest']))
     installed = successor_generation_prestate(Path("/"))
     bootstrap = bootstrap_prestate(Path('/'), read_bootstrap_unit)
+    # A timer-driven oneshot can be activating during an otherwise healthy
+    # predecessor read. Promotion cannot accept that transient state. Wait
+    # read-only BEFORE staging/placement instead of orphaning a generation
+    # which was already known to be ineligible for promotion.
+    deadline = time.monotonic() + 30
+    while any(unit['ActiveState'] not in {'active', 'inactive', 'failed'}
+              for unit in bootstrap['units'].values()):
+        if time.monotonic() >= deadline:
+            raise TransactionError('PUBLIC_TRANSIENT_UNIT_PREFLIGHT_DENIED')
+        time.sleep(0.25)
+        bootstrap = bootstrap_prestate(Path('/'), read_bootstrap_unit)
+    if any(unit['UnitFileState'] not in {'', 'enabled', 'disabled', 'static'}
+           for unit in bootstrap['units'].values()):
+        raise TransactionError('PUBLIC_PROMOTION_UNIT_PRESTATE_DENIED')
     if _target_prestate(Path("/"), plan.as_dict()) != before:
         raise TransactionError("PUBLIC_TARGET_CHANGED_DURING_PREFLIGHT")
     final_destination = (retained_recovery_prestate(Path('/'),plan.as_dict()) if recovery

@@ -585,9 +585,13 @@ def main(arguments=None):
         result=install_request(sys.argv[1:] if arguments is None else arguments)
         print(json.dumps(result,sort_keys=True))
         return 0
-    except (TransactionError,OSError,ValueError):
+    except (TransactionError,OSError,ValueError) as error:
         # Do not print private plan/captures or arbitrary exception content.
+        reason = str(error) if isinstance(error, TransactionError) else ''
+        if not re.fullmatch(r'[A-Z][A-Z0-9_]{1,95}', reason):
+            reason = 'INSTALL_EXCEPTION_' + type(error).__name__.upper()
         print(json.dumps({'result':'INSTALL_FAILED','admission':'UNPROVEN',
+                          'reason':reason,
                           'evidence':'PRESERVED_IN_BOUND_TRANSACTION'}))
         return 1
 
