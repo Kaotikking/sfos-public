@@ -18,12 +18,181 @@ import stat
 import tarfile
 import tempfile
 import subprocess
+import shlex
 from pathlib import Path, PurePosixPath
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 class TransactionError(RuntimeError):
     pass
+
+
+# Native llama.cpp d222767 (Ollama f96e7aa / 0.33.2): --fit-target is
+# a device-memory margin, not a layer count, model or context override.
+# This is an unadmitted candidate constituent. Only the enclosing complete
+# Kernel transaction may install it; a rendered configuration is not proof
+# of placement, latency, GPU ownership, or Stage 1.
+NATIVE_ALLOCATION_ENVIRONMENT = {'LLAMA_ARG_FIT_TARGET': '512'}
+NATIVE_ALLOCATION_TARGET = '/etc/systemd/system/ollama.service.d/serein-allocation.conf'
+NATIVE_ALLOCATION_RUNTIME = {
+    'binary_sha256': '20cca6e293efd5bbed05b26abba891df7dec75ac3edc640caa5f60eed95c6292',
+    'binary_bytes': 39348080,
+    'model_root': '/var/lib/ollama/models',
+}
+NATIVE_ALLOCATION_SCHEMA = 'SereinNativeAllocationPlan/v1'
+NATIVE_ALLOCATION_RECEIPT = 'SereinNativeAllocationReceipt/v1'
+NATIVE_ALLOCATION_WARMUP = ('/usr/libexec/serein/serein-ollama-warmup', 1634,
+    '4a8971d72739c161d2f082a67814ad3646065a3a77011fd978311ffdf98cc89e')
+
+
+def native_allocation_configuration(environment):
+    """Render the one candidate delta; never accept caller-supplied settings."""
+    if (type(environment) is not dict
+            or environment != NATIVE_ALLOCATION_ENVIRONMENT
+            or any(type(key) is not str or type(value) is not str
+                   for key, value in environment.items())):
+        raise TransactionError('NATIVE_ALLOCATION_CONFIGURATION_DENIED')
+    return b'[Service]\nEnvironment="LLAMA_ARG_FIT_TARGET=512"\n'
+
+
+def native_worker_policy(arguments, environment, material):
+    """Effective native options derived from the pinned d222767 parser/defaults.
+
+    This is configuration evidence, not measured KV allocation or performance.
+    Never infer a loaded layer count or a safe numeric margin from this result.
+    """
+    aliases={'-c':'context','--ctx-size':'context','-np':'parallel','--parallel':'parallel',
+        '-ctk':'key','--cache-type-k':'key','-ctv':'value','--cache-type-v':'value',
+        '-m':'model','--model':'model','-fitt':'fit_target','--fit-target':'fit_target',
+        '-fit':'fit','--fit':'fit','-ngl':'layers','--n-gpu-layers':'layers','--gpu-layers':'layers'}
+    if (type(arguments) is not list or not arguments or any(type(a) is not str for a in arguments)
+            or type(environment) is not dict or environment.get('LLAMA_ARG_FIT_TARGET')!='512'):
+        raise TransactionError('NATIVE_ALLOCATION_CHILD_POLICY_DENIED')
+    # The pinned Ollama launcher emits these fixed non-allocation options.
+    # Unknown options are not evidence of preserved context/model semantics.
+    fixed_options={'--host':'127.0.0.1','--log-verbosity':'4',
+        '--flash-attn':'auto','-b':'512','-ub':'512','--keep':'4'}
+    switches={'--no-webui','--offline','--no-log-prefix',
+        '--no-log-timestamps','--context-shift'}
+    selected={};seen=set();index=1
+    while index<len(arguments):
+        token=arguments[index];name,sep,value=token.partition('=')
+        if name in seen:
+            raise TransactionError('NATIVE_ALLOCATION_CHILD_POLICY_DENIED')
+        seen.add(name)
+        if name in switches:
+            if sep:raise TransactionError('NATIVE_ALLOCATION_CHILD_POLICY_DENIED')
+        elif name in aliases or name in fixed_options or name=='--port':
+            if not sep:
+                index+=1
+                if index>=len(arguments):raise TransactionError('NATIVE_ALLOCATION_CHILD_POLICY_DENIED')
+                value=arguments[index]
+            if name in aliases:
+                field=aliases[name]
+                if field in selected:raise TransactionError('NATIVE_ALLOCATION_CHILD_POLICY_DENIED')
+                selected[field]=value
+            elif name=='--port':
+                if not value.isdecimal() or not 1<=int(value)<=65535:
+                    raise TransactionError('NATIVE_ALLOCATION_CHILD_POLICY_DENIED')
+            elif value!=fixed_options[name]:
+                raise TransactionError('NATIVE_ALLOCATION_CHILD_POLICY_DENIED')
+        else:
+            raise TransactionError('NATIVE_ALLOCATION_CHILD_POLICY_DENIED')
+        index+=1
+    # Exact current model payload identified by installed readback, not a
+    # substituted smaller model. The signed material list must contain it.
+    model='/var/lib/ollama/models/blobs/sha256-85e4a5b7b8ef0e48af0e8658f5aaab9c2324c76c1641493f4d1e25fce54b18b9'
+    expected={'context':'8192','parallel':'1','key':'f16','value':'f16','model':model,
+        'fit_target':'512','fit':'on'}
+    effective={'key':'f16','value':'f16','fit':'on','fit_target':environment['LLAMA_ARG_FIT_TARGET'],**selected}
+    env_fields={'LLAMA_ARG_CTX_SIZE':'8192','LLAMA_ARG_CACHE_TYPE_K':'f16',
+        'LLAMA_ARG_CACHE_TYPE_V':'f16','LLAMA_ARG_FIT':'on','OLLAMA_KV_CACHE_TYPE':'f16',
+        'LLAMA_ARG_N_PARALLEL':'1','LLAMA_ARG_MODEL':model,'LLAMA_ARG_FIT_TARGET':'512'}
+    if (effective!=expected or set(environment)-set(env_fields)
+            or any(name in environment and environment[name]!=value for name,value in env_fields.items())
+            or not any(row['path']==model and row['role']=='model' and row['type']=='regular'
+                       and row['sha256']==model.rsplit('-',1)[1] for row in material)):
+        raise TransactionError('NATIVE_ALLOCATION_CHILD_POLICY_DENIED')
+    return {'result':'PINNED_NATIVE_CONFIGURATION_OBSERVED','context':8192,'parallel':1,
+        'key':'f16','value':'f16','fit_target_mib':512,'model_path':model,
+        'defaults_source':'llama.cpp/d222767c7a6516559a3f49e7721b6c6b1acc87b4/common/common.h',
+        'placement':'UNPROVEN','performance':'UNPROVEN','stage1':'NOT_READY'}
+
+
+def native_allocation_transition(before, after, *, restoring=False):
+    """Verify a declared restart without erasing the original process tuple.
+
+    Inputs are observations captured by the transaction, not caller authority.
+    Complete material custody/bytes and boot remain identical; only the process
+    incarnation and this one native setting may change. In restoration mode
+    ``before`` is the retained original and ``after`` the observed restoration;
+    restoring bytes must not be misreported as restoring the original PID.
+    This pure comparison does not read/write files, restart, or admit anything.
+    """
+    try:
+        before = json.loads(canonical(before)); after = json.loads(canonical(after))
+        fields = {'runtime', 'environment', 'material', 'model', 'required_context', 'required_kv_cache'}
+        runtime_fields = {'boot_id', 'pid', 'start_time', 'binary_sha256', 'binary_bytes', 'model_root'}
+        if type(restoring) is not bool or set(before) != fields or set(after) != fields:
+            raise ValueError('SHAPE')
+        for value in (before, after):
+            runtime = value['runtime']
+            if (type(runtime) is not dict or set(runtime) != runtime_fields
+                    or not isinstance(runtime['boot_id'], str)
+                    or not re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', runtime['boot_id'])
+                    or type(runtime['pid']) is not int or runtime['pid'] <= 0
+                    or not isinstance(runtime['start_time'], str)
+                    or not runtime['start_time'].isdecimal()
+                    or any(runtime[key] != expected for key, expected in NATIVE_ALLOCATION_RUNTIME.items())
+                    or type(runtime['binary_bytes']) is not int
+                    or value['model'] != PINNED_MODEL
+                    or type(value['required_context']) is not int or value['required_context'] != 8192
+                    or value['required_kv_cache'] != {'key': 'f16', 'value': 'f16'}):
+                raise ValueError('RUNTIME')
+            environment = value['environment']
+            if (type(environment) is not dict
+                    or any(type(key) is not str or type(item) is not str
+                           or not key or '\x00' in key + item for key, item in environment.items())):
+                raise ValueError('ENVIRONMENT')
+            # Exact byte inventory is supplied by the source-bound collector.
+            # Require both runtime and model closure, not just the main binary.
+            material = value['material']
+            if type(material) is not list or not material:
+                raise ValueError('MATERIAL')
+            seen = set(); roles = set()
+            for row in material:
+                if (type(row) is not dict
+                        or set(row) != {'path', 'role', 'type', 'sha256', 'bytes', 'uid', 'gid', 'mode'}
+                        or row['role'] not in {'runtime', 'model'}
+                        or row['type'] not in {'regular', 'symlink', 'directory'}
+                        or type(row['path']) is not str or not row['path'].startswith('/')
+                        or str(PurePosixPath(row['path'])) != row['path']
+                        or '..' in PurePosixPath(row['path']).parts or '\\' in row['path']
+                        or row['path'] in seen
+                        or type(row['sha256']) is not str or not re.fullmatch('[0-9a-f]{64}', row['sha256'])
+                        or any(type(row[key]) is not int or row[key] < 0 for key in ('bytes', 'uid', 'gid', 'mode'))
+                        or row['mode'] > 0o7777):
+                    raise ValueError('MATERIAL_ROW')
+                seen.add(row['path']); roles.add(row['role'])
+            if roles != {'runtime', 'model'}:
+                raise ValueError('MATERIAL_CLOSURE')
+        old = before['runtime']; new = after['runtime']
+        if (any(old[key] != new[key] for key in runtime_fields - {'pid', 'start_time'})
+                or (not (restoring and old == new)
+                    and int(new['start_time']) <= int(old['start_time']))
+                or before['material'] != after['material']):
+            raise ValueError('PRESERVATION')
+        expected_environment = dict(before['environment'])
+        if not restoring:
+            expected_environment.update(NATIVE_ALLOCATION_ENVIRONMENT)
+        if after['environment'] != expected_environment:
+            raise ValueError('ENVIRONMENT_DELTA')
+        return {'result': 'RESTORED_RUNTIME_OBSERVED' if restoring else 'NATIVE_ALLOCATION_TRANSITION_OBSERVED',
+                'before': before, 'after': after, 'stage1': 'NOT_READY',
+                'placement': 'UNPROVEN', 'performance': 'UNPROVEN',
+                'authority_effect': 'NONE', 'admission_effect': 'NONE'}
+    except (ValueError, TypeError, KeyError, OverflowError) as exc:
+        raise TransactionError('NATIVE_ALLOCATION_TRANSITION_DENIED') from exc
 
 
 # ADAPT only the used primitives from public0dca6bd7 transaction.py,
@@ -168,6 +337,40 @@ class OfflineOllamaRealAdapter(RealAdapter):
     def start_unit(self,name):
         if name!="ollama.service": raise TransactionError("OFFLINE_UNIT_DENIED")
         subprocess.run(["systemctl","start",name],check=True)
+    def reload_native_allocation(self):
+        subprocess.run(['systemctl','daemon-reload'],check=True,timeout=30)
+    def read_native_allocation_definition(self):
+        result=subprocess.run(['systemctl','show','ollama.service',
+            '--property=FragmentPath,DropInPaths,NeedDaemonReload,Environment,EnvironmentFiles'],
+            capture_output=True,text=True,check=True,timeout=10)
+        rows=dict(line.split('=',1) for line in result.stdout.splitlines() if '=' in line)
+        if (set(rows)!={'FragmentPath','DropInPaths','NeedDaemonReload','Environment','EnvironmentFiles'}
+                or result.stderr.strip() or rows['NeedDaemonReload'] not in {'yes','no'}):
+            raise TransactionError('NATIVE_ALLOCATION_DEFINITION_DENIED')
+        environment={}
+        for pair in shlex.split(rows['Environment']):
+            name,sep,value=pair.partition('=')
+            if not sep or not re.fullmatch('[A-Za-z_][A-Za-z0-9_]*',name) or name in environment:
+                raise TransactionError('NATIVE_ALLOCATION_DEFINITION_ENVIRONMENT_DENIED')
+            environment[name]=value
+        return {'fragment':rows['FragmentPath'],'dropins':rows['DropInPaths'].split(),
+            'need_reload':rows['NeedDaemonReload'],'environment':environment,
+            'environment_files':rows['EnvironmentFiles']}
+    def preload_native_allocation(self):
+        # Same source-bound empty-prompt preload as complete Kernel residency.
+        # It supplies no synthetic answer and changes no model or context.
+        name, size, expected = NATIVE_ALLOCATION_WARMUP
+        path = under(self.root, name); nofollow_ancestors(self.root, path, allow_missing=False)
+        raw,before,identity = _native_file_read(self, path, limit=1634)
+        if (before['sha256'] != expected or before['bytes'] != size
+                or before['uid'] != 0 or before['gid'] != 0 or before['mode'] != 0o755):
+            raise TransactionError('NATIVE_ALLOCATION_WARMUP_SOURCE_DENIED')
+        # Execute the exact captured and pinned Python bytes. A pathname swap
+        # after verification cannot choose a different root program.
+        subprocess.run(['/usr/bin/python3','-B','-c',raw.decode('utf-8')],
+                       check=True,timeout=1860,capture_output=True)
+        if _native_file_read(self,path,limit=1634)!=(raw,before,identity):
+            raise TransactionError('NATIVE_ALLOCATION_WARMUP_SOURCE_CHANGED')
     def restore_unit(self,name,state):
         if name!="ollama.service": raise TransactionError("OFFLINE_UNIT_DENIED")
         _restorable_unit(state)
@@ -183,6 +386,128 @@ class OfflineOllamaRealAdapter(RealAdapter):
         if observed.returncode or observed.stderr.strip() or not re.fullmatch(r'[1-9][0-9]*',value):
             raise TransactionError('OFFLINE_RUNTIME_PROCESS_UNAVAILABLE')
         return int(value)
+    def native_runtime_stopped(self):
+        result=subprocess.run(['systemctl','show','ollama.service','--property=MainPID','--value'],
+            capture_output=True,text=True,check=True,timeout=10)
+        if result.stdout.strip()!='0' or result.stderr.strip():return False
+        group=self.root/'sys/fs/cgroup/system.slice/ollama.service'
+        nofollow_ancestors(self.root,group)
+        if not os.path.lexists(group):return True
+        if group.is_symlink() or not group.is_dir():return False
+        paths=[group,*sorted(path for path in group.rglob('*') if path.is_dir())]
+        for path in paths:
+            nofollow_ancestors(self.root,path,allow_missing=False)
+            procs=path/'cgroup.procs'
+            if procs.is_symlink() or procs.read_text().strip():return False
+        return paths==[group,*sorted(path for path in group.rglob('*') if path.is_dir())]
+    def observe_native_material(self):
+        return self.observe_native_allocation(material_only=True)['material']
+    def observe_native_allocation(self, *, material_only=False):
+        """Capture the existing runtime's material without running inference.
+
+        The source-bound owner must compare this with the signed plan. This
+        read alone grants no restart/configuration or admission authority.
+        Environment selection covers native inference/model/device controls;
+        service invocation IDs are intentionally not runtime configuration.
+        """
+        before = None if material_only else self.observe_runtime()
+        try:
+            if not material_only and any(before[key] != value for key, value in NATIVE_ALLOCATION_RUNTIME.items()):
+                raise ValueError('RUNTIME_IMAGE')
+            proc = None if material_only else self.root/'proc'/str(before['pid'])
+            def environment():
+                if material_only:return {}
+                with (proc/'environ').open('rb') as stream: raw = stream.read(1048577)
+                if len(raw) > 1048576: raise ValueError('ENVIRONMENT_SIZE')
+                selected = {}
+                for pair in raw.split(b'\0'):
+                    key, separator, value = pair.partition(b'=')
+                    if separator and (key.startswith((b'OLLAMA_', b'LLAMA_ARG_', b'GGML_'))
+                                      or key in {b'HOME', b'CUDA_VISIBLE_DEVICES', b'LD_LIBRARY_PATH'}):
+                        name = key.decode('utf-8')
+                        if name in selected: raise ValueError('ENVIRONMENT_DUPLICATE')
+                        selected[name] = value.decode('utf-8')
+                return selected
+            selected = environment()
+            if selected.get('OLLAMA_KV_CACHE_TYPE', 'f16') != 'f16':
+                raise ValueError('KV_CACHE')
+            if any(name in selected for name in ('LLAMA_ARG_CTX_SIZE', 'LLAMA_ARG_N_GPU_LAYERS',
+                   'LLAMA_ARG_CACHE_TYPE_K', 'LLAMA_ARG_CACHE_TYPE_V')):
+                raise ValueError('UNBOUND_OVERRIDE')
+            models = self.root/'var/lib/ollama/models'
+            manifest = models/'manifests/registry.ollama.ai/library/qwen3/4b-instruct'
+            nofollow_ancestors(self.root, manifest, allow_missing=False)
+            with manifest.open('rb') as stream:
+                manifest_raw = stream.read(PINNED_MODEL_FILES[PINNED_MODEL['digest'].removeprefix('sha256:')] + 1)
+            manifest_digest = hashlib.sha256(manifest_raw).hexdigest()
+            if (manifest_digest != PINNED_MODEL['digest'].removeprefix('sha256:')
+                    or len(manifest_raw) != PINNED_MODEL_FILES[manifest_digest]):
+                raise ValueError('MODEL_MANIFEST')
+            document = json.loads(manifest_raw)
+            descriptors = [document['config'], *document['layers']]
+            model_paths = [manifest]
+            model_hashes = {manifest: manifest_digest}
+            for row in descriptors:
+                identity = row['digest']
+                if (not re.fullmatch('sha256:[0-9a-f]{64}', identity)
+                        or type(row['size']) is not int
+                        or PINNED_MODEL_FILES.get(identity.removeprefix('sha256:')) != row['size']):
+                    raise ValueError('MODEL_BLOB')
+                path = models/'blobs'/identity.replace(':', '-')
+                model_paths.append(path); model_hashes[path] = identity.removeprefix('sha256:')
+            if (len(set(model_paths)) != len(model_paths)
+                    or {PINNED_MODEL['digest'].removeprefix('sha256:'),
+                        *(row['digest'].removeprefix('sha256:') for row in descriptors)} != set(PINNED_MODEL_FILES)):
+                raise ValueError('MODEL_CLOSURE')
+            runtime = self.root/'usr/lib/ollama'
+            nofollow_ancestors(self.root, runtime, allow_missing=False)
+            def runtime_paths():
+                return [self.root/'usr/bin/ollama', runtime, *sorted(runtime.rglob('*'))]
+            runtime_files = runtime_paths()
+            material = []; identities = []
+            for role, paths in (('runtime', runtime_files), ('model', model_paths)):
+                for path in paths:
+                    nofollow_ancestors(self.root, path.parent, allow_missing=False)
+                    initial = path.lstat()
+                    if stat.S_ISREG(initial.st_mode):
+                        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                        with os.fdopen(fd, 'rb') as stream:
+                            captured = os.fstat(stream.fileno()); value = hashlib.sha256(); size = 0
+                            while chunk := stream.read(8*1024*1024):
+                                value.update(chunk); size += len(chunk)
+                            final = os.fstat(stream.fileno())
+                        kind = 'regular'; digest_value = value.hexdigest()
+                    elif role == 'runtime' and stat.S_ISLNK(initial.st_mode):
+                        raw = os.readlink(path).encode('utf-8')
+                        resolved = path.resolve(strict=True)
+                        if resolved not in runtime_files or not resolved.is_file():
+                            raise ValueError('RUNTIME_LINK_OUTSIDE_MATERIAL')
+                        captured = final = initial; kind = 'symlink'
+                        size = len(raw); digest_value = hashlib.sha256(raw).hexdigest()
+                    elif role == 'runtime' and stat.S_ISDIR(initial.st_mode):
+                        captured = final = initial; kind = 'directory'
+                        size = 0; digest_value = hashlib.sha256(b'').hexdigest()
+                    else: raise ValueError('MATERIAL_TYPE')
+                    identity = lambda info: (info.st_dev, info.st_ino, info.st_size,
+                        info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_uid, info.st_gid)
+                    if not identity(initial) == identity(captured) == identity(final) == identity(path.lstat()):
+                        raise ValueError('MATERIAL_CHANGED')
+                    identities.append((path, identity(initial)))
+                    if role == 'model' and (digest_value != model_hashes[path]
+                            or PINNED_MODEL_FILES.get(digest_value) != size):
+                        raise ValueError('MODEL_BYTES')
+                    material.append({'path': '/'+path.relative_to(self.root).as_posix(),
+                        'role': role, 'type': kind, 'sha256': digest_value, 'bytes': size,
+                        'uid': initial.st_uid, 'gid': initial.st_gid, 'mode': stat.S_IMODE(initial.st_mode)})
+            if (runtime_paths() != runtime_files
+                    or (not material_only and self.observe_runtime() != before) or environment() != selected
+                    or any(identity(path.lstat()) != expected for path, expected in identities)):
+                raise ValueError('RUNTIME_CHANGED')
+            return {'runtime': before, 'environment': selected, 'material': material,
+                'model': dict(PINNED_MODEL), 'required_context': 8192,
+                'required_kv_cache': {'key': 'f16', 'value': 'f16'}}
+        except (OSError, ValueError, KeyError, TypeError, UnicodeError, RuntimeError) as exc:
+            raise TransactionError('NATIVE_ALLOCATION_OBSERVATION_DENIED') from exc
     def observe_runtime(self, *, expected=None):
         """Read the actual service process, never execute a candidate binary.
 
@@ -368,6 +693,36 @@ class OfflineOllamaRealAdapter(RealAdapter):
                 subprocess.SubprocessError) as exc:
             raise TransactionError('OFFLINE_GPU_RUNTIME_BINDING_UNPROVEN') from exc
 
+    def observe_native_worker_policy(self, binding, plan):
+        rows=[]
+        for worker in binding['workers']:
+            proc=self.root/'proc'/str(worker['pid'])
+            def read():
+                state=(proc/'stat').read_text()
+                if not state.startswith(str(worker['pid'])+' ('):
+                    raise TransactionError('NATIVE_ALLOCATION_CHILD_CHANGED')
+                if (state.rsplit(') ',1)[1].split()[19]!=worker['start_time']
+                        or (proc/'cgroup').read_text().strip()!=worker['cgroup']):
+                    raise TransactionError('NATIVE_ALLOCATION_CHILD_CHANGED')
+                def bounded(name):
+                    with (proc/name).open('rb') as stream:raw=stream.read(1048577)
+                    if len(raw)>1048576:raise TransactionError('NATIVE_ALLOCATION_CHILD_SIZE_DENIED')
+                    return raw
+                return bounded('cmdline'),bounded('environ')
+            args_raw,env_raw=read();environment={}
+            for pair in env_raw.split(b'\0'):
+                name,sep,value=pair.partition(b'=')
+                if sep and name.startswith((b'LLAMA_ARG_',b'OLLAMA_KV_CACHE_TYPE')):
+                    key=name.decode('utf-8')
+                    if key in environment:raise TransactionError('NATIVE_ALLOCATION_CHILD_ENVIRONMENT_DUPLICATE')
+                    environment[key]=value.decode('utf-8')
+            policy=native_worker_policy(args_raw.decode('utf-8').rstrip('\0').split('\0'),
+                environment,plan['runtime_prestate']['material'])
+            if read()!=(args_raw,env_raw):raise TransactionError('NATIVE_ALLOCATION_CHILD_CHANGED')
+            rows.append({'pid':worker['pid'],'start_time':worker['start_time'],'policy':policy})
+        if not rows:raise TransactionError('NATIVE_ALLOCATION_CHILD_ABSENT')
+        return rows
+
 
 def digest(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
@@ -396,15 +751,19 @@ def verify_gpu_runtime_recipe(binding, plan, *, gpu_module=None):
                 or value['gpu_inventory_sha256']!=gpu['gpu_inventory_sha256']):
             raise ValueError('GPU_SOURCE')
         runtime=value['runtime']
+        native=plan.get('schema')==NATIVE_ALLOCATION_SCHEMA
+        expected_runtime=plan['runtime_prestate']['runtime'] if native else {
+            'binary_sha256':plan['runtime_archive']['member_sha256'],
+            'binary_bytes':plan['runtime_archive']['member_bytes'],'model_root':MODEL_DIRECTORIES[2]}
         if (set(runtime)!={'boot_id','pid','start_time','binary_sha256','binary_bytes','model_root'}
                 or runtime['boot_id']!=plan['boot_id']
                 or type(runtime['pid']) is not int or runtime['pid']<=0
                 or not isinstance(runtime['start_time'],str) or not runtime['start_time'].isdecimal()
-                or runtime['binary_sha256']!=plan['runtime_archive']['member_sha256']
-                or runtime['binary_bytes']!=plan['runtime_archive']['member_bytes']
-                or runtime['model_root']!=MODEL_DIRECTORIES[2]):
+                or any(runtime[key]!=expected_runtime[key] for key in ('binary_sha256','binary_bytes','model_root'))):
             raise ValueError('RUNTIME_SOURCE')
-        images={(row['sha256'],row['bytes']) for row in plan['runtime_objects']
+        material=([row for row in plan['runtime_prestate']['material'] if row['role']=='runtime']
+                  if native else plan['runtime_objects'])
+        images={(row['sha256'],row['bytes']) for row in material
                 if row['type']=='regular' and row['mode']&0o111}
         if (runtime['binary_sha256'],runtime['binary_bytes']) not in images:
             raise ValueError('MANAGER_RECIPE')
@@ -842,6 +1201,407 @@ def _verify_signature(adapter, plan: dict) -> None:
         if not isinstance(public, Ed25519PublicKey): raise ValueError("wrong key")
         public.verify(signature, signing_payload(plan))
     except Exception as exc: raise TransactionError("OFFLINE_PLAN_SIGNATURE_DENIED") from exc
+
+
+def native_allocation_prestate(adapter):
+    """The observed no-drop-in denominator; no generalized service editor."""
+    unit = _target(adapter.root, '/etc/systemd/system/ollama.service')
+    config = _target(adapter.root, NATIVE_ALLOCATION_TARGET)
+    nofollow_ancestors(adapter.root, unit, allow_missing=False)
+    nofollow_ancestors(adapter.root, config)
+    definition=adapter.read_native_allocation_definition()
+    if (set(definition)!={'fragment','dropins','need_reload','environment','environment_files'}
+            or definition['fragment']!='/etc/systemd/system/ollama.service' or definition['dropins']
+            or definition['need_reload']!='no' or definition['environment_files']
+            or type(definition['environment']) is not dict
+            or 'LLAMA_ARG_FIT_TARGET' in definition['environment']
+            or not unit.is_file() or os.path.lexists(config.parent)
+            or adapter.read_unit('ollama.service') != {'active':'active','enabled':'enabled'}):
+        raise TransactionError('NATIVE_ALLOCATION_PRESTATE_DENIED')
+    _, metadata, identity = _native_file_read(adapter, unit)
+    if metadata['uid'] != 0 or metadata['gid'] != 0 or metadata['mode'] != 0o600:
+        raise TransactionError('NATIVE_ALLOCATION_UNIT_CUSTODY_DENIED')
+    return {'unit':metadata, 'unit_identity':identity, 'definition':definition,
+            'state':{'active':'active','enabled':'enabled'}, 'dropin_directory':None}
+
+
+def prepare_native_allocation(adapter, *, source_generation, request_id, rollback_selector):
+    """Read-only preparation consumed only by the complete Outpost owner."""
+    if (type(source_generation) is not dict or set(source_generation) != {'commit','tree'}
+            or any(type(value) is not str or not re.fullmatch('[0-9a-f]{40}',value)
+                   for value in source_generation.values())
+            or type(request_id) is not str or not re.fullmatch('[A-Za-z0-9_-]{1,128}',request_id)
+            or type(rollback_selector) is not str or not SELECTOR.fullmatch(rollback_selector)):
+        raise TransactionError('NATIVE_ALLOCATION_INPUT_DENIED')
+    adapter.boundary()
+    unit = native_allocation_prestate(adapter)
+    observed = adapter.observe_native_allocation()
+    native_allocation_transition(observed,observed,restoring=True)
+    if observed['runtime']['boot_id'] != adapter.boot_id:
+        raise TransactionError('NATIVE_ALLOCATION_BOOT_DENIED')
+    if 'LLAMA_ARG_FIT_TARGET' in observed['environment']:
+        raise TransactionError('NATIVE_ALLOCATION_PREEXISTING_OVERRIDE_DENIED')
+    immutable = _immutable_inventory(adapter)
+    if native_allocation_prestate(adapter) != unit:
+        raise TransactionError('NATIVE_ALLOCATION_PRESTATE_CHANGED')
+    body = {'schema':NATIVE_ALLOCATION_SCHEMA, 'actor':'OUTPOST',
+        'scope':'RUNTIME_DEPENDENCY_ONLY', 'boot_id':adapter.boot_id,
+        'source_generation':dict(source_generation), 'request_id':request_id,
+        'rollback_selector':rollback_selector, 'unit_prestate':unit,
+        'runtime_prestate':observed, 'immutable_inputs':immutable,
+        'environment':dict(NATIVE_ALLOCATION_ENVIRONMENT),
+        'config_sha256':digest(native_allocation_configuration(NATIVE_ALLOCATION_ENVIRONMENT))}
+    return {**body, 'plan_sha256':digest(canonical(body)), 'signature_algorithm':'Ed25519',
+            'signing_key_id':'outpost-cognition-v1', 'signature':None}
+
+
+def _native_allocation_unit_guard(adapter, plan):
+    unit = _target(adapter.root, '/etc/systemd/system/ollama.service')
+    nofollow_ancestors(adapter.root,unit,allow_missing=False)
+    definition=adapter.read_native_allocation_definition()
+    normalized=dict(definition)
+    if normalized.get('need_reload') not in {'yes','no'}:
+        raise TransactionError('NATIVE_ALLOCATION_UNIT_CHANGED')
+    normalized['need_reload']='no'
+    _, metadata, identity = _native_file_read(adapter,unit)
+    if (metadata != plan['unit_prestate']['unit']
+            or identity != plan['unit_prestate']['unit_identity']
+            or definition.get('fragment')!='/etc/systemd/system/ollama.service'
+            or normalized not in (_native_expected_definition(plan,installed=False),
+                                  _native_expected_definition(plan,installed=True))):
+        raise TransactionError('NATIVE_ALLOCATION_UNIT_CHANGED')
+    _guard(adapter,plan); adapter.boundary()
+
+
+def _native_expected_definition(plan, *, installed):
+    value=json.loads(canonical(plan['unit_prestate']['definition']))
+    if installed:
+        value['dropins']=[NATIVE_ALLOCATION_TARGET]
+        value['environment'].update(NATIVE_ALLOCATION_ENVIRONMENT)
+    return value
+
+
+def _native_allocation_record(adapter, selector, receipt):
+    receipt['receipt_digest'] = receipt_digest(receipt)
+    _atomic_write(adapter,selector/'receipt.json',canonical(receipt),
+        {'target':'receipt.json','mode':'0600','uid':0,'gid':0})
+
+
+def _native_file_read(adapter, path, *, limit=2097152):
+    """One bounded, no-follow inode observation for transaction control files."""
+    nofollow_ancestors(adapter.root,path,allow_missing=False)
+    parent=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    fd=-1
+    def identity(info):
+        return {'device':info.st_dev,'inode':info.st_ino}
+    def fingerprint(info):
+        return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,
+                info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+    try:
+        parent_before=os.fstat(parent)
+        fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=parent)
+        before=os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>limit:
+            raise TransactionError('NATIVE_ALLOCATION_CONTROL_FILE_DENIED')
+        raw=bytearray()
+        while len(raw)<=limit:
+            chunk=os.read(fd,min(65536,limit+1-len(raw)))
+            if not chunk:break
+            raw.extend(chunk)
+        if (len(raw)!=before.st_size or len(raw)>limit
+                or fingerprint(os.fstat(fd))!=fingerprint(before)
+                or fingerprint(os.stat(path.name,dir_fd=parent,follow_symlinks=False))!=fingerprint(before)
+                or fingerprint(os.fstat(parent))!=fingerprint(parent_before)
+                or fingerprint(path.parent.lstat())!=fingerprint(parent_before)):
+            raise TransactionError('NATIVE_ALLOCATION_CONTROL_FILE_CHANGED')
+        return bytes(raw),{'sha256':digest(raw),'bytes':len(raw),
+            'mode':stat.S_IMODE(before.st_mode),'uid':before.st_uid,'gid':before.st_gid},identity(before)
+    finally:
+        if fd!=-1:os.close(fd)
+        os.close(parent)
+
+
+def _native_directory_identity(path):
+    info=path.lstat()
+    if not stat.S_ISDIR(info.st_mode) or (info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode))!=(0,0,0o755):
+        raise TransactionError('NATIVE_ALLOCATION_DIRECTORY_CUSTODY_DENIED')
+    return {'device':info.st_dev,'inode':info.st_ino}
+
+
+def _native_create_configuration(adapter, path, raw, receipt, selector):
+    # Same create-only hard-link publication and write-ahead inode ownership
+    # already used by kernel_first_install.atomic. Never replace a live file.
+    parent=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    name='.serein-allocation-'+os.urandom(16).hex();fd=-1
+    def guard():
+        info=os.fstat(parent)
+        if (_native_directory_identity(path.parent)!=receipt['directory_identity']
+                or {'device':info.st_dev,'inode':info.st_ino}!=receipt['directory_identity']):
+            raise TransactionError('NATIVE_ALLOCATION_DIRECTORY_CHANGED')
+        _native_allocation_unit_guard(adapter,receipt['plan'])
+    try:
+        guard()
+        fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=parent)
+        with os.fdopen(fd,'wb') as stream:
+            fd=-1;stream.write(raw);stream.flush()
+            os.fchmod(stream.fileno(),0o644);os.fchown(stream.fileno(),0,0);os.fsync(stream.fileno())
+            info=os.fstat(stream.fileno())
+        receipt['config_identity']={'device':info.st_dev,'inode':info.st_ino}
+        _native_allocation_record(adapter,selector,receipt)
+        guard()
+        try:os.link(name,path.name,src_dir_fd=parent,dst_dir_fd=parent,follow_symlinks=False)
+        except FileExistsError:raise TransactionError('NATIVE_ALLOCATION_CONFIG_COLLISION') from None
+        os.fsync(parent);guard()
+    finally:
+        if fd!=-1:os.close(fd)
+        try:os.unlink(name,dir_fd=parent);os.fsync(parent)
+        except FileNotFoundError:pass
+        os.close(parent)
+
+
+def _native_owned_configuration(adapter, receipt):
+    path=_target(adapter.root,NATIVE_ALLOCATION_TARGET);plan=receipt['plan']
+    nofollow_ancestors(adapter.root,path)
+    directory=receipt['directory_identity'];file_identity=receipt['config_identity']
+    if os.path.lexists(path.parent):
+        if directory is None or _native_directory_identity(path.parent)!=directory:
+            raise TransactionError('NATIVE_ALLOCATION_FOREIGN_DIRECTORY_DENIED')
+        if set(p.name for p in path.parent.iterdir())-({path.name} if os.path.lexists(path) else set()):
+            raise TransactionError('NATIVE_ALLOCATION_FOREIGN_DIRECTORY_CONTENT_DENIED')
+    elif directory is not None:
+        raise TransactionError('NATIVE_ALLOCATION_OWNED_DIRECTORY_MISSING')
+    if os.path.lexists(path):
+        _,metadata,identity=_native_file_read(adapter,path)
+        expected={'sha256':plan['config_sha256'],
+            'bytes':len(native_allocation_configuration(plan['environment'])), 'mode':0o644,'uid':0,'gid':0}
+        if file_identity is None or identity!=file_identity or metadata!=expected:
+            raise TransactionError('NATIVE_ALLOCATION_FOREIGN_CONFIG_DENIED')
+    elif file_identity is not None:
+        # A durable create intent can precede the link, but absence after an
+        # observed installation is foreign drift, not permission to recover.
+        if receipt['phase'] not in {'CONFIG_REQUESTED'}:
+            raise TransactionError('NATIVE_ALLOCATION_OWNED_CONFIG_MISSING')
+    return path
+
+
+def install_native_allocation(adapter, plan, selector):
+    """Internal constituent, not a CLI or independent Kernel installation.
+
+    The complete Outpost-owned Kernel lifecycle must hold the generation lock,
+    quiesce consumers and retain this constituent's compensation until final
+    generation publication. Its dependency receipt cannot admit Stage 1.
+    """
+    plan = json.loads(canonical(plan))
+    _verify_signature(adapter,plan)
+    original = prepare_native_allocation(adapter, source_generation=plan['source_generation'],
+        request_id=plan['request_id'],rollback_selector=plan['rollback_selector'])
+    if {**plan,'signature':None} != original:
+        raise TransactionError('NATIVE_ALLOCATION_PLAN_CHANGED')
+    selector = Path(selector)
+    if selector != _target(adapter.root,plan['rollback_selector']) or os.path.lexists(selector):
+        raise TransactionError('NATIVE_ALLOCATION_SELECTOR_DENIED')
+    nofollow_ancestors(adapter.root,selector)
+    _native_allocation_unit_guard(adapter,plan)
+    selector.mkdir(mode=0o700);_set_dir_metadata(adapter,selector,0o700);_fsync_dir(selector.parent)
+    receipt = {'schema':NATIVE_ALLOCATION_RECEIPT, 'actor':'OUTPOST',
+        'selector':str(selector), 'plan':plan, 'plan_sha256':plan['plan_sha256'],
+        'scope':'RUNTIME_DEPENDENCY_ONLY', 'phase':'PREPARED',
+        'acceptance':None, 'restoration':None, 'rollback_complete':False,
+        'directory_identity':None,'config_identity':None,'runtime_after':None}
+    _native_allocation_record(adapter,selector,receipt)
+    config = _target(adapter.root,NATIVE_ALLOCATION_TARGET)
+    try:
+        _native_allocation_unit_guard(adapter,plan)
+        if adapter.observe_native_allocation() != plan['runtime_prestate']:
+            raise TransactionError('NATIVE_ALLOCATION_RUNTIME_CHANGED')
+        receipt['phase']='STOP_REQUESTED';_native_allocation_record(adapter,selector,receipt)
+        adapter.stop_unit('ollama.service');_native_allocation_unit_guard(adapter,plan)
+        if (adapter.read_unit('ollama.service') != {'active':'inactive','enabled':'enabled'}
+                or not adapter.native_runtime_stopped()):
+            raise TransactionError('NATIVE_ALLOCATION_STOP_UNPROVEN')
+        if os.path.lexists(config.parent): raise TransactionError('NATIVE_ALLOCATION_DIRECTORY_RACE')
+        receipt['phase']='CONFIG_REQUESTED';_native_allocation_record(adapter,selector,receipt)
+        config.parent.mkdir(mode=0o755);_set_dir_metadata(adapter,config.parent,0o755)
+        _fsync_dir(config.parent.parent)
+        receipt['directory_identity']=_native_directory_identity(config.parent)
+        _native_allocation_record(adapter,selector,receipt)
+        _native_create_configuration(adapter,config,native_allocation_configuration(plan['environment']),receipt,selector)
+        adapter.reload_native_allocation();_native_allocation_unit_guard(adapter,plan)
+        receipt['phase']='START_REQUESTED';_native_allocation_record(adapter,selector,receipt)
+        adapter.start_unit('ollama.service')
+        observed=adapter.observe_native_allocation()
+        native_allocation_transition(plan['runtime_prestate'],observed)
+        receipt['runtime_after']=observed;_native_allocation_record(adapter,selector,receipt)
+        adapter.preload_native_allocation()
+        _native_allocation_unit_guard(adapter,plan)
+        observed=adapter.observe_native_allocation()
+        if observed!=receipt['runtime_after']:
+            raise TransactionError('NATIVE_ALLOCATION_SUCCESSOR_CHANGED')
+        transition=native_allocation_transition(plan['runtime_prestate'],observed)
+        if adapter.read_unit('ollama.service') != plan['unit_prestate']['state']:
+            raise TransactionError('NATIVE_ALLOCATION_START_UNPROVEN')
+        if adapter.read_native_allocation_definition()!=_native_expected_definition(plan,installed=True):
+            raise TransactionError('NATIVE_ALLOCATION_EFFECTIVE_CONFIG_UNPROVEN')
+        expected={'sha256':plan['config_sha256'],
+            'bytes':len(native_allocation_configuration(plan['environment'])),
+            'mode':0o644,'uid':0,'gid':0}
+        _native_owned_configuration(adapter,receipt)
+        if _native_file_read(adapter,config)[1] != expected:
+            raise TransactionError('NATIVE_ALLOCATION_CONFIG_CHANGED')
+        receipt.update(phase='DEPENDENCY_OBSERVED',acceptance=transition)
+        _native_allocation_record(adapter,selector,receipt)
+        _native_allocation_unit_guard(adapter,plan)
+        _native_owned_configuration(adapter,receipt)
+        return receipt
+    except BaseException:
+        # The whole owner independently verifies this evidence before it may
+        # recover the enclosing generation. Never report restoration on trust.
+        # A failed read/guard before STOP_REQUESTED owns no runtime effect.
+        # Do not "compensate" it by restarting the untouched predecessor.
+        if receipt['phase']!='PREPARED':
+            if hasattr(adapter,'fail_after'):adapter.fail_after=None
+            rollback_native_allocation(adapter,selector)
+        raise
+
+
+def _native_allocation_receipt(adapter, selector):
+    selector=Path(selector);nofollow_ancestors(adapter.root,selector,allow_missing=False)
+    raw,metadata,_=_native_file_read(adapter,selector/'receipt.json')
+    receipt=json.loads(raw)
+    fields={'schema','actor','selector','plan','plan_sha256','scope','phase','acceptance',
+        'restoration','rollback_complete','directory_identity','config_identity','runtime_after','receipt_digest'}
+    if type(receipt) is not dict or set(receipt)!=fields:
+        raise TransactionError('NATIVE_ALLOCATION_RESTORATION_RECEIPT_DENIED')
+    plan=receipt['plan']
+    plan_fields={'schema','actor','scope','boot_id','source_generation','request_id',
+        'rollback_selector','unit_prestate','runtime_prestate','immutable_inputs','environment',
+        'config_sha256','plan_sha256','signature_algorithm','signing_key_id','signature'}
+    if type(plan) is not dict or set(plan)!=plan_fields:
+        raise TransactionError('NATIVE_ALLOCATION_PLAN_SHAPE_DENIED')
+    body={k:v for k,v in plan.items() if k not in {'plan_sha256','signature_algorithm','signing_key_id','signature'}}
+    if (plan['schema']!=NATIVE_ALLOCATION_SCHEMA or plan['actor']!='OUTPOST'
+            or plan['scope']!='RUNTIME_DEPENDENCY_ONLY'
+            or plan['plan_sha256']!=digest(canonical(body))
+            or plan['config_sha256']!=digest(native_allocation_configuration(plan['environment']))
+            or receipt.get('schema')!=NATIVE_ALLOCATION_RECEIPT
+            or receipt['actor']!='OUTPOST' or receipt['scope']!='RUNTIME_DEPENDENCY_ONLY'
+            or receipt['phase'] not in {'PREPARED','STOP_REQUESTED','CONFIG_REQUESTED','START_REQUESTED',
+                'DEPENDENCY_OBSERVED','RESTORE_REQUESTED','RESTORED'}
+            or type(receipt['rollback_complete']) is not bool
+            or receipt['rollback_complete']!=(receipt['phase']=='RESTORED')
+            or receipt['plan_sha256']!=plan['plan_sha256']
+            or receipt.get('selector')!=str(selector)
+            or receipt.get('receipt_digest')!=receipt_digest(receipt)
+            or selector!=_target(adapter.root,plan['rollback_selector'])
+            or not SELECTOR.fullmatch(plan['rollback_selector'])
+            or adapter.directory_metadata(selector)!={'mode':0o700,'uid':0,'gid':0}
+            or {k:metadata[k] for k in ('mode','uid','gid')}!={'mode':0o600,'uid':0,'gid':0}):
+        raise TransactionError('NATIVE_ALLOCATION_RESTORATION_RECEIPT_DENIED')
+    for name in ('directory_identity','config_identity'):
+        value=receipt[name]
+        if value is not None and (type(value) is not dict or set(value)!={'device','inode'}
+                or any(type(v) is not int or v<0 for v in value.values())):
+            raise TransactionError('NATIVE_ALLOCATION_OWNERSHIP_DENIED')
+    _verify_signature(adapter,plan);_native_allocation_unit_guard(adapter,plan)
+    if _native_file_read(adapter,selector/'receipt.json')[0]!=raw:
+        raise TransactionError('NATIVE_ALLOCATION_RECEIPT_CHANGED')
+    return receipt
+
+
+def rollback_native_allocation(adapter, selector):
+    selector=Path(selector);receipt=_native_allocation_receipt(adapter,selector);plan=receipt['plan']
+    if receipt['rollback_complete']:
+        if native_allocation_prestate(adapter)!=plan['unit_prestate']:
+            raise TransactionError('NATIVE_ALLOCATION_RESTORED_UNIT_DENIED')
+        observed=adapter.observe_native_allocation()
+        if observed!=receipt['restoration']['after']:
+            raise TransactionError('NATIVE_ALLOCATION_RESTORED_RUNTIME_CHANGED')
+        native_allocation_transition(plan['runtime_prestate'],observed,restoring=True)
+        return receipt
+    # Establish exact ownership before any stop/remove/restart. A failed
+    # predicate is evidence; it never grants control over foreign state.
+    config=_native_owned_configuration(adapter,receipt)
+    state=adapter.read_unit('ollama.service')
+    if state=={'active':'active','enabled':'enabled'}:
+        observed=adapter.observe_native_allocation()
+        expected=receipt['runtime_after'] or plan['runtime_prestate']
+        if observed!=expected:
+            raise TransactionError('NATIVE_ALLOCATION_FOREIGN_RUNTIME_DENIED')
+        if receipt['phase'] in {'PREPARED','STOP_REQUESTED'} and receipt['directory_identity'] is None:
+            if native_allocation_prestate(adapter)!=plan['unit_prestate']:
+                raise TransactionError('NATIVE_ALLOCATION_RESTORED_UNIT_DENIED')
+            restored=native_allocation_transition(plan['runtime_prestate'],observed,restoring=True)
+            receipt.update(phase='RESTORED',restoration=restored,rollback_complete=True)
+            _native_allocation_record(adapter,selector,receipt)
+            return receipt
+    elif state=={'active':'inactive','enabled':'enabled'}:
+        if receipt['phase']=='PREPARED' or not adapter.native_runtime_stopped():
+            raise TransactionError('NATIVE_ALLOCATION_STOP_OWNERSHIP_DENIED')
+    else:
+        raise TransactionError('NATIVE_ALLOCATION_SERVICE_OWNERSHIP_DENIED')
+    if adapter.observe_native_material()!=plan['runtime_prestate']['material']:
+        raise TransactionError('NATIVE_ALLOCATION_FOREIGN_MATERIAL_DENIED')
+    _native_owned_configuration(adapter,receipt);_native_allocation_unit_guard(adapter,plan)
+    receipt['phase']='RESTORE_REQUESTED';_native_allocation_record(adapter,selector,receipt)
+    if state['active']=='active':adapter.stop_unit('ollama.service')
+    if adapter.read_unit('ollama.service')!={'active':'inactive','enabled':'enabled'} or not adapter.native_runtime_stopped():
+        raise TransactionError('NATIVE_ALLOCATION_STOP_UNPROVEN')
+    _native_allocation_unit_guard(adapter,plan);_native_owned_configuration(adapter,receipt)
+    if os.path.lexists(config):
+        config.unlink();_fsync_dir(config.parent)
+    if os.path.lexists(config.parent):
+        if _native_directory_identity(config.parent)!=receipt['directory_identity']:
+            raise TransactionError('NATIVE_ALLOCATION_FOREIGN_DIRECTORY_DENIED')
+        config.parent.rmdir();_fsync_dir(config.parent.parent)
+    adapter.reload_native_allocation();_native_allocation_unit_guard(adapter,plan)
+    adapter.start_unit('ollama.service');adapter.preload_native_allocation()
+    _native_allocation_unit_guard(adapter,plan)
+    if native_allocation_prestate(adapter)!=plan['unit_prestate']:
+        raise TransactionError('NATIVE_ALLOCATION_RESTORED_UNIT_DENIED')
+    restored=native_allocation_transition(plan['runtime_prestate'],adapter.observe_native_allocation(),restoring=True)
+    receipt.update(phase='RESTORED',restoration=restored,rollback_complete=True)
+    _native_allocation_record(adapter,selector,receipt)
+    _native_allocation_unit_guard(adapter,plan)
+    return receipt
+
+
+def verify_installed_native_allocation(adapter, selector, *, expected_plan_sha256):
+    """Read-only constituent acceptance; never a Stage-1 or whole-owner PASS."""
+    selector=Path(selector);receipt=_native_allocation_receipt(adapter,selector)
+    plan=receipt['plan']
+    if (plan['plan_sha256']!=expected_plan_sha256 or receipt['phase']!='DEPENDENCY_OBSERVED'
+            or receipt['rollback_complete'] or receipt['restoration'] is not None):
+        raise TransactionError('NATIVE_ALLOCATION_INSTALLED_RECEIPT_DENIED')
+    _native_owned_configuration(adapter,receipt)
+    if (adapter.read_unit('ollama.service')!=plan['unit_prestate']['state']
+            or adapter.read_native_allocation_definition()!=_native_expected_definition(plan,installed=True)):
+        raise TransactionError('NATIVE_ALLOCATION_INSTALLED_DEFINITION_DENIED')
+    observed=adapter.observe_native_allocation()
+    transition=native_allocation_transition(plan['runtime_prestate'],observed)
+    if observed!=receipt['runtime_after'] or transition!=receipt['acceptance']:
+        raise TransactionError('NATIVE_ALLOCATION_INSTALLED_RUNTIME_CHANGED')
+    if _native_allocation_receipt(adapter,selector)!=receipt:
+        raise TransactionError('NATIVE_ALLOCATION_RECEIPT_CHANGED')
+    _native_owned_configuration(adapter,receipt)
+    return {'result':'NATIVE_ALLOCATION_INSTALLED_OBSERVED','plan_sha256':expected_plan_sha256,
+        'runtime':observed,'stage1':'NOT_READY','scope':'RUNTIME_DEPENDENCY_ONLY'}
+
+
+def verify_completed_native_allocation_rollback(adapter, selector, *, expected_plan_sha256):
+    """Verify captured restoration without invoking any recovery effect."""
+    selector=Path(selector);receipt=_native_allocation_receipt(adapter,selector);plan=receipt['plan']
+    if (plan['plan_sha256']!=expected_plan_sha256 or receipt['phase']!='RESTORED'
+            or receipt['rollback_complete'] is not True
+            or native_allocation_prestate(adapter)!=plan['unit_prestate']):
+        raise TransactionError('NATIVE_ALLOCATION_RESTORATION_UNPROVEN')
+    observed=adapter.observe_native_allocation()
+    transition=native_allocation_transition(plan['runtime_prestate'],observed,restoring=True)
+    if transition!=receipt['restoration']:
+        raise TransactionError('NATIVE_ALLOCATION_RESTORATION_CHANGED')
+    if _native_allocation_receipt(adapter,selector)!=receipt:
+        raise TransactionError('NATIVE_ALLOCATION_RECEIPT_CHANGED')
+    return {'result':'NATIVE_ALLOCATION_RESTORATION_OBSERVED','plan_sha256':expected_plan_sha256,
+        'runtime':observed,'stage1':'NOT_READY','scope':'RUNTIME_DEPENDENCY_ONLY'}
 
 
 def install(adapter, bundle_root: Path, plan: dict, selector: Path) -> dict:

@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G34",
+  "generation": "G35",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -15,8 +15,8 @@
     },
     {
       "path": "install/kernel_first_install_runner.py",
-      "bytes": 231931,
-      "sha256": "51f73fb7e6bfa4e0fb74e90ddebfe6358a79e16807a667904204a38d7e0fa4b2"
+      "bytes": 238540,
+      "sha256": "17b948b9e0169441cc8fa3f3cd4f4d2534d12b66e72b859ec0340b937466f892"
     },
     {
       "path": "install/public_generation_transaction.py",
@@ -184,5 +184,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:0d4b5edc20aeb17737f8d9d4776361f57f25d1352949b01f1f69cf9c9cf377d5"
+  "self_digest": "sha256:7b10f3e8d4bb56683ce1316aa6ccdecefbd555be80c002718328562483645cbf"
 }

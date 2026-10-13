@@ -382,12 +382,41 @@ def prepare_offline_companion(source,bundle_root,expected_before,rollback_select
          'source_receipt_sha256':receipt_digest,'status':'PREPARED_UNSIGNED_NOT_AUTHORIZED',
          'authority_effect':'NONE','admission_effect':'NONE'}
 
+def prepare_native_companion(source,expected_before_sha256,rollback_selector,request_id,*,
+                             host_path=HOST_STATE,verify_path=VERIFY_KEY,
+                             source_receipt_path=SOURCE_RECEIPT,adapter=None):
+ """Same Outpost-owned runtime constituent, with no binary/model replacement."""
+ deny(sha(regular(verify_path))!=CANONICAL_AUTHORITY_SHA256,'KERNEL_CANONICAL_ANCHOR_DENIED')
+ receipt,receipt_digest=source_receipt(source,source_receipt_path,verify_path)
+ boot=current_boot();host=_settled_host_gate(host_path,boot)
+ module=load_offline_installer(source,read_json(source/'release-manifest.json'),
+      expected_release=receipt['release_digest'])
+ if adapter is None:adapter=module.OfflineOllamaRealAdapter()
+ deny(adapter.boot_id!=boot,'KERNEL_NATIVE_ALLOCATION_BOOT_DENIED')
+ plan=module.prepare_native_allocation(adapter,source_generation={
+      'commit':receipt['source_commit'],'tree':receipt['source_tree']},
+      rollback_selector=rollback_selector,request_id=request_id)
+ expected={key:plan[key] for key in ('runtime_prestate','unit_prestate','immutable_inputs')}
+ deny(sha(module.canonical(expected))!=expected_before_sha256,'KERNEL_NATIVE_ALLOCATION_PRESTATE_CHANGED')
+ fresh=_settled_host_gate(host_path,boot)
+ stable=lambda value:canonical({k:v for k,v in value['latest'].items() if k not in {'observed_at','evidence_digest'}})
+ deny(current_boot()!=boot or stable(fresh)!=stable(host)
+      or fresh['classification'] not in {host['classification'],'CURRENT_BOOT_STABLE'}
+      or fresh['latest']['observed_at']<host['latest']['observed_at'], 'KERNEL_HOST_PRESTATE_CHANGED')
+ deny(source_receipt(source,source_receipt_path,verify_path)!=(receipt,receipt_digest)
+      or sha(regular(verify_path))!=CANONICAL_AUTHORITY_SHA256,'KERNEL_OFFLINE_SOURCE_CHANGED')
+ return {'plan':plan,'host_projection_digest':host['projection_digest'],
+         'source_receipt_sha256':receipt_digest,'status':'PREPARED_UNSIGNED_NOT_AUTHORIZED',
+         'authority_effect':'NONE','admission_effect':'NONE'}
+
+
 def install_request(path):
  request=read_json(path)
  required={"schema","target_vm_id","repository","source_parent","source_commit","source_tree","archive_sha256","rollback_selector","reserved_domain_ids"}
  version=request.get('schema')
- deny(not isinstance(version,str) or version not in {'SereinOutpostKernelInstallRequest/v1','SereinOutpostKernelInstallRequest/v2'},'KERNEL_REQUEST_DENIED')
+ deny(not isinstance(version,str) or version not in {'SereinOutpostKernelInstallRequest/v1','SereinOutpostKernelInstallRequest/v2','SereinOutpostKernelInstallRequest/v3'},'KERNEL_REQUEST_DENIED')
  if version.endswith('/v2'):required.add('offline_companion')
+ if version.endswith('/v3'):required.add('native_allocation')
  if 'recovered_predecessor' in request:required.add('recovered_predecessor')
  if 'installed_predecessor' in request:
   required.add('installed_predecessor')
@@ -402,6 +431,14 @@ def install_request(path):
         or '\\' in location or '\x00' in location or str(Path(location))!=location
         or '..' in Path(location).parts,'KERNEL_SUCCESSOR_SOURCE_PATH_DENIED')
  deny(set(request)!=required or request['target_vm_id']!='VM4010' or request['repository']!='Kaotikking/sfos-public','KERNEL_REQUEST_DENIED')
+ if 'native_allocation' in request:
+  value=request['native_allocation']
+  deny(type(value) is not dict or set(value)!={'expected_before_sha256','rollback_selector','request_id'}
+       or type(value['expected_before_sha256']) is not str or not HEX64.fullmatch(value['expected_before_sha256'])
+       or type(value['request_id']) is not str or not re.fullmatch(r'[A-Za-z0-9_-]{8,128}',value['request_id'])
+       or type(value['rollback_selector']) is not str
+       or not re.fullmatch(r'/var/lib/serein/rollback/offline-ollama-\d{8}T\d{6}Z-[0-9a-f]{12}',value['rollback_selector'])
+       or value['rollback_selector']==request['rollback_selector'],'KERNEL_NATIVE_ALLOCATION_REQUEST_DENIED')
  if 'offline_companion' in request:
   value=request['offline_companion']
   deny(not isinstance(value,dict) or set(value)!={'bundle_root','expected_before','rollback_selector','request_id'},'KERNEL_OFFLINE_REQUEST_DENIED')
@@ -1542,7 +1579,7 @@ def recover_failed_construction(root,source,receipt_path,expected):
  # too. A v2 offline replacement has a separate recovery transaction.
  deny(sha(request_raw)!=expected['request_sha256']
       or request.get('schema')!='SereinOutpostKernelInstallRequest/v1'
-      or 'offline_companion' in request
+      or 'offline_companion' in request or 'native_allocation' in request
       or any(request.get(k)!=plan.get(k) for k in
              ('target_vm_id','source_parent','source_commit','source_tree','archive_sha256','rollback_selector')),
       'KERNEL_RECOVERY_REQUEST_DENIED')
@@ -2210,7 +2247,9 @@ def _offline_companion_lifecycle(plan,receipt,authority_observation,operations,
  plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt))
  preparation=strict_json(canonical(preparation))
  signed_runtime_plan=strict_json(canonical(signed_runtime_plan))
- offline=request.get('offline_companion');boot=current_boot()
+ native='native_allocation' in request
+ offline=request.get('native_allocation') if native else request.get('offline_companion')
+ boot=current_boot()
  deny(os.geteuid()!=0 or boot!=plan.get('current_boot_id') or not isinstance(offline,dict),
       'KERNEL_OFFLINE_LIFECYCLE_TARGET_DENIED')
  boundary()
@@ -2222,8 +2261,10 @@ def _offline_companion_lifecycle(plan,receipt,authority_observation,operations,
       'KERNEL_OFFLINE_INTERFACE_PREDECESSOR_DENIED')
  # Reclassify the exact current runtime prestate, never sign stale preparation
  # or use a caller-provided module in place of the admitted source generation.
- fresh=prepare_offline_companion(SOURCE,Path(offline['bundle_root']),offline['expected_before'],
-     offline['rollback_selector'],offline['request_id'])
+ fresh=(prepare_native_companion(SOURCE,offline['expected_before_sha256'],
+     offline['rollback_selector'],offline['request_id']) if native else
+     prepare_offline_companion(SOURCE,Path(offline['bundle_root']),offline['expected_before'],
+     offline['rollback_selector'],offline['request_id']))
  deny(fresh['plan']!=preparation['plan']
       or fresh['source_receipt_sha256']!=plan['source_receipt_sha256']
       or preparation['source_receipt_sha256']!=fresh['source_receipt_sha256']
@@ -2268,35 +2309,56 @@ def _offline_companion_lifecycle(plan,receipt,authority_observation,operations,
   nonlocal runtime_mutating
   if runtime_disposition['attempted']:
    try:
+    if native:runtime_disposition['native_mutating']=True
     consumers['quiesce']();runtime_mutating=True
     current_boundary()
-    if installed is not None:module.rollback(adapter,selector)
+    if installed is not None:
+     if native:module.rollback_native_allocation(adapter,selector)
+     else:module.rollback(adapter,selector)
     # An absent install return can mean its internal compensation failed.
     # Independently read restored prestate without retrying that mutation.
-    module.verify_completed_rollback(adapter,selector,
+    if native:module.verify_completed_native_allocation_rollback(adapter,selector,
+        expected_plan_sha256=signed_runtime_plan['plan_sha256'])
+    else:module.verify_completed_rollback(adapter,selector,
         expected_plan_sha256=signed_runtime_plan['plan_sha256'])
     runtime_disposition['restored']=True
+    if native:
+     runtime_disposition['native_expected']=adapter.observe_runtime()
+     runtime_disposition['native_mutating']=False
    except BaseException as exc:
     raise RuntimeCompensationUncertain('KERNEL_RUNTIME_COMPENSATION_UNPROVEN') from exc
- if owner is not None:owner.retain(cleanup,current_boundary)
+ def verify_retained_runtime():
+  current_boundary()
+  if native and installed is not None:
+   module.verify_installed_native_allocation(adapter,selector,
+       expected_plan_sha256=signed_runtime_plan['plan_sha256'])
+ if owner is not None:owner.retain(cleanup,verify_retained_runtime)
  try:
   # Stop socket activation and every private consumer before install; the
   # callee can compensate its own failure before returning to this owner.
   consumers['quiesce']();runtime_mutating=True;current_boundary()
   runtime_disposition.update(attempted=True,restored=False)
-  installed=module.install(adapter,Path(offline['bundle_root']),signed_runtime_plan,selector)
+  if native:runtime_disposition['native_mutating']=True
+  installed=(module.install_native_allocation(adapter,signed_runtime_plan,selector) if native else
+      module.install(adapter,Path(offline['bundle_root']),signed_runtime_plan,selector))
   current_boundary()
   deny(installed.get('receipt_digest')!=module.receipt_digest(installed)
        or installed.get('scope')!='RUNTIME_DEPENDENCY_ONLY'
        or installed.get('rollback_complete') is not False,
        'KERNEL_OFFLINE_DEPENDENCY_RECEIPT_DENIED')
   acceptance=installed.get('acceptance')
-  deny(not isinstance(acceptance,dict) or acceptance.get('scope')!='RUNTIME_DEPENDENCY_ONLY'
-       or acceptance.get('boot_id')!=boot
-       or acceptance.get('request_id')!=signed_runtime_plan['request_id']
-       or acceptance.get('source_generation')!=signed_runtime_plan['source_generation'],
-       'KERNEL_OFFLINE_DEPENDENCY_ACCEPTANCE_DENIED')
-  module.verify_gpu_runtime_recipe(acceptance.get('gpu_runtime_binding'),signed_runtime_plan)
+  if native:
+   verified=module.verify_installed_native_allocation(adapter,selector,
+       expected_plan_sha256=signed_runtime_plan['plan_sha256'])
+   runtime_disposition['native_expected']=verified['runtime']['runtime']
+   runtime_disposition['native_mutating']=False
+  else:
+   deny(not isinstance(acceptance,dict) or acceptance.get('scope')!='RUNTIME_DEPENDENCY_ONLY'
+        or acceptance.get('boot_id')!=boot
+        or acceptance.get('request_id')!=signed_runtime_plan['request_id']
+        or acceptance.get('source_generation')!=signed_runtime_plan['source_generation'],
+        'KERNEL_OFFLINE_DEPENDENCY_ACCEPTANCE_DENIED')
+   module.verify_gpu_runtime_recipe(acceptance.get('gpu_runtime_binding'),signed_runtime_plan)
   runtime_mutating=False;consumers['reopen']()
   # Collect fresh actual Operations evidence after the runtime operation; do
   # not retimestamp or reuse the earlier sample window after a long install.
@@ -2305,6 +2367,8 @@ def _offline_companion_lifecycle(plan,receipt,authority_observation,operations,
       'authority':current_authority,'operations':current_operations,
       'admission':'UNADMITTED','stage1':'NOT_READY'}
   current_boundary()
+  if native:module.verify_installed_native_allocation(adapter,selector,
+      expected_plan_sha256=signed_runtime_plan['plan_sha256'])
  except BaseException:
   if owner is not None:owner.abort()
   else:cleanup()
@@ -2426,8 +2490,9 @@ def prepare_kernel_request(bundle_adapter=None,*,root=Path('/'),source=SOURCE,re
  """
  raw=regular(request_path);request=install_request(request_path)
  boot=current_boot()
+ native=request.get('native_allocation')
  offline=request.get('offline_companion')
- if offline is not None:
+ if offline is not None or native is not None:
   if bundle_adapter is not None:
    deny(Path(bundle_adapter.root)!=Path(root) or bundle_adapter.boot_id!=boot,'KERNEL_OFFLINE_TARGET_DENIED')
   else:
@@ -2436,7 +2501,15 @@ def prepare_kernel_request(bundle_adapter=None,*,root=Path('/'),source=SOURCE,re
   deny(bundle_adapter is not None,'KERNEL_OFFLINE_TARGET_DENIED')
  plan,host=build_plan(source,request_path,host_path,verify_path,source_receipt_path,root=root)
  prepared=None;preserved_runtime=None;runtime_adapter=None
- if offline is not None:
+ if native is not None:
+  prepared=prepare_native_companion(source,native['expected_before_sha256'],
+      native['rollback_selector'],native['request_id'],host_path=host_path,verify_path=verify_path,
+      source_receipt_path=source_receipt_path,adapter=bundle_adapter)
+  deny(prepared['source_receipt_sha256']!=plan['source_receipt_sha256']
+       or prepared['plan']['boot_id']!=boot
+       or prepared['plan']['source_generation']!={'commit':plan['source_commit'],'tree':plan['source_tree']},
+       'KERNEL_OFFLINE_PREPARATION_CHANGED')
+ elif offline is not None:
   prepared=prepare_offline_companion(source,Path(offline['bundle_root']),offline['expected_before'],
       offline['rollback_selector'],offline['request_id'],host_path=host_path,verify_path=verify_path,
       source_receipt_path=source_receipt_path,adapter=bundle_adapter)
@@ -2572,6 +2645,14 @@ def _observe_owned_gpu(plan,compute,preparation,*,signed_runtime_plan,boundary):
    deny(not isinstance(signed_runtime_plan,dict),'KERNEL_OFFLINE_SIGNED_PLAN_DENIED')
    module.verify_gpu_runtime_recipe(binding,signed_runtime_plan,gpu_module=gpu_module)
    recipe='SIGNED_RUNTIME_RECIPE_MATCH'
+   if signed_runtime_plan.get('schema')==module.NATIVE_ALLOCATION_SCHEMA:
+    selected=module.verify_installed_native_allocation(adapter,Path(signed_runtime_plan['rollback_selector']),
+        expected_plan_sha256=signed_runtime_plan['plan_sha256'])
+    deny(binding['runtime']!=selected['runtime']['runtime'],'KERNEL_NATIVE_RUNTIME_CHANGED')
+    child_policy=adapter.observe_native_worker_policy(binding,signed_runtime_plan)
+    deny(adapter.observe_gpu_binding(gpu,gpu_module=gpu_module)!=binding,
+         'KERNEL_NATIVE_GPU_WORKER_CHANGED')
+    recipe='SIGNED_NATIVE_MATERIAL_AND_CHILD_CONFIGURATION_MATCH'
   deny(gpu_module.collect()!=gpu or current_boot()!=plan['current_boot_id'],
        'KERNEL_GPU_INVENTORY_CHANGED')
   boundary()
@@ -2579,9 +2660,12 @@ def _observe_owned_gpu(plan,compute,preparation,*,signed_runtime_plan,boundary):
        'KERNEL_GPU_SOURCE_CHANGED')
  except (ValueError,KeyError,TypeError,OSError,module.TransactionError) as exc:
   raise RunnerDenied('KERNEL_GPU_PROCESS_BINDING_UNPROVEN') from exc
- return {'result':'RUNTIME_GPU_PROCESS_OBSERVED','binding':binding,
+ result={'result':'RUNTIME_GPU_PROCESS_OBSERVED','binding':binding,
      'runtime_recipe':recipe,'runtime_result_sha256':compute['runtime_result_sha256'],
      'stage1':'NOT_READY','authority_effect':'NONE','admission_effect':'NONE'}
+ if signed_runtime_plan is not None and signed_runtime_plan.get('schema')==module.NATIVE_ALLOCATION_SCHEMA:
+  result['native_child_policy']=child_policy
+ return result
 
 
 @contextmanager
@@ -2711,7 +2795,7 @@ def _complete_kernel_lifecycle(plan,receipt,request,preparation,expectation,*,bo
       'KERNEL_PUBLIC_REQUEST_HANDOFF_DENIED')
  request=strict_json(canonical(request));preparation=strict_json(canonical(preparation))
  replacement=preparation['offline_preparation']
- deny((replacement is None)!=(request.get('offline_companion') is None),
+ deny((replacement is None)!=(request.get('offline_companion',request.get('native_allocation')) is None),
       'KERNEL_PREPARATION_BINDING_DENIED')
  deny(replacement is None and preparation['preserved_runtime'] is None,
       'KERNEL_PREPARATION_BINDING_DENIED')
@@ -3050,7 +3134,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
  boot=current_boot();request_raw=regular(request_path)
  request=install_request(request_path)
  deny(type(construct) is not bool,'KERNEL_CONSTRUCTION_MODE_DENIED')
- complete=(construct or request['schema']=='SereinOutpostKernelInstallRequest/v2'
+ complete=(construct or request['schema'] in {'SereinOutpostKernelInstallRequest/v2','SereinOutpostKernelInstallRequest/v3'}
            or compute_expectation is not None or read_compute_expectation is not None
            or read_public_response is not None or read_public_request is not None)
  # Complete input absence is action-local, not a blanket implementation hold.
@@ -3101,7 +3185,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
       host_path=host_path,verify_path=verify_path,source_receipt_path=source_receipt_path)
   plan,host_prestate=prepared['kernel_plan'],prepared['host_prestate']
   if complete:compute_expectation=_bind_compute_model(plan,source,compute_expectation)
-  deny((prepared['offline_preparation'] is not None)!=(request.get('offline_companion') is not None)
+  deny((prepared['offline_preparation'] is not None)!=(request.get('offline_companion',request.get('native_allocation')) is not None)
        or (prepared['offline_preparation'] is None and prepared['preserved_runtime'] is None)
        or prepared['request_sha256']!=sha(request_raw)
        or prepared['kernel_plan_sha256']!=sha(canonical(plan))
@@ -3114,8 +3198,16 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
   check_material=_kernel_material_boundary(plan,host_prestate,request_raw,
       root=root,source=source,request_path=request_path,host_path=host_path,check_parent=check_parent,
       preserved_runtime=prepared['preserved_runtime'])
+  runtime_disposition={'attempted':False,'restored':False}
+  if 'native_allocation' in request:
+   runtime_disposition.update(native_mutating=False,
+       native_expected=prepared['offline_preparation']['plan']['runtime_prestate']['runtime'])
   def material_boundary():
    check_material()
+   if 'native_allocation' in request and not runtime_disposition['native_mutating']:
+    current_runtime=load_offline_installer(source,read_json(source/'release-manifest.json'),
+        expected_release=plan['release_digest']).OfflineOllamaRealAdapter()
+    current_runtime.observe_runtime(expected=runtime_disposition['native_expected'])
    if complete:
     deny(read_kernel_enablement_prestate(root)!=enablement_prestate,'KERNEL_ENABLEMENT_CHANGED')
   deny(sha(regular(verify_path))!=CANONICAL_AUTHORITY_SHA256,"KERNEL_CANONICAL_ANCHOR_DENIED")
@@ -3213,7 +3305,6 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
    installer=module.install;rollback_installer=module.rollback
   boundary()
   receipt=installer(root,source,plan,boundary=boundary,native_material=native_material,policy_evidence=policy_evidence);canonical_receipt=Path(root).joinpath(*Path(plan["rollback_selector"]+"/receipt.json").parts[1:])
-  runtime_disposition={'attempted':False,'restored':False}
   runtime_access_attempted=False
   runtime_access_poststate=None
   definitions_refresh_attempted=False
@@ -3333,12 +3424,16 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
      raise RuntimeCompensationUncertain('KERNEL_RUNTIME_COMPENSATION_UNPROVEN') from exc
     restored_adapter=runtime_module.OfflineOllamaRealAdapter()
     restored_adapter.boundary=boundary
-    restored_selector=Path(request['offline_companion']['rollback_selector'])
+    restored_selector=Path(request.get('offline_companion',request.get('native_allocation'))['rollback_selector'])
     def compensation_boundary():
      try:
       boundary()
-      runtime_module.verify_completed_rollback(restored_adapter,restored_selector,
-          expected_plan_sha256=signed_runtime_plan['plan_sha256'])
+      if 'native_allocation' in request:
+       runtime_module.verify_completed_native_allocation_rollback(restored_adapter,restored_selector,
+           expected_plan_sha256=signed_runtime_plan['plan_sha256'])
+      else:
+       runtime_module.verify_completed_rollback(restored_adapter,restored_selector,
+           expected_plan_sha256=signed_runtime_plan['plan_sha256'])
      except Exception as restoration_error:
       raise RuntimeCompensationUncertain('KERNEL_RUNTIME_COMPENSATION_UNPROVEN') from restoration_error
    compensation_boundary()
