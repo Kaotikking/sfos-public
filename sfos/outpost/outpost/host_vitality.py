@@ -301,7 +301,11 @@ class HostVitalityStore:
       self._history_cache=(offset+read_bytes,complete_hash.hexdigest(),rows,terminated)
      return rows
   except (OSError,ValueError,TypeError):
-   with self._history_lock:self._history_cache=None
+   # A failed read grants no verdict and publishes no new prefix. Retain the
+   # last completely validated prefix: the next attempt still rehashes every
+   # byte and checks current custody before reusing any parsing. Discarding it
+   # on a concurrent collector append forces an avoidable full-history parse
+   # on the watchdog's next read (and can erase another reader's valid cache).
    raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED') from None
  @staticmethod
  def _projection(current,previous,count):
