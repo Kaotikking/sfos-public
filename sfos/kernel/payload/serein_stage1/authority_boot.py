@@ -358,9 +358,11 @@ def _construction_material(read_bytes, rooted, receipt, anchor, boot, manifest_r
     fields={'schema','target_vm_id','repository','source_parent','source_commit','source_tree',
             'archive_sha256','rollback_selector','reserved_domain_ids'}
     require(isinstance(request,dict) and request.get('schema') in
-            ('SereinOutpostKernelInstallRequest/v1','SereinOutpostKernelInstallRequest/v2'),
+            ('SereinOutpostKernelInstallRequest/v1','SereinOutpostKernelInstallRequest/v2',
+             'SereinOutpostKernelInstallRequest/v3'),
             'AUTHORITY_CONSTRUCTION_REQUEST_DENIED')
     if request['schema'].endswith('/v2'):fields.add('offline_companion')
+    if request['schema'].endswith('/v3'):fields.add('native_allocation')
     if 'recovered_predecessor' in request:fields.add('recovered_predecessor')
     if 'installed_predecessor' in request:fields.add('installed_predecessor')
     require(set(request)==fields and request['target_vm_id']=='VM4010'
@@ -368,6 +370,18 @@ def _construction_material(read_bytes, rooted, receipt, anchor, boot, manifest_r
             and all(request.get(k)==receipt[k] for k in
                 ('source_parent','source_commit','source_tree','archive_sha256')),
             'AUTHORITY_CONSTRUCTION_REQUEST_DENIED')
+    if 'native_allocation' in request:
+        native=request['native_allocation']
+        require(isinstance(native,dict) and set(native)==
+                {'expected_before_sha256','request_id','rollback_selector'}
+                and type(native['expected_before_sha256']) is str
+                and HEX64.fullmatch(native['expected_before_sha256'])
+                and type(native['request_id']) is str
+                and re.fullmatch(r'[A-Za-z0-9_-]{8,128}',native['request_id'])
+                and type(native['rollback_selector']) is str
+                and re.fullmatch(r'/var/lib/serein/rollback/offline-ollama-\d{8}T\d{6}Z-[0-9a-f]{12}',native['rollback_selector'])
+                and native['rollback_selector']!=request['rollback_selector'],
+                'AUTHORITY_CONSTRUCTION_REQUEST_DENIED')
     if 'offline_companion' in request:
         offline=request['offline_companion']
         require(isinstance(offline,dict) and set(offline)==

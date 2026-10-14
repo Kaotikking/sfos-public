@@ -43,7 +43,7 @@ OTHER_KERNEL_UNITS=('serein-observation-audit.service','serein-observation-audit
                     'serein-kernel-operations-api.service','serein-kernel-operations-api.socket')+RESIDENCY_UNITS
 OPERATIONS_SERVICES=('serein-kernel-operations-heartbeat.service','serein-observation-audit.service')
 OPERATIONS_ENDPOINT=('serein-kernel-operations-api.service','serein-kernel-operations-api.socket')
-SUCCESSOR_FAILURE_UNITS=OPERATIONS_SERVICES+OPERATIONS_ENDPOINT+RESIDENCY_UNITS
+SUCCESSOR_FAILURE_UNITS=(AUTHORITY_UNITS[0],)+OPERATIONS_SERVICES+OPERATIONS_ENDPOINT+RESIDENCY_UNITS
 OPERATIONS_UNITS=('serein-kernel-operations-api.socket','serein-kernel-operations-api.service',
                   'serein-kernel-operations-heartbeat.service',
                   'serein-observation-audit.socket','serein-observation-audit.service')
@@ -3015,6 +3015,56 @@ def _read_failed_operations_endpoint(rows):
  return controls
 
 
+def _read_failed_authority_endpoint(rows):
+ """Capture the exact exited, process-free Authority failure before reset.
+
+ Signed predecessor/file/current-boot verification remains the outer owner's
+ prerequisite. This reader neither clears a latch nor starts a service.
+ """
+ import subprocess
+ service,socket=AUTHORITY_UNITS
+ if (rows[service]['ActiveState'],rows[service]['SubState'])!=('failed','failed'):return {}
+ deny((rows[socket]['ActiveState'],rows[socket]['SubState'])!=('inactive','dead'),
+      'KERNEL_SUCCESSOR_AUTHORITY_FAILURE_DENIED')
+ properties=tuple(rows[service])+('MainPID','ExecMainCode','ExecMainStatus',
+     'ExecMainStartTimestampMonotonic','InvocationID','User','Group','Restart',
+     'NRestarts','Result','KillMode','ControlGroup','Job')
+ try:
+  result=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
+      '--property='+','.join(properties),service],capture_output=True,text=True,
+      timeout=15,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+      stdin=subprocess.DEVNULL,close_fds=True)
+ except (OSError,subprocess.SubprocessError) as exc:
+  raise RunnerDenied('KERNEL_SUCCESSOR_AUTHORITY_FAILURE_DENIED') from exc
+ deny(len(result.stdout)>16384 or result.stderr,'KERNEL_SUCCESSOR_AUTHORITY_FAILURE_DENIED')
+ value={}
+ for line in result.stdout.splitlines():
+  key,sep,item=line.partition('=')
+  deny(not sep or key in value,'KERNEL_SUCCESSOR_AUTHORITY_FAILURE_DENIED')
+  value[key]=item
+ exact={'MainPID':'0','ExecMainCode':'1','ExecMainStatus':'1','User':'root','Group':'root',
+        'Restart':'no','NRestarts':'0','Result':'exit-code','KillMode':'control-group',
+        'ControlGroup':'','Job':''}
+ deny(set(value)!=set(properties) or any(value.get(k)!=v for k,v in {**rows[service],**exact}.items())
+      or not re.fullmatch(r'[0-9a-f]{32}',value.get('InvocationID',''))
+      or value['InvocationID']=='0'*32
+      or not re.fullmatch(r'[1-9][0-9]{0,19}',value.get('ExecMainStartTimestampMonotonic',''))
+      or os.path.lexists('/sys/fs/cgroup/system.slice/'+service),
+      'KERNEL_SUCCESSOR_AUTHORITY_FAILURE_DENIED')
+ try:
+  journal=subprocess.run(['/usr/bin/journalctl','--no-pager','-b','-o','short-monotonic',
+      '_SYSTEMD_INVOCATION_ID='+value['InvocationID'],'+',
+      'OBJECT_SYSTEMD_INVOCATION_ID='+value['InvocationID']],capture_output=True,text=True,
+      timeout=15,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+      stdin=subprocess.DEVNULL,close_fds=True)
+ except (OSError,subprocess.SubprocessError) as exc:
+  raise RunnerDenied('KERNEL_SUCCESSOR_AUTHORITY_FAILURE_EVIDENCE_DENIED') from exc
+ deny(not journal.stdout or len(journal.stdout.encode())>65536 or journal.stderr,
+      'KERNEL_SUCCESSOR_AUTHORITY_FAILURE_EVIDENCE_DENIED')
+ return {'controls':value,'invocation_journal':journal.stdout,
+         'invocation_journal_sha256':sha(journal.stdout.encode()),'cgroup':'ABSENT'}
+
+
 @contextmanager
 def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restored,publication,
                              predecessor_boot_id,current_boot_id,retain_prestate=None):
@@ -3051,8 +3101,10 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
        ('Id','LoadState','FragmentPath','DropInPaths','UnitFileState','NeedDaemonReload')) for name in names),
        'KERNEL_SUCCESSOR_UNIT_DEFINITION_CHANGED')
  def command(action,units):
+  nonlocal attempted
   if not units:return
   guard()
+  if action=='stop':attempted=True
   try:subprocess.run(['/usr/bin/systemctl','--no-ask-password',
       '--job-mode=replace' if action=='stop' else '--job-mode=fail',action,*units],
       check=True,timeout=90,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
@@ -3078,17 +3130,21 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
  guard();verify_predecessor()
  deny(read()!=original,'KERNEL_SUCCESSOR_UNIT_PRESTATE_CHANGED')
  failed=tuple(name for name in SUCCESSOR_FAILURE_UNITS if original[name]['ActiveState']=='failed')
- endpoint_controls=_read_failed_operations_endpoint(original)
  if failed or not restart_predecessor:
   deny(not callable(retain_prestate),'KERNEL_SUCCESSOR_FAILURE_EVIDENCE_REQUIRED')
+ endpoint_controls=_read_failed_operations_endpoint(original)
+ authority_controls=_read_failed_authority_endpoint(original)
+ if failed or not restart_predecessor:
   retain_prestate(original)
   guard();verify_predecessor()
   deny(read()!=original,'KERNEL_SUCCESSOR_UNIT_PRESTATE_CHANGED')
   deny(_read_failed_operations_endpoint(original)!=endpoint_controls,
        'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
+  deny(_read_failed_authority_endpoint(original)!=authority_controls,
+       'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
  try:
   for units in reversed(groups):
-   definitions(read());attempted=True
+   definitions(read())
    command('stop',tuple(name for name in units if original[name]['LoadState']=='loaded'))
    observed=read();definitions(observed)
    # systemd stop leaves an already-failed unit failed. Preserve its exact
@@ -3113,8 +3169,24 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
     if restored_guard is not None:guard=restored_guard
     guard();definitions(read())
     if restart_predecessor:
+     for service,socket in (AUTHORITY_UNITS,OPERATIONS_ENDPOINT,
+         ('serein-observation-audit.service','serein-observation-audit.socket'),
+         ('serein-conversation-runtime.service','serein-conversation-runtime.socket'),
+         ('serein-kernel-client-gateway@haos.service','serein-kernel-client-gateway-haos.socket')):
+      deny(_unit_active(service,original[service]) and not _unit_active(socket,original[socket]),
+           'KERNEL_SUCCESSOR_PREDECESSOR_SOCKET_UNPROVEN')
      for units in groups:
-      command('start',tuple(name for name in units if _unit_active(name,original[name])))
+      # A service requiring an inherited listener must never be started when
+      # the corresponding socket start failed. systemctl aggregates job
+      # failures; starting both in one call can still launch the service.
+      sockets=tuple(name for name in units if name.endswith('.socket') and _unit_active(name,original[name]))
+      services=tuple(name for name in units if not name.endswith('.socket') and _unit_active(name,original[name]))
+      command('start',sockets)
+      if sockets:
+       observed=read();definitions(observed)
+       deny(any(not _unit_active(name,observed[name]) for name in sockets),
+            'KERNEL_SUCCESSOR_PREDECESSOR_SOCKET_UNPROVEN')
+      command('start',services)
     current=read();definitions(current)
     deny(any((_unit_active(name,current[name]) if restart_predecessor and _unit_active(name,original[name]) else
               (current[name]['ActiveState'],current[name]['SubState'])==('inactive','dead')) is not True
@@ -3267,6 +3339,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
    def retain_prestate(rows):
     controls=read_operations_service_controls()
     endpoint_controls=_read_failed_operations_endpoint(rows)
+    authority_controls=_read_failed_authority_endpoint(rows)
     failed=[name for name in OPERATIONS_SERVICES if rows[name]['ActiveState']=='failed']
     deny(any(controls[name]['MainPID']!='0' or any(controls[name][key]!=rows[name][key]
              for key in rows[name]) for name in failed),'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
@@ -3279,12 +3352,14 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
         'operations_service_controls':controls,
         'failed_predecessors':[name for name in SUCCESSOR_FAILURE_UNITS if rows[name]['ActiveState']=='failed'],
         'operations_endpoint_failure_controls':endpoint_controls,
+        'authority_failure_controls':authority_controls,
         'failed_predecessor_compensation':'REMAIN_INACTIVE_NEVER_RESTART'}
     evidence['evidence_digest']=sha(canonical(evidence))
     def evidence_boundary():
      material_boundary();verify_predecessor()
      deny(read_operations_service_controls()!=controls,'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
      deny(_read_failed_operations_endpoint(rows)!=endpoint_controls,'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
+     deny(_read_failed_authority_endpoint(rows)!=authority_controls,'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
     atomic(STATE/('kernel-successor-quiescence-'+sha(request_raw)+'.json'),
         evidence,witness_fd,evidence_boundary)
    successor_scope.enter_context(_quiesce_installed_kernel(unit_prestate,guard=material_boundary,
