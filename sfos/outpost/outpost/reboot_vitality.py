@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -212,7 +213,19 @@ class VitalityChronology:
             os.close(fd)
             for directory, _, _ in reversed(directories): os.close(directory)
 
-    def read_summary(self) -> dict[str, Any]:
+    @contextmanager
+    def _summary_access(self, verified_prefix_only):
+        if not self._summary_lock.acquire(blocking=not verified_prefix_only):
+            raise RebootVitalityError("VITALITY_CHRONOLOGY_BUSY")
+        try:
+            if (verified_prefix_only and self._summary_cache is None
+                    and self._summary_failure is None):
+                raise RebootVitalityError("VITALITY_CHRONOLOGY_NOT_YET_VERIFIED")
+            yield
+        finally:
+            self._summary_lock.release()
+
+    def read_summary(self, *, verified_prefix_only=False) -> dict[str, Any]:
         """Validate all current bytes; reuse parsing only for a matching prefix.
 
         The prefix hash is recomputed from the open file on EVERY read. This
@@ -234,7 +247,7 @@ class VitalityChronology:
                 count -= len(block)
             return result.hexdigest()
 
-        with self._summary_lock:
+        with self._summary_access(verified_prefix_only):
             try:
                 fd, directories = self._open(writing=False)
             except FileNotFoundError:
@@ -270,6 +283,12 @@ class VitalityChronology:
                     if prefix_digest.hexdigest() == cached[1]:
                         complete_digest = prefix_digest.copy(); prefix = cached[2]
                 if prefix is None:
+                    if verified_prefix_only:
+                        # A changed/shrunk prefix or changed rejected content
+                        # needs cold validation too. Report no history claim;
+                        # the bounded presentation worker performs the same
+                        # full reader after flushing unavailable evidence.
+                        raise RebootVitalityError("VITALITY_CHRONOLOGY_NOT_YET_VERIFIED")
                     os.lseek(fd, 0, os.SEEK_SET)
                     complete_digest = hashlib.sha256()
                 rows = self._read_locked(fd, prefix, complete_digest)

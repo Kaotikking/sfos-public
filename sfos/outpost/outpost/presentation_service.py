@@ -17,6 +17,7 @@ from pathlib import Path
 
 from .http_readonly import present
 from .vitals_runtime import VitalsRuntimeStore
+from .reboot_vitality import RebootVitalityError
 
 SOCKET_PATH = Path("/run/serein/outpost-presentation/status.sock")
 HOST_VITALITY_ROOT = Path("/var/lib/serein-outpost/host-vitality")
@@ -61,13 +62,37 @@ class PresentationHandler(socketserver.StreamRequestHandler):
             response = {"status":400, "content_type":"application/json",
                         "headers":[["Cache-Control","no-store"]],
                         "body_base64":base64.b64encode(b'{"error":"REQUEST_DENIED"}\n').decode("ascii")}
-        self.wfile.write(json.dumps(response, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+        try:
+            self.wfile.write(json.dumps(response, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+            self.wfile.flush()
+        except OSError:
+            return
+        if response['status'] == 200:
+            self.server.warm_cold_chronology()
 
 
 class PresentationServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
     # Bound local work without letting one slow/partial client hold the accept
     # loop. Every admitted request still acquires its own complete snapshot.
     MAX_CONCURRENT_REQUESTS = 4
+
+    def warm_cold_chronology(self):
+        store = self.host_vitality_store
+        if (not isinstance(store, VitalsRuntimeStore)
+                or not store.chronology_needs_validation()
+                or not self._cold_chronology_slot.acquire(blocking=False)):
+            return
+        try:
+            # This same bounded handler has already flushed truthful unavailable
+            # evidence. Acquire only parsing evidence, never a cached readiness
+            # verdict; later requests still hash all bytes via read_summary.
+            if store.chronology_needs_validation():
+                try:
+                    store.chronology.read_summary()
+                except (OSError, ValueError, TypeError):
+                    pass
+        finally:
+            self._cold_chronology_slot.release()
 
     def process_request(self, request, client_address):
         if not self._request_slots.acquire(blocking=False):
@@ -87,6 +112,7 @@ class PresentationServer(socketserver.ThreadingMixIn, socketserver.UnixStreamSer
 
     def __init__(self, address, store: VitalsRuntimeStore):
         self._request_slots = threading.BoundedSemaphore(self.MAX_CONCURRENT_REQUESTS)
+        self._cold_chronology_slot = threading.Lock()
         if os.path.lexists(address):
             raise ValueError("PRESENTATION_SOCKET_COLLISION_DENIED")
         # Validate the existing history before exposing the request socket.
@@ -97,10 +123,22 @@ class PresentationServer(socketserver.ThreadingMixIn, socketserver.UnixStreamSer
                 store.host.snapshot()
             except (OSError, ValueError, TypeError):
                 pass
-            try:
-                store.chronology.read_summary()
-            except (OSError, ValueError, TypeError):
-                pass
+            # The writer holds an exclusive chronology lock while appending.
+            # A transient collision is not a completed cold validation: warm
+            # the same reader before the first bounded edge request. Keep the
+            # retries finite and specific; missing/broken history still permits
+            # the independent recovery page, and every request rehashes bytes.
+            for attempt in range(3):
+                try:
+                    store.chronology.read_summary()
+                    break
+                except RebootVitalityError as error:
+                    if str(error) != 'VITALITY_CHRONOLOGY_BUSY' or attempt == 2:
+                        break
+                    time.sleep(1.0)
+                except (OSError, ValueError, TypeError):
+                    break
+            store.defer_cold_chronology = True
         super().__init__(address, PresentationHandler)
         self.host_vitality_store = store
 

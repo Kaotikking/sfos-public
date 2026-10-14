@@ -177,6 +177,15 @@ class VitalsRuntimeStore:
         self.domain_state_path = Path(domain_state_path)
         self.recovery_path = Path(recovery_path)
         self.chronology = VitalityChronology(self.producer_root.parent / "watchdog/chronology.jsonl")
+        # Only the presentation server enables cold-producer deferral after its
+        # startup validation attempt. Other readers retain synchronous proof.
+        self.defer_cold_chronology = False
+
+    def chronology_needs_validation(self):
+        # This is not a verdict. A prefix/rejection only selects the normal
+        # reader, which still hashes current bytes and validates custody.
+        return (self.chronology._summary_cache is None
+                and self.chronology._summary_failure is None)
 
     @staticmethod
     def _read_json(path: Path, *, expected_custody=None) -> dict[str, Any]:
@@ -229,7 +238,8 @@ class VitalsRuntimeStore:
                             or value["payload"] != native or value["claim"] != native["watchdog_state"]):
                         raise VitalsRuntimeError("VITALS_NATIVE_WITNESS_DENIED")
                 elif value["claim"] == "CHRONOLOGY_OBSERVED":
-                    history = self.chronology.read_summary()
+                    history = self.chronology.read_summary(
+                        verified_prefix_only=self.defer_cold_chronology)
                     if not history["event_count"] or value["payload"] != history or value["evidence_ref"] != "chronology:" + history["latest_event"]["event_hash"]:
                         raise VitalsRuntimeError("VITALS_NATIVE_WITNESS_DENIED")
                 elif value["claim"] != "CHRONOLOGY_UNAVAILABLE" or value["payload"] != {"status": "UNAVAILABLE"}:
