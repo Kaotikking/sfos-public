@@ -19,6 +19,7 @@ import tarfile
 import tempfile
 import subprocess
 import shlex
+import time
 from pathlib import Path, PurePosixPath
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
@@ -41,6 +42,7 @@ NATIVE_ALLOCATION_RUNTIME = {
 }
 NATIVE_ALLOCATION_SCHEMA = 'SereinNativeAllocationPlan/v1'
 NATIVE_ALLOCATION_RECEIPT = 'SereinNativeAllocationReceipt/v1'
+NATIVE_ALLOCATION_START_RECEIPT = 'SereinNativeAllocationReceipt/v2'
 NATIVE_ALLOCATION_WARMUP = ('/usr/libexec/serein/serein-ollama-warmup', 1634,
     '4a8971d72739c161d2f082a67814ad3646065a3a77011fd978311ffdf98cc89e')
 
@@ -400,6 +402,88 @@ class OfflineOllamaRealAdapter(RealAdapter):
         if observed.returncode or observed.stderr.strip() or not re.fullmatch(r'[1-9][0-9]*',value):
             raise TransactionError('OFFLINE_RUNTIME_PROCESS_UNAVAILABLE')
         return int(value)
+    def observe_native_incarnation(self):
+        """Bind a started unit without assuming exec/environment readiness.
+
+        Type=simple returns before execve. PID alone is not ownership: bind
+        the current boot, proc start time, systemd invocation and exact cgroup.
+        This observation never admits a runtime or substitutes a model root.
+        """
+        def manager():
+            result=subprocess.run(['systemctl','show','ollama.service',
+                '--property=MainPID,InvocationID,ControlGroup'],
+                capture_output=True,text=True,check=True,timeout=10)
+            rows={}
+            for line in result.stdout.splitlines():
+                name,separator,value=line.partition('=')
+                if not separator or name in rows:
+                    raise TransactionError('NATIVE_START_IDENTITY_DENIED')
+                rows[name]=value
+            if (result.stderr.strip() or set(rows)!={'MainPID','InvocationID','ControlGroup'}
+                    or not re.fullmatch('[1-9][0-9]*',rows['MainPID'])
+                    or not re.fullmatch('[0-9a-f]{32}',rows['InvocationID'])
+                    or rows['InvocationID']=='0'*32
+                    or rows['ControlGroup']!='/system.slice/ollama.service'):
+                raise TransactionError('NATIVE_START_IDENTITY_DENIED')
+            return rows
+        try:
+            boot_path=self.root/'proc/sys/kernel/random/boot_id'
+            boot=boot_path.read_text().strip();before=manager()
+            pid=int(before['MainPID']);proc=self.root/'proc'/str(pid)
+            def process():
+                raw=(proc/'stat').read_text()
+                if not raw.startswith(str(pid)+' ('):raise ValueError('PID')
+                started=raw.rsplit(') ',1)[1].split()[19]
+                if not started.isdecimal():raise ValueError('START_TIME')
+                if (proc/'cgroup').read_text().splitlines()!=['0::'+before['ControlGroup']]:
+                    raise ValueError('CGROUP')
+                return started
+            started=process()
+            if (boot!=self.boot_id or boot!=boot_path.read_text().strip()
+                    or before!=manager() or started!=process()):
+                raise ValueError('INCARNATION_CHANGED')
+            return {'boot_id':boot,'pid':pid,'start_time':started,
+                'invocation_id':before['InvocationID'],'control_group':before['ControlGroup']}
+        except (OSError,ValueError,IndexError,subprocess.SubprocessError) as exc:
+            raise TransactionError('NATIVE_START_IDENTITY_DENIED') from exc
+    def wait_native_allocation(self, incarnation):
+        """Wait only for exec of the bound process, then run strict acceptance.
+
+        No retry across a restart, no guessed environment and no broad retry
+        of an invalid runtime/material observation. The executable's actual
+        inode must match the pinned image before its environment is consumed.
+        """
+        for attempt in range(101):
+            if self.observe_native_incarnation()!=incarnation:
+                raise TransactionError('NATIVE_START_INCARNATION_CHANGED')
+            path=self.root/'proc'/str(incarnation['pid'])/'exe'
+            with path.open('rb') as stream:
+                before=os.fstat(stream.fileno())
+                if not stat.S_ISREG(before.st_mode) or before.st_size>64*1024*1024:
+                    raise TransactionError('NATIVE_START_EXECUTABLE_DENIED')
+                value=hashlib.sha256();size=0
+                while chunk:=stream.read(1048576):
+                    size+=len(chunk)
+                    if size>64*1024*1024:
+                        raise TransactionError('NATIVE_START_EXECUTABLE_DENIED')
+                    value.update(chunk)
+                after=os.fstat(stream.fileno())
+            fingerprint=lambda info:(info.st_dev,info.st_ino,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
+            if fingerprint(before)!=fingerprint(after) or size!=before.st_size:
+                raise TransactionError('NATIVE_START_EXECUTABLE_CHANGED')
+            if self.observe_native_incarnation()!=incarnation:
+                raise TransactionError('NATIVE_START_INCARNATION_CHANGED')
+            if (size==NATIVE_ALLOCATION_RUNTIME['binary_bytes']
+                    and value.hexdigest()==NATIVE_ALLOCATION_RUNTIME['binary_sha256']
+                    and fingerprint(after)==fingerprint(path.stat())):
+                observed=self.observe_native_allocation()
+                if (self.observe_native_incarnation()!=incarnation
+                        or any(observed['runtime'][key]!=incarnation[key]
+                               for key in ('boot_id','pid','start_time'))):
+                    raise TransactionError('NATIVE_START_INCARNATION_CHANGED')
+                return observed
+            if attempt<100:time.sleep(0.1)
+        raise TransactionError('NATIVE_START_EXEC_TIMEOUT')
     def native_runtime_stopped(self):
         result=subprocess.run(['systemctl','show','ollama.service','--property=MainPID','--value'],
             capture_output=True,text=True,check=True,timeout=10)
@@ -1417,11 +1501,12 @@ def install_native_allocation(adapter, plan, selector):
     nofollow_ancestors(adapter.root,selector)
     _native_allocation_unit_guard(adapter,plan)
     selector.mkdir(mode=0o700);_set_dir_metadata(adapter,selector,0o700);_fsync_dir(selector.parent)
-    receipt = {'schema':NATIVE_ALLOCATION_RECEIPT, 'actor':'OUTPOST',
+    receipt = {'schema':NATIVE_ALLOCATION_START_RECEIPT, 'actor':'OUTPOST',
         'selector':str(selector), 'plan':plan, 'plan_sha256':plan['plan_sha256'],
         'scope':'RUNTIME_DEPENDENCY_ONLY', 'phase':'PREPARED',
         'acceptance':None, 'restoration':None, 'rollback_complete':False,
-        'directory_identity':None,'config_identity':None,'runtime_after':None}
+        'directory_identity':None,'config_identity':None,'runtime_after':None,
+        'start_incarnation':None,'restoration_incarnation':None}
     _native_allocation_record(adapter,selector,receipt)
     config = _target(adapter.root,NATIVE_ALLOCATION_TARGET)
     try:
@@ -1443,7 +1528,9 @@ def install_native_allocation(adapter, plan, selector):
         adapter.reload_native_allocation();_native_allocation_unit_guard(adapter,plan)
         receipt['phase']='START_REQUESTED';_native_allocation_record(adapter,selector,receipt)
         adapter.start_unit('ollama.service')
-        observed=adapter.observe_native_allocation()
+        receipt['start_incarnation']=adapter.observe_native_incarnation()
+        _native_allocation_record(adapter,selector,receipt)
+        observed=adapter.wait_native_allocation(receipt['start_incarnation'])
         native_allocation_transition(plan['runtime_prestate'],observed)
         receipt['runtime_after']=observed;_native_allocation_record(adapter,selector,receipt)
         adapter.preload_native_allocation()
@@ -1484,6 +1571,8 @@ def _native_allocation_receipt(adapter, selector):
     receipt=json.loads(raw)
     fields={'schema','actor','selector','plan','plan_sha256','scope','phase','acceptance',
         'restoration','rollback_complete','directory_identity','config_identity','runtime_after','receipt_digest'}
+    if type(receipt) is dict and receipt.get('schema')==NATIVE_ALLOCATION_START_RECEIPT:
+        fields.update({'start_incarnation','restoration_incarnation'})
     if type(receipt) is not dict or set(receipt)!=fields:
         raise TransactionError('NATIVE_ALLOCATION_RESTORATION_RECEIPT_DENIED')
     plan=receipt['plan']
@@ -1497,7 +1586,7 @@ def _native_allocation_receipt(adapter, selector):
             or plan['scope']!='RUNTIME_DEPENDENCY_ONLY'
             or plan['plan_sha256']!=digest(canonical(body))
             or plan['config_sha256']!=digest(native_allocation_configuration(plan['environment']))
-            or receipt.get('schema')!=NATIVE_ALLOCATION_RECEIPT
+            or receipt.get('schema') not in {NATIVE_ALLOCATION_RECEIPT,NATIVE_ALLOCATION_START_RECEIPT}
             or receipt['actor']!='OUTPOST' or receipt['scope']!='RUNTIME_DEPENDENCY_ONLY'
             or receipt['phase'] not in {'PREPARED','STOP_REQUESTED','CONFIG_REQUESTED','START_REQUESTED',
                 'DEPENDENCY_OBSERVED','RESTORE_REQUESTED','RESTORED'}
@@ -1515,6 +1604,18 @@ def _native_allocation_receipt(adapter, selector):
         value=receipt[name]
         if value is not None and (type(value) is not dict or set(value)!={'device','inode'}
                 or any(type(v) is not int or v<0 for v in value.values())):
+            raise TransactionError('NATIVE_ALLOCATION_OWNERSHIP_DENIED')
+    for name in ('start_incarnation','restoration_incarnation'):
+        incarnation=receipt.get(name)
+        if incarnation is not None and (type(incarnation) is not dict
+            or set(incarnation)!={'boot_id','pid','start_time','invocation_id','control_group'}
+            or incarnation['boot_id']!=plan['boot_id']
+            or type(incarnation['pid']) is not int or incarnation['pid']<=0
+            or type(incarnation['start_time']) is not str or not incarnation['start_time'].isdecimal()
+            or type(incarnation['invocation_id']) is not str
+            or not re.fullmatch('[0-9a-f]{32}',incarnation['invocation_id'])
+            or incarnation['invocation_id']=='0'*32
+                or incarnation['control_group']!='/system.slice/ollama.service'):
             raise TransactionError('NATIVE_ALLOCATION_OWNERSHIP_DENIED')
     _verify_signature(adapter,plan);_native_allocation_unit_guard(adapter,plan)
     if _native_file_read(adapter,selector/'receipt.json')[0]!=raw:
@@ -1537,10 +1638,23 @@ def rollback_native_allocation(adapter, selector):
     config=_native_owned_configuration(adapter,receipt)
     state=adapter.read_unit('ollama.service')
     if state=={'active':'active','enabled':'enabled'}:
-        observed=adapter.observe_native_allocation()
-        expected=receipt['runtime_after'] or plan['runtime_prestate']
-        if observed!=expected:
+        if (receipt.get('start_incarnation') is not None
+                and adapter.observe_native_incarnation()!=receipt['start_incarnation']):
             raise TransactionError('NATIVE_ALLOCATION_FOREIGN_RUNTIME_DENIED')
+        owned_unready=(receipt['schema']==NATIVE_ALLOCATION_START_RECEIPT
+            and receipt['phase']=='START_REQUESTED' and receipt['runtime_after'] is None
+            and receipt['start_incarnation'] is not None)
+        if owned_unready:
+            # Only this durable v2 start belongs to the transaction. Readiness
+            # may have failed, but stopping that exact incarnation to undo its
+            # owned configuration does not require pretending it was ready.
+            if adapter.read_native_allocation_definition()!=_native_expected_definition(plan,installed=True):
+                raise TransactionError('NATIVE_ALLOCATION_FOREIGN_DEFINITION_DENIED')
+        else:
+            observed=adapter.observe_native_allocation()
+            expected=receipt['runtime_after'] or plan['runtime_prestate']
+            if observed!=expected:
+                raise TransactionError('NATIVE_ALLOCATION_FOREIGN_RUNTIME_DENIED')
         if receipt['phase'] in {'PREPARED','STOP_REQUESTED'} and receipt['directory_identity'] is None:
             if native_allocation_prestate(adapter)!=plan['unit_prestate']:
                 raise TransactionError('NATIVE_ALLOCATION_RESTORED_UNIT_DENIED')
@@ -1557,7 +1671,11 @@ def rollback_native_allocation(adapter, selector):
         raise TransactionError('NATIVE_ALLOCATION_FOREIGN_MATERIAL_DENIED')
     _native_owned_configuration(adapter,receipt);_native_allocation_unit_guard(adapter,plan)
     receipt['phase']='RESTORE_REQUESTED';_native_allocation_record(adapter,selector,receipt)
-    if state['active']=='active':adapter.stop_unit('ollama.service')
+    if state['active']=='active':
+        if (receipt.get('start_incarnation') is not None
+                and adapter.observe_native_incarnation()!=receipt['start_incarnation']):
+            raise TransactionError('NATIVE_ALLOCATION_FOREIGN_RUNTIME_DENIED')
+        adapter.stop_unit('ollama.service')
     if adapter.read_unit('ollama.service')!={'active':'inactive','enabled':'enabled'} or not adapter.native_runtime_stopped():
         raise TransactionError('NATIVE_ALLOCATION_STOP_UNPROVEN')
     _native_allocation_unit_guard(adapter,plan);_native_owned_configuration(adapter,receipt)
@@ -1568,11 +1686,19 @@ def rollback_native_allocation(adapter, selector):
             raise TransactionError('NATIVE_ALLOCATION_FOREIGN_DIRECTORY_DENIED')
         config.parent.rmdir();_fsync_dir(config.parent.parent)
     adapter.reload_native_allocation();_native_allocation_unit_guard(adapter,plan)
-    adapter.start_unit('ollama.service');adapter.preload_native_allocation()
+    adapter.start_unit('ollama.service')
+    if receipt['schema']==NATIVE_ALLOCATION_START_RECEIPT:
+        receipt['restoration_incarnation']=adapter.observe_native_incarnation()
+        _native_allocation_record(adapter,selector,receipt)
+        adapter.wait_native_allocation(receipt['restoration_incarnation'])
+    adapter.preload_native_allocation()
     _native_allocation_unit_guard(adapter,plan)
     if native_allocation_prestate(adapter)!=plan['unit_prestate']:
         raise TransactionError('NATIVE_ALLOCATION_RESTORED_UNIT_DENIED')
     restored=native_allocation_transition(plan['runtime_prestate'],adapter.observe_native_allocation(),restoring=True)
+    if (receipt.get('restoration_incarnation') is not None
+            and adapter.observe_native_incarnation()!=receipt['restoration_incarnation']):
+        raise TransactionError('NATIVE_ALLOCATION_RESTORED_RUNTIME_CHANGED')
     receipt.update(phase='RESTORED',restoration=restored,rollback_complete=True)
     _native_allocation_record(adapter,selector,receipt)
     _native_allocation_unit_guard(adapter,plan)
@@ -1592,6 +1718,9 @@ def verify_installed_native_allocation(adapter, selector, *, expected_plan_sha25
         raise TransactionError('NATIVE_ALLOCATION_INSTALLED_DEFINITION_DENIED')
     observed=adapter.observe_native_allocation()
     transition=native_allocation_transition(plan['runtime_prestate'],observed)
+    if (receipt.get('start_incarnation') is not None
+            and adapter.observe_native_incarnation()!=receipt['start_incarnation']):
+        raise TransactionError('NATIVE_ALLOCATION_INSTALLED_RUNTIME_CHANGED')
     if observed!=receipt['runtime_after'] or transition!=receipt['acceptance']:
         raise TransactionError('NATIVE_ALLOCATION_INSTALLED_RUNTIME_CHANGED')
     if _native_allocation_receipt(adapter,selector)!=receipt:

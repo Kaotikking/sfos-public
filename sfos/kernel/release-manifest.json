@@ -185,8 +185,8 @@
     ],
     [
       "payload/serein_stage1/outpost_evidence/host_vitality.py",
-      30217,
-      "8eda9b38eefeba79c07a5bf75e39f4567fba71c37cdb6cceab975c62493eb299",
+      31084,
+      "112cc8a655249b703eafc34aa707a98f4b3d93eb648d5985936bd9d3588ac087",
       "0644"
     ],
     [
@@ -298,8 +298,8 @@
       "0644"
     ]
   ],
-  "payload_digest": "sha256:dcfc8d9e8ca794d9db94f184ae6aad9bdfe4b502205dce6da11b293516cc202b",
-  "install_denominator_digest": "sha256:e0ce3dc77a8e8b58caf75b05501bb1d4797e5c4658e110bbd2803108b603e05c",
+  "payload_digest": "sha256:97a38aa4d5b2bd6cfc294b62f9c6b3f57bf68b294ea5318dcf6d6910d208629b",
+  "install_denominator_digest": "sha256:8b607d802eec25b6dc20f3e0c9ae440d844348f2972f2052f92848f29b5b28a9",
   "generated_secrets": [
     "/var/lib/serein/kernel/authority/replay.key",
     "/var/lib/serein/kernel/authority/domain-identity.pem"
@@ -308,14 +308,14 @@
   "installer_files": [
     [
       "install/kernel_first_install.py",
-      66265,
-      "cd674ebaad194fc4472e9ebecc4bd5a8e1c4599c9e75d39e41253b875f9c684a",
+      67408,
+      "313690d5e607379acf8b51366a354b8249b0dbe341b397b9ff6a3077ad7ebdae",
       "0755"
     ],
     [
       "install/offline_ollama_transaction.py",
-      111924,
-      "85c2a6fd54d95c78f8483d70be77f4c1a906083610a26172d538d7267aff2fc7",
+      120049,
+      "4cae631cb0da3a05c44ebe783c6fe0139a1e6ae9d2f7d7111688132f10202791",
       "0755"
     ]
   ],
@@ -341,5 +341,5 @@
   ],
   "activation": "OUTPOST_ONLY_AFTER_INACTIVE_PROOF",
   "admission_effect": "NONE",
-  "self_digest": "sha256:43fe798963a063a6b7fdc76799dbc30abec4374aab379ff03b425644524c40a7"
+  "self_digest": "sha256:4597390f97e44d877da5cbbd0c78f8b3392f4965107b87e114693ad8efa4f094"
 }

@@ -508,9 +508,26 @@ def validate(source,root,plan,identity_lookup=None):
  if isinstance(plan,dict) and 'installed_predecessor' in plan:
   required.update({'installed_predecessor','installation_origin'})
   prior=plan['installed_predecessor']
+  prior_fields={'rollback_selector','plan_sha256','receipt_sha256','journal_sha256','witness_sha256',
+                'current_boot_id','machine_id_sha256'}
+  if isinstance(prior,dict) and 'failed_construction' in prior:
+   prior_fields.add('failed_construction')
+   failed=prior['failed_construction']
+   deny(type(failed) is not dict or set(failed)!={'schema','request_path','request_sha256',
+        'native_selector','native_receipt_sha256','native_observation_sha256'}
+        or failed['schema']!='SereinFailedKernelConstruction/v1'
+        or any(type(failed[k]) is not str or not re.fullmatch('[0-9a-f]{64}',failed[k]) for k in
+               ('request_sha256','native_receipt_sha256','native_observation_sha256')),
+        'KERNEL_FAILED_PREDECESSOR_BINDING_DENIED')
+   for key in ('request_path','native_selector'):
+    name=failed[key]
+    deny(type(name) is not str or not name.startswith('/var/lib/serein/rollback/')
+         or '\\' in name or '\x00' in name or str(Path(name))!=name or '..' in Path(name).parts,
+         'KERNEL_FAILED_PREDECESSOR_PATH_DENIED')
+   deny(not re.fullmatch(r'/var/lib/serein/rollback/offline-ollama-\d{8}T\d{6}Z-[0-9a-f]{12}',
+                        failed['native_selector']),'KERNEL_FAILED_PREDECESSOR_PATH_DENIED')
   deny('recovered_predecessor' in plan or not isinstance(prior,dict) or set(prior)!=
-       {'rollback_selector','plan_sha256','receipt_sha256','journal_sha256','witness_sha256',
-        'current_boot_id','machine_id_sha256'}
+       prior_fields
        or prior.get('rollback_selector')==plan.get('rollback_selector')
        or not re.fullmatch(r'/var/lib/serein/rollback/kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',str(prior.get('rollback_selector')))
        or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',str(prior.get('current_boot_id')))

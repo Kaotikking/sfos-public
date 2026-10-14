@@ -423,6 +423,10 @@ def install_request(path):
   previous=request['installed_predecessor']
   fields={'rollback_selector','plan_sha256','receipt_sha256','journal_sha256',
           'witness_sha256','current_boot_id','machine_id_sha256','source_root','source_receipt'}
+  if isinstance(previous,dict) and 'failed_construction' in previous:
+   fields.add('failed_construction')
+   _failed_construction_descriptor(previous['failed_construction'])
+   deny(version!='SereinOutpostKernelInstallRequest/v1','KERNEL_FAILED_SUCCESSOR_RUNTIME_EFFECT_DENIED')
   deny('recovered_predecessor' in request or not isinstance(previous,dict) or set(previous)!=fields,
        'KERNEL_SUCCESSOR_REQUEST_DENIED')
   for key in ('source_root','source_receipt'):
@@ -470,9 +474,87 @@ def capture_outpost_generation(root):
  return selector
 
 
+def _failed_construction_descriptor(value):
+ """Explicit failed-state input, never an invented successful witness."""
+ fields={'schema','request_path','request_sha256','native_selector','native_receipt_sha256',
+         'native_observation_sha256'}
+ deny(type(value) is not dict or set(value)!=fields
+      or value['schema']!='SereinFailedKernelConstruction/v1'
+      or any(type(value[k]) is not str or not HEX64.fullmatch(value[k]) for k in
+             ('request_sha256','native_receipt_sha256','native_observation_sha256')),
+      'KERNEL_FAILED_PREDECESSOR_DESCRIPTOR_DENIED')
+ for key in ('request_path','native_selector'):
+  name=value[key]
+  deny(type(name) is not str or not name.startswith('/var/lib/serein/rollback/')
+       or '\\' in name or '\x00' in name or str(Path(name))!=name or '..' in Path(name).parts,
+       'KERNEL_FAILED_PREDECESSOR_PATH_DENIED')
+ deny(not re.fullmatch(r'/var/lib/serein/rollback/offline-ollama-\d{8}T\d{6}Z-[0-9a-f]{12}',
+                      value['native_selector']),'KERNEL_FAILED_PREDECESSOR_PATH_DENIED')
+ return strict_json(canonical(value))
+
+
+def observe_failed_native_prestate(root,plan,failed,runtime_source,*,expected_release):
+ """Read a failed v3 attempt as current UNADMITTED material, without effects.
+
+ This never fills the legacy receipt's missing runtime ownership, restores a
+ process, or claims the attempt succeeded. The successor explicitly retains
+ the currently observed runtime and must prove the whole Kernel afresh.
+ """
+ root=Path(root);failed=_failed_construction_descriptor(failed)
+ request_path=root/failed['request_path'].lstrip('/')
+ request_raw=regular(request_path,expected_custody=(0,0,0o600))
+ deny(sha(request_raw)!=failed['request_sha256'],'KERNEL_FAILED_REQUEST_CHANGED')
+ request=install_request(request_path)
+ deny(request['schema']!='SereinOutpostKernelInstallRequest/v3'
+      or any(request[k]!=plan[k] for k in
+             ('source_parent','source_commit','source_tree','archive_sha256','rollback_selector'))
+      or request['native_allocation']['rollback_selector']!=failed['native_selector'],
+      'KERNEL_FAILED_REQUEST_DENIED')
+ runtime_source=Path(runtime_source)
+ manifest=read_json(runtime_source/'release-manifest.json')
+ module=load_offline_installer(runtime_source,manifest,expected_release=expected_release)
+ adapter=module.OfflineOllamaRealAdapter()
+ deny(Path(adapter.root)!=root or adapter.boot_id!=plan['current_boot_id'],
+      'KERNEL_FAILED_RUNTIME_TARGET_DENIED')
+ selector=root/failed['native_selector'].lstrip('/')
+ raw=regular(selector/'receipt.json',expected_custody=(0,0,0o600))
+ deny(sha(raw)!=failed['native_receipt_sha256'],'KERNEL_FAILED_RUNTIME_RECEIPT_CHANGED')
+ receipt=module._native_allocation_receipt(adapter,selector)
+ native=receipt['plan']
+ deny(receipt['schema']!=module.NATIVE_ALLOCATION_RECEIPT or receipt['phase']!='START_REQUESTED'
+      or receipt['runtime_after'] is not None or receipt['rollback_complete']
+      or receipt['acceptance'] is not None or receipt['restoration'] is not None
+      or native['source_generation']!={'commit':plan['source_commit'],'tree':plan['source_tree']}
+      or native['request_id']!=request['native_allocation']['request_id']
+      or module.digest(module.canonical({'unit_prestate':native['unit_prestate'],
+          'runtime_prestate':native['runtime_prestate'],'immutable_inputs':native['immutable_inputs']}))
+          !=request['native_allocation']['expected_before_sha256'],
+      'KERNEL_FAILED_NATIVE_PHASE_DENIED')
+ module._native_owned_configuration(adapter,receipt)
+ incarnation=adapter.observe_native_incarnation()
+ observed=adapter.observe_native_allocation()
+ definition=adapter.read_native_allocation_definition()
+ module.native_allocation_transition(native['runtime_prestate'],observed)
+ deny(definition!=module._native_expected_definition(native,installed=True)
+      or adapter.observe_native_incarnation()!=incarnation
+      or any(observed['runtime'][k]!=incarnation[k] for k in ('boot_id','pid','start_time')),
+      'KERNEL_FAILED_RUNTIME_CHANGED')
+ captured={'runtime':observed,'incarnation':incarnation,'definition':definition}
+ deny(sha(canonical(captured))!=failed['native_observation_sha256'],
+      'KERNEL_FAILED_NATIVE_OBSERVATION_CHANGED')
+ module._native_owned_configuration(adapter,receipt)
+ deny(regular(selector/'receipt.json',expected_custody=(0,0,0o600))!=raw
+      or regular(request_path,expected_custody=(0,0,0o600))!=request_raw,
+      'KERNEL_FAILED_RUNTIME_RECORD_CHANGED')
+ return {**captured,'native_plan':native}
+
+
 def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_KEY,witness_path=None,
-                                     observation_boot_id=None):
- """Authenticate a successful predecessor for a whole-domain successor.
+                                     observation_boot_id=None,runtime_source=None,runtime_release=None):
+ """Authenticate exact predecessor material for a whole-domain successor.
+
+ A failed construction is capture-only: its historical successful witness
+ remains distinct and does not admit the failed generation.
 
  Read-only: retain birth/replay provenance and exact public preimages. This
  does not run the first-install rollback, generate identity, quiesce services,
@@ -481,9 +563,12 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
  root=Path(root);source=Path(source)
  fields={'rollback_selector','plan_sha256','receipt_sha256','journal_sha256',
          'witness_sha256','current_boot_id','machine_id_sha256'}
+ if isinstance(expected,dict) and 'failed_construction' in expected:
+  fields.add('failed_construction')
+  _failed_construction_descriptor(expected['failed_construction'])
  deny(not isinstance(expected,dict) or set(expected)!=fields
       or any(not isinstance(expected[k],str) or not HEX64.fullmatch(expected[k])
-             for k in fields-{'rollback_selector','current_boot_id'}),
+             for k in fields-{'rollback_selector','current_boot_id','failed_construction'}),
       'KERNEL_SUCCESSOR_EXPECTATION_DENIED')
  expected=strict_json(canonical(expected));selector=expected['rollback_selector']
  # A historical signed installation remains evidence after a boot change.
@@ -509,6 +594,7 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
   deny(canonical(value)!=raw,'KERNEL_SUCCESSOR_RECORD_DENIED')
   captured[path]=raw
  plan=strict_json(captured[directory/'plan.json']);witness=strict_json(captured[witness_path])
+ failed=expected.get('failed_construction')
  anchor=regular(verify_path,expected_custody=(0,0,0o644))
  deny(sha(anchor)!=CANONICAL_AUTHORITY_SHA256 or plan.get('authority_sha256')!=sha(anchor),
       'KERNEL_SUCCESSOR_ANCHOR_DENIED')
@@ -522,9 +608,19 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
       or witness.get('install_status') not in {'INSTALLED_INACTIVE','CONSTRUCTION_OBSERVED'}
       or witness.get('authority_effect')!='NONE'
       or witness.get('witness_digest')!=sha(canonical({k:v for k,v in witness.items() if k!='witness_digest'}))
-      or any(witness.get(k)!=plan.get(k) for k in ('source_commit','source_tree','archive_sha256',
-          'release_digest','source_receipt_sha256','rollback_selector','native_identity','host_identity','host_projection_digest')),
+      or (failed is None and any(witness.get(k)!=plan.get(k) for k in ('source_commit','source_tree','archive_sha256',
+          'release_digest','source_receipt_sha256','rollback_selector','native_identity','host_identity','host_projection_digest'))),
       'KERNEL_SUCCESSOR_PREDECESSOR_DENIED')
+ if failed is not None:
+  prior=plan.get('installed_predecessor')
+  deny(not isinstance(prior,dict) or prior.get('witness_sha256')!=expected['witness_sha256']
+       or prior.get('rollback_selector')!=witness.get('rollback_selector')
+       or plan['rollback_selector']==witness.get('rollback_selector')
+       or plan['current_boot_id']!=observed_boot
+       or plan['native_identity']!=witness['native_identity']
+       or plan['host_identity']!=witness['host_identity'] or runtime_source is None or runtime_release is None,
+       'KERNEL_FAILED_HISTORICAL_WITNESS_DENIED')
+  observe_failed_native_prestate(root,plan,failed,runtime_source,expected_release=runtime_release)
  if witness['schema'].endswith('/v1'):
   deny(witness['install_status']!='INSTALLED_INACTIVE'
        or witness.get('admission')!='INDEPENDENT_AUDIT_PENDING'
@@ -557,7 +653,8 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
  digest=_verify_install_material(root,plan,receipt,source=source)
  deny(module.journal_read(directory,digest)!=strict_json(captured[directory/'phase-journal.json']),
       'KERNEL_SUCCESSOR_JOURNAL_CHANGED')
- deny(witness.get('installer_receipt_sha256')!=digest,'KERNEL_SUCCESSOR_RECEIPT_DENIED')
+ if failed is None:
+  deny(witness.get('installer_receipt_sha256')!=digest,'KERNEL_SUCCESSOR_RECEIPT_DENIED')
  public=module.capture_successor_payload(root,plan['payload'])
  rows=strict_json(captured[directory/'receipt.json'])['replacements']
  generated={}
@@ -578,7 +675,10 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
  currentness()
  deny(module.journal_read(directory,digest)!=strict_json(captured[directory/'phase-journal.json']),
       'KERNEL_SUCCESSOR_JOURNAL_CHANGED')
- return {'state':'INSTALLED_PREDECESSOR_CAPTURE_ONLY','plan':plan,'receipt_digest':digest,
+ if failed is not None:
+  observe_failed_native_prestate(root,plan,failed,runtime_source,expected_release=runtime_release)
+ return {'state':'FAILED_PREDECESSOR_CAPTURE_ONLY' if failed is not None else 'INSTALLED_PREDECESSOR_CAPTURE_ONLY',
+         'plan':plan,'receipt_digest':digest,
          'witness':witness,'expected':expected,'public_payload':public,
          'observation_boot_id':observed_boot,
          'generated_prestate':generated,'mutable_private_state':'NOT_QUIESCED',
@@ -790,7 +890,8 @@ def build_plan(source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,verify_pa
   prior_source=Path(root)/previous['source_root'].lstrip('/')
   bound={k:v for k,v in previous.items() if k not in {'source_root','source_receipt'}}
   installed=capture_installed_kernel_prestate(root,prior_source,bound,verify_path=verify_path,
-      witness_path=STATE/'kernel-install-witness.json',observation_boot_id=plan['current_boot_id'])
+      witness_path=STATE/'kernel-install-witness.json',observation_boot_id=plan['current_boot_id'],
+      runtime_source=source,runtime_release=plan['release_digest'])
   prior_receipt,prior_receipt_digest=source_receipt(prior_source,
       Path(root)/previous['source_receipt'].lstrip('/'),verify_path)
   deny(prior_receipt_digest!=installed['plan']['source_receipt_sha256'],
@@ -2636,11 +2737,29 @@ def _observe_owned_gpu(plan,compute,preparation,*,signed_runtime_plan,boundary):
   deny(gpu!=runtime['compute_observation']['gpu_after']
        or gpu['boot_id']!=plan['current_boot_id'],'KERNEL_GPU_INVENTORY_CHANGED')
   binding=adapter.observe_gpu_binding(gpu,gpu_module=gpu_module)
+  child_policy=None
   if preparation['offline_preparation'] is None:
    preserved=preparation['preserved_runtime']
    deny(binding['runtime']!=preserved,'KERNEL_PRESERVED_RUNTIME_CHANGED')
    adapter.observe_runtime(expected=preserved)
    recipe='PRESERVED_PROCESS_NOT_SIGNED_RECIPE'
+   previous=plan.get('installed_predecessor',{})
+   failed=previous.get('failed_construction')
+   if failed is not None:
+    # The old failed receipt is source/material evidence, never a successful
+    # runtime install receipt. Reuse its verified recipe only to check the
+    # currently executing child; no new native effect or ownership retrofit.
+    previous_plan=read_json(Path(previous['rollback_selector'])/'plan.json')
+    deny(sha(canonical(previous_plan))!=previous['plan_sha256'],'KERNEL_FAILED_PLAN_CHANGED')
+    retained=observe_failed_native_prestate(Path('/'),previous_plan,failed,SOURCE,
+        expected_release=plan['release_digest'])
+    native=retained['native_plan']
+    deny(binding['runtime']!=retained['runtime']['runtime'],'KERNEL_NATIVE_RUNTIME_CHANGED')
+    module.verify_gpu_runtime_recipe(binding,native,gpu_module=gpu_module)
+    child_policy=adapter.observe_native_worker_policy(binding,native)
+    deny(adapter.observe_gpu_binding(gpu,gpu_module=gpu_module)!=binding,
+         'KERNEL_NATIVE_GPU_WORKER_CHANGED')
+    recipe='FAILED_INSTALL_RETAINED_MATERIAL_AND_CHILD_CONFIGURATION_MATCH'
   else:
    deny(not isinstance(signed_runtime_plan,dict),'KERNEL_OFFLINE_SIGNED_PLAN_DENIED')
    module.verify_gpu_runtime_recipe(binding,signed_runtime_plan,gpu_module=gpu_module)
@@ -2663,7 +2782,7 @@ def _observe_owned_gpu(plan,compute,preparation,*,signed_runtime_plan,boundary):
  result={'result':'RUNTIME_GPU_PROCESS_OBSERVED','binding':binding,
      'runtime_recipe':recipe,'runtime_result_sha256':compute['runtime_result_sha256'],
      'stage1':'NOT_READY','authority_effect':'NONE','admission_effect':'NONE'}
- if signed_runtime_plan is not None and signed_runtime_plan.get('schema')==module.NATIVE_ALLOCATION_SCHEMA:
+ if child_policy is not None:
   result['native_child_policy']=child_policy
  return result
 
@@ -3067,7 +3186,7 @@ def _read_failed_authority_endpoint(rows):
 
 @contextmanager
 def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restored,publication,
-                             predecessor_boot_id,current_boot_id,retain_prestate=None):
+                             predecessor_boot_id,current_boot_id,retain_prestate=None,failed_predecessor=False):
  """Whole-successor owner: stop only the exact installed Kernel units.
 
  No host, Outpost, runtime/model or enablement effect. On failure the old
@@ -3081,7 +3200,8 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
  deny(any(not isinstance(value,str) or not re.fullmatch(boot_pattern,value)
           for value in (predecessor_boot_id,current_boot_id)),
       'KERNEL_SUCCESSOR_BOOT_BINDING_DENIED')
- restart_predecessor=predecessor_boot_id==current_boot_id
+ deny(type(failed_predecessor) is not bool,'KERNEL_SUCCESSOR_FAILURE_CLASS_DENIED')
+ restart_predecessor=predecessor_boot_id==current_boot_id and not failed_predecessor
  groups=(AUTHORITY_UNITS,OPERATIONS_UNITS,INTERFACE_UNITS,RESIDENCY_UNITS)
  names=set(AUTHORITY_UNITS+OTHER_KERNEL_UNITS)
  deny(set(prestate)!=names,'KERNEL_SUCCESSOR_UNIT_SET_DENIED')
@@ -3274,8 +3394,16 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
   if 'native_allocation' in request:
    runtime_disposition.update(native_mutating=False,
        native_expected=prepared['offline_preparation']['plan']['runtime_prestate']['runtime'])
+  def failed_runtime_boundary(runtime_source):
+   failed=request.get('installed_predecessor',{}).get('failed_construction')
+   if failed is not None:
+    previous=request['installed_predecessor']
+    failed_plan=read_json(Path(root)/previous['rollback_selector'].lstrip('/')/'plan.json')
+    deny(sha(canonical(failed_plan))!=previous['plan_sha256'],'KERNEL_FAILED_PLAN_CHANGED')
+    observe_failed_native_prestate(root,failed_plan,failed,runtime_source,expected_release=plan['release_digest'])
   def material_boundary():
    check_material()
+   failed_runtime_boundary(source)
    if 'native_allocation' in request and not runtime_disposition['native_mutating']:
     current_runtime=load_offline_installer(source,read_json(source/'release-manifest.json'),
         expected_release=plan['release_digest']).OfflineOllamaRealAdapter()
@@ -3305,7 +3433,10 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
    def verify_predecessor():
     return capture_installed_kernel_prestate(root,Path(root)/previous['source_root'].lstrip('/'),
         {k:v for k,v in previous.items() if k not in {'source_root','source_receipt'}},verify_path=verify_path,
-        witness_path=STATE/'kernel-install-witness.json',observation_boot_id=plan['current_boot_id'])
+        witness_path=STATE/'kernel-install-witness.json',observation_boot_id=plan['current_boot_id'],
+        runtime_source=(Path(root)/plan['rollback_selector'].lstrip('/')/'candidate-source'
+                        if os.path.lexists(Path(root)/plan['rollback_selector'].lstrip('/')/'candidate-source') else source),
+        runtime_release=plan['release_digest'])
    def verify_restored():
     # Restored runtime bytes alone cannot restart a generation against a new
     # canonical source inbox. Require its original signed provider binding.
@@ -3315,6 +3446,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
     retained_material=None
     def retained_guard():
      nonlocal retained_material
+     failed_runtime_boundary(parked)
      deny(any(regular(Path(root)/name.lstrip('/'),fact=True)!=value for name,value in immutable_before.items()),
           'KERNEL_IMMUTABLE_CHANGED')
      if retained_material is None:
@@ -3345,7 +3477,8 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
              for key in rows[name]) for name in failed),'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
     evidence={'schema':'SereinKernelSuccessorQuiescence/v1','boot_id':boot,
         'predecessor_boot_id':plan['installed_predecessor']['current_boot_id'],
-        'predecessor_restart':('SAME_BOOT_ONLY' if plan['installed_predecessor']['current_boot_id']==plan['current_boot_id']
+        'predecessor_restart':('DENIED_FAILED_CONSTRUCTION' if 'failed_construction' in previous else
+                              'SAME_BOOT_ONLY' if plan['installed_predecessor']['current_boot_id']==plan['current_boot_id']
                                else 'DENIED_HISTORICAL_BOOT'),
         'request_sha256':sha(request_raw),'plan_sha256':sha(canonical(plan)),
         'rollback_selector':plan['rollback_selector'],'unit_prestate':rows,
@@ -3366,7 +3499,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
        verify_predecessor=verify_predecessor,verify_restored=verify_restored,publication=publication,
        predecessor_boot_id=plan['installed_predecessor']['current_boot_id'],
        current_boot_id=plan['current_boot_id'],
-       retain_prestate=retain_prestate))
+       retain_prestate=retain_prestate,failed_predecessor='failed_construction' in previous))
    successor_unit_prestate=unit_prestate
    unit_prestate=inactive_kernel_units()
   def boundary():

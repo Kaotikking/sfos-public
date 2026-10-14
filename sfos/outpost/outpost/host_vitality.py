@@ -275,15 +275,30 @@ class HostVitalityStore:
         terminated=cached_terminated
        else:
         stream.seek(0)
-     raw=stream.read(before.st_size-offset)
-     complete_hash.update(raw)
-     rows.extend(validate(json.loads(line)) for line in raw.splitlines())
-     if raw:terminated=raw.endswith(b'\n')
+     # Keep the complete verified sample index, not every historical package
+     # dictionary. Only the last two observations are needed to reconstruct
+     # current state; older entries retain their validated digest and boot.
+     # This changes no on-disk history or per-read full-byte verification.
+     def retain(line):
+      rows.append(validate(json.loads(line)))
+      if len(rows)>2:
+       older=rows[-3]
+       rows[-3]={key:older[key] for key in ('boot_id','evidence_digest')}
+     remaining=before.st_size-offset;pending=b'';read_bytes=0
+     while remaining:
+      block=stream.read(min(remaining,1024*1024))
+      if not block:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
+      complete_hash.update(block);remaining-=len(block);read_bytes+=len(block)
+      pending+=block
+      lines=pending.split(b'\n');pending=lines.pop()
+      for line in lines:retain(line)
+      terminated=block.endswith(b'\n')
+     if pending:retain(pending)
      if (identity(before)!=identity(os.fstat(stream.fileno()))
-         or identity(before)!=identity(self.samples.lstat()) or offset+len(raw)!=before.st_size):
+         or identity(before)!=identity(self.samples.lstat()) or offset+read_bytes!=before.st_size):
       raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
      with self._history_lock:
-      self._history_cache=(offset+len(raw),complete_hash.hexdigest(),rows,terminated)
+      self._history_cache=(offset+read_bytes,complete_hash.hexdigest(),rows,terminated)
      return rows
   except (OSError,ValueError,TypeError):
    with self._history_lock:self._history_cache=None
@@ -308,7 +323,7 @@ class HostVitalityStore:
    raise HostVitalityError("HOST_VITALITY_HISTORY_DENIED")
   if value is not None:
    count=value["sample_count"]
-   if count>len(rows) or rows[count-1]!=value["latest"] or (rows[count-2]["boot_id"] if count>1 else None)!=value["previous_boot_id"]:raise HostVitalityError("HOST_VITALITY_HISTORY_DENIED")
+   if count>len(rows) or rows[count-1]['evidence_digest']!=value['latest']['evidence_digest'] or rows[count-1]['boot_id']!=value['latest']['boot_id'] or (rows[count-2]["boot_id"] if count>1 else None)!=value["previous_boot_id"]:raise HostVitalityError("HOST_VITALITY_HISTORY_DENIED")
    if count==len(rows):return value
   # The fsynced ECG is the observation journal. A crash may leave the cache
   # absent or behind a validated prefix; reconstruct without mutating on read.
