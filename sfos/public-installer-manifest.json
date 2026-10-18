@@ -161,8 +161,8 @@
     },
     {
       "path": "outpost/outpost/host_vitality.py",
-      "sha256": "fd84a9d46e52892d3d55fb6f139df805b2a80041006fd9b21de43c6e4f83fc35",
-      "bytes": 31421
+      "sha256": "9c1b191c1535285174bf372071f22625c3c046b96a7298bd5b4641aa6cc04b43",
+      "bytes": 35831
     },
     {
       "path": "outpost/outpost/host_witness_runner.py",
@@ -181,8 +181,8 @@
     },
     {
       "path": "outpost/outpost/presentation_service.py",
-      "sha256": "bab449291fae788c6fd8da63994f3f500d4e264ae9a72aaf019bc55d89f17bcd",
-      "bytes": 7539
+      "sha256": "e2fa67fe2ce2557a24b188965990d89ce53791892c311b74b619cc30cc4c5981",
+      "bytes": 8190
     },
     {
       "path": "outpost/outpost/public_tree_host.py",
@@ -191,13 +191,13 @@
     },
     {
       "path": "outpost/outpost/reboot_vitality.py",
-      "sha256": "67d7212d1d13634db0078cfd696b69fc1f2e38d1bd62e24c36678f1a49c9f59d",
-      "bytes": 25255
+      "sha256": "9d858222800a4863ad9ad4949cbc3b00f98ca5682de913a45388a07798432e18",
+      "bytes": 25867
     },
     {
       "path": "outpost/outpost/service.py",
-      "sha256": "3b23318f1f445d1c3fcbe4799435da9aecb395d2e5e15f5e85d9b837a4dfec03",
-      "bytes": 13550
+      "sha256": "a17328297ce0f76678891a675d0e46d9bf9c83bb26cccb42c3b8a3c12b0ee15b",
+      "bytes": 14116
     },
     {
       "path": "outpost/outpost/vitals_aggregation.py",
@@ -211,8 +211,8 @@
     },
     {
       "path": "outpost/outpost/vitals_runtime.py",
-      "sha256": "2e4d5984e98eee4a50c071e4582e58bfc17b92079a1b47f21f81e0d246697a4b",
-      "bytes": 26107
+      "sha256": "e28165755ff92d582c7535ca68f663635e6ba25993c0865123aa556e919ccfca",
+      "bytes": 26793
     },
     {
       "path": "outpost/outpost/watchdog.py",
@@ -221,7 +221,7 @@
     },
     {
       "path": "outpost/release-manifest.json",
-      "sha256": "4402e1a52baeee02ba05e53fe7d2b9a2c62a689c93e746f83a52b87f0ec32195",
+      "sha256": "00e4e9f4af8f8c36e059eefe21c637aa4307fb66bfdc7053c307f9da8f34170f",
       "bytes": 6206
     },
     {
@@ -260,5 +260,5 @@
       "bytes": 10463
     }
   ],
-  "self_digest": "sha256:d1126b2e24456b6b852ce981d8d3d1ce13bd16e2ff0ed3dfdf9923fb7de634f2"
+  "self_digest": "sha256:ffaf2d3b80af5151709d44b028b8113bc91142b0bd31bd5f67081f15a8327ee2"
 }

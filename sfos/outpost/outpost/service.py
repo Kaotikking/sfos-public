@@ -215,6 +215,10 @@ def run_coordinator(*, host_root: Path, state_path: Path, boot_id_path: Path,
     # Retain only the existing hash-verified parse caches. Each consumer still
     # rereads/rehashes current bytes and derives its own fresh Host verdict.
     host_store = HostVitalityStore(host_root)
+    # A pending full-history validation is truthful unavailable evidence, not
+    # grounds to strand the watchdog loop or reuse an old Host-positive state.
+    host_store.defer_cold_validation = True
+    host_store.auto_warm_cold = False
     host_attempts = HostCollectionAttempts(host_root)
     from .reboot_vitality import VitalityChronology
     chronology = VitalityChronology(state_path.parent.parent / "watchdog" / "chronology.jsonl")
@@ -227,6 +231,11 @@ def run_coordinator(*, host_root: Path, state_path: Path, boot_id_path: Path,
                      observed_at=state["observed_at"], host_store=host_store,
                      host_attempts=host_attempts, chronology=chronology)
         _notify("READY=1\nWATCHDOG=1\nSTATUS=" + state["host_gate"])
+        # First finish the genuine unavailable/watchdog-history witness before
+        # scheduling expensive Host parsing. Do not contend two cold histories
+        # on startup or send a notification before the witness is durable.
+        try:host_store.warm_cold_history()
+        except (OSError,ValueError,TypeError):pass
         stop.wait(5.0)
 
 

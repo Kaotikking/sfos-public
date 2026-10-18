@@ -119,10 +119,7 @@ class PresentationServer(socketserver.ThreadingMixIn, socketserver.UnixStreamSer
         # Subsequent requests still rehash every prefix byte and validate all
         # additions. A broken/absent history must not prevent recovery Vitals.
         if isinstance(store, VitalsRuntimeStore):
-            try:
-                store.host.snapshot()
-            except (OSError, ValueError, TypeError):
-                pass
+            store.host.defer_cold_validation = True
             # The writer holds an exclusive chronology lock while appending.
             # A transient collision is not a completed cold validation: warm
             # the same reader before the first bounded edge request. Keep the
@@ -139,6 +136,20 @@ class PresentationServer(socketserver.ThreadingMixIn, socketserver.UnixStreamSer
                 except (OSError, ValueError, TypeError):
                     break
             store.defer_cold_chronology = True
+            # Prepare the small attempt reader before starting the large Host
+            # scan, so first-request parsing does not compete with that worker.
+            # These are parsing indexes only; each request still verifies all
+            # current bytes and derives its own attempt/Host result.
+            try:
+                store.host_attempts.latest()
+            except (OSError, ValueError, TypeError):
+                pass
+            # Large Host history is validated by one bounded read-only worker.
+            # The first page reports UNVALIDATED, never a cached Host verdict.
+            try:
+                store.host.snapshot()
+            except (OSError, ValueError, TypeError):
+                pass
         super().__init__(address, PresentationHandler)
         self.host_vitality_store = store
 

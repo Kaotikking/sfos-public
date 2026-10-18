@@ -227,6 +227,13 @@ class VitalityChronology:
             self._summary_lock.release()
 
     def read_summary(self, *, verified_prefix_only=False) -> dict[str, Any]:
+        return self._read_verified(verified_prefix_only=verified_prefix_only)
+
+    def read_verified(self) -> list[dict[str, Any]]:
+        """Return isolated rows through the same full-byte verification road."""
+        return self._read_verified(include_rows=True)
+
+    def _read_verified(self, *, verified_prefix_only=False, include_rows=False):
         """Validate all current bytes; reuse parsing only for a matching prefix.
 
         The prefix hash is recomputed from the open file on EVERY read. This
@@ -254,7 +261,7 @@ class VitalityChronology:
             except FileNotFoundError:
                 self._summary_cache = None
                 self._summary_failure = None
-                return {"event_count": 0, "latest_event": None}
+                return [] if include_rows else {"event_count": 0, "latest_event": None}
             reused_failure = False
             try:
                 initial = identity(os.fstat(fd))
@@ -300,6 +307,10 @@ class VitalityChronology:
                     raise RebootVitalityError("VITALITY_CHRONOLOGY_CHANGED_DURING_READ")
                 self._check_names(fd, directories)
                 self._summary_cache = (size, complete_hash, rows)
+                if include_rows:
+                    # Copy while holding the reader lock: callers may not
+                    # mutate the parsed prefix that later byte checks reuse.
+                    return json.loads(canonical(rows))
                 return {"event_count": len(rows),
                         "latest_event": copy.deepcopy(rows[-1]) if rows else None}
             except BaseException as error:

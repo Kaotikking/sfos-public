@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G43",
+  "generation": "G44",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -55,8 +55,8 @@
     },
     {
       "path": "outpost/host_vitality.py",
-      "bytes": 31421,
-      "sha256": "fd84a9d46e52892d3d55fb6f139df805b2a80041006fd9b21de43c6e4f83fc35"
+      "bytes": 35831,
+      "sha256": "9c1b191c1535285174bf372071f22625c3c046b96a7298bd5b4641aa6cc04b43"
     },
     {
       "path": "outpost/host_witness_runner.py",
@@ -75,8 +75,8 @@
     },
     {
       "path": "outpost/presentation_service.py",
-      "bytes": 7539,
-      "sha256": "bab449291fae788c6fd8da63994f3f500d4e264ae9a72aaf019bc55d89f17bcd"
+      "bytes": 8190,
+      "sha256": "e2fa67fe2ce2557a24b188965990d89ce53791892c311b74b619cc30cc4c5981"
     },
     {
       "path": "outpost/public_tree_host.py",
@@ -85,13 +85,13 @@
     },
     {
       "path": "outpost/reboot_vitality.py",
-      "bytes": 25255,
-      "sha256": "67d7212d1d13634db0078cfd696b69fc1f2e38d1bd62e24c36678f1a49c9f59d"
+      "bytes": 25867,
+      "sha256": "9d858222800a4863ad9ad4949cbc3b00f98ca5682de913a45388a07798432e18"
     },
     {
       "path": "outpost/service.py",
-      "bytes": 13550,
-      "sha256": "3b23318f1f445d1c3fcbe4799435da9aecb395d2e5e15f5e85d9b837a4dfec03"
+      "bytes": 14116,
+      "sha256": "a17328297ce0f76678891a675d0e46d9bf9c83bb26cccb42c3b8a3c12b0ee15b"
     },
     {
       "path": "outpost/vitals_aggregation.py",
@@ -105,8 +105,8 @@
     },
     {
       "path": "outpost/vitals_runtime.py",
-      "bytes": 26107,
-      "sha256": "2e4d5984e98eee4a50c071e4582e58bfc17b92079a1b47f21f81e0d246697a4b"
+      "bytes": 26793,
+      "sha256": "e28165755ff92d582c7535ca68f663635e6ba25993c0865123aa556e919ccfca"
     },
     {
       "path": "outpost/watchdog.py",
@@ -184,5 +184,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:dfb333a333275e907f0b7abdb8f2fbd3dcea3f5243883eb5d4de5a0f2e6f9214"
+  "self_digest": "sha256:5ebbe4741d37eb83711ff0e4e55032e8a34e2a8771b0ae6be8413d3d69091fc2"
 }

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .constitutional_registry import registry_snapshot
-from .host_vitality import BOOT, JOINED_SCHEMA, RECIPE_SCHEMA, HostVitalityStore, HostCollectionAttempts, host_attempt_matches
+from .host_vitality import BOOT, JOINED_SCHEMA, RECIPE_SCHEMA, HostVitalityStore, HostVitalityError, HostCollectionAttempts, host_attempt_matches
 from .reboot_vitality import VitalityChronology, validate_classification
 from .vitals_aggregation import aggregate_vitals, producer_observation, validate_producer
 from .service import validate_coordinator_witness, held_domain_boot_view, _validate_generation_identity
@@ -170,7 +170,10 @@ class VitalsRuntimeStore:
             raise VitalsRuntimeError("VITALS_TARGET_IDENTITY_DENIED")
         self.expected_subject = expected_subject
         self.expected_outpost_identity = expected_outpost_identity
-        self.host = HostVitalityStore(host_root)
+        # One full-history acquisition at a time in this shared presentation
+        # store. Other page callers receive truthful unavailable evidence;
+        # they never wait for it or reuse a prior positive Host verdict.
+        self.host = HostVitalityStore(host_root, max_readers=1)
         self.host_attempts = HostCollectionAttempts(host_root)
         self.producer_root = Path(producer_root)
         self.coordinator_path = self.producer_root.parent / "coordinator/current.json"
@@ -273,8 +276,12 @@ class VitalsRuntimeStore:
         return observed
 
     def snapshot(self, *, current_boot_id: str | None = None) -> dict[str, Any]:
+        host_read_error = None
         try:
             host = self.host.snapshot()
+        except HostVitalityError as error:
+            host_read_error = str(error)
+            host = {"status": "UNAVAILABLE"}
         except (OSError, ValueError, TypeError):
             host = {"status": "NO_OBSERVATION"}
         # Production presentation supplies the independently read current boot;
@@ -308,7 +315,9 @@ class VitalsRuntimeStore:
                 payload=host,
             ))
         else:
-            claim = "HOST_WITNESS_UNAVAILABLE"
+            claim = ("HOST_HISTORY_BUSY" if host_read_error == "HOST_VITALITY_HISTORY_BUSY" else
+                     "HOST_HISTORY_UNVALIDATED" if host_read_error == "HOST_VITALITY_HISTORY_UNVALIDATED" else
+                     "HOST_WITNESS_UNAVAILABLE")
             if attempt_error:
                 claim = "HOST_ATTEMPT_EVIDENCE_UNAVAILABLE"
             elif current_attempt:
@@ -319,6 +328,7 @@ class VitalsRuntimeStore:
                 perspective="host", producer="OUTPOST_HOST_WITNESS", claim=claim,
                 observed_at=now, boot_id=boot_id, evidence_ref="outpost-reader:host-collection-attempts",
                 payload={"status":"UNAVAILABLE", "collection_attempt":attempt,
+                         "reader_error":host_read_error,
                          "last_successful_observation":host if isinstance(latest, dict) else None},
             ))
         registry = registry_snapshot(boot_id=boot_id, observed_at=now)
