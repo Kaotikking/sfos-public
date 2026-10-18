@@ -284,25 +284,21 @@ def _only_host_read_phase_changed(before, after):
 def _await_promotion_unit_prestate(io, expected, verify_invariants):
     """Reacquire exact signed state after retirement; never accept a phase as CAS.
 
-    The same read-only budget as pre-placement preflight applies. Expiry denies
-    promotion; it never terminates a service/installer or releases its custody.
     Only the already-declared Host collector lifecycle may differ while reading.
+    Its duration never grants admission or terminates an installation. Each
+    observation revalidates preserved state; only the exact signed state returns.
     """
     if any(row['ActiveState'] not in {'active', 'inactive', 'failed'}
            or row['UnitFileState'] not in {'', 'enabled', 'disabled', 'static'}
            for row in expected.values()):
         raise TransactionError('PUBLIC_PROMOTION_UNIT_PRESTATE_DENIED')
     before = {'units': expected}
-    deadline = time.monotonic() + 30
     while True:
         verify_invariants()
         observed = {name: io.unit_state(name) for name in expected}
-        if time.monotonic() > deadline:
-            raise TransactionError('PUBLIC_PROMOTION_UNIT_PRESTATE_DENIED')
         if observed == expected:
             return
-        if (not _only_host_read_phase_changed(before, {'units': observed})
-                or time.monotonic() >= deadline):
+        if not _only_host_read_phase_changed(before, {'units': observed}):
             raise TransactionError('PUBLIC_PROMOTION_UNIT_PRESTATE_DENIED')
         time.sleep(0.25)
 
@@ -349,12 +345,24 @@ def public_generation_lock(root, source_plan_sha256, boot_id, *, recovery_plan=N
         with os.fdopen(os.dup(fd), 'wb') as stream:
             stream.write(payload); stream.flush(); os.fsync(stream.fileno())
         os.fsync(current)
-        for child, owner, part in handles[1:]:
-            opened = os.fstat(child); named = os.stat(part, dir_fd=owner, follow_symlinks=False)
-            if (opened.st_dev,opened.st_ino) != (named.st_dev,named.st_ino):
-                raise TransactionError('PUBLIC_LOCK_DIRECTORY_CHANGED')
-        yield {'path':'/var/lib/serein/rollback/' + name, 'source_plan_sha256':source_plan_sha256,
-               'boot_id':boot_id, 'lock_sha256':sha(payload)}
+        def verify_ownership():
+            for child, owner, part in handles[1:]:
+                opened = os.fstat(child); named = os.stat(part, dir_fd=owner, follow_symlinks=False)
+                if (opened.st_dev,opened.st_ino) != (named.st_dev,named.st_ino):
+                    raise TransactionError('PUBLIC_LOCK_DIRECTORY_CHANGED')
+            named = os.stat(name, dir_fd=current, follow_symlinks=False)
+            opened = os.fstat(fd)
+            for item in (named, opened):
+                if ((item.st_dev,item.st_ino) != (acquired.st_dev,acquired.st_ino)
+                        or not stat.S_ISREG(item.st_mode) or item.st_nlink != 1
+                        or item.st_uid != 0 or item.st_gid != 0 or stat.S_IMODE(item.st_mode) != 0o600):
+                    raise TransactionError('PUBLIC_LOCK_RELEASE_DENIED')
+            if os.pread(fd, len(payload)+1, 0) != payload:
+                raise TransactionError('PUBLIC_LOCK_RELEASE_DENIED')
+        verify_ownership()
+        yield _OwnedGeneration({'path':'/var/lib/serein/rollback/' + name,
+               'source_plan_sha256':source_plan_sha256, 'boot_id':boot_id,
+               'lock_sha256':sha(payload)}, verify_ownership)
     except OSError:
         raise TransactionError('PUBLIC_LOCK_IO_DENIED') from None
     finally:
@@ -890,6 +898,48 @@ def _safe_archive(raw, plan):
     return _archive_material(raw, plan.as_dict())
 
 
+def _await_bootstrap_prestate(root, read_unit, verify_invariants, *, host_time=None, expected=None):
+    """Read a settled Host lifecycle without a cutoff or target effect.
+
+    Every iteration checks the caller's exact identity/selector/custody facts.
+    Only known Host phases may change; all other drift denies immediately.
+    An unsettled sample is never returned or admitted as installation prestate.
+    """
+    previous = expected
+    while True:
+        verify_invariants()
+        try:
+            sample = (bootstrap_prestate(root, read_unit, host_time=host_time)
+                      if host_time is not None else bootstrap_prestate(root, read_unit))
+            settled = True
+        except HostPhaseReadChanged as changed:
+            sample, settled = changed.before, False
+        if previous is not None and sample != previous:
+            if not _only_host_read_phase_changed(previous, sample):
+                raise TransactionError('PUBLIC_BOOTSTRAP_PRESTATE_CHANGED' if expected is not None
+                                       else 'PUBLIC_BOOTSTRAP_CHANGED_DURING_READ')
+        for name, unit in sample['units'].items():
+            if name in HOST_READ_PHASES:
+                pair = (unit['ActiveState'], unit['SubState'])
+                supported = HOST_READ_PHASES[name] | {('inactive', 'dead'), ('failed', 'failed')}
+                if pair not in supported:
+                    raise TransactionError('PUBLIC_TRANSIENT_UNIT_PREFLIGHT_DENIED')
+            if unit['ActiveState'] not in {'active', 'inactive', 'failed'}:
+                if (name not in HOST_READ_PHASES
+                        or (unit['ActiveState'], unit['SubState']) not in HOST_READ_PHASES[name]):
+                    raise TransactionError('PUBLIC_TRANSIENT_UNIT_PREFLIGHT_DENIED')
+                settled = False
+            if name == 'serein-outpost-host-witness.timer' and unit['SubState'] == 'running':
+                settled = False
+        previous = sample
+        verify_invariants()
+        if settled:
+            if expected is not None and sample != expected:
+                raise TransactionError('PUBLIC_BOOTSTRAP_PRESTATE_CHANGED')
+            return sample
+        time.sleep(0.25)
+
+
 def preflight_target(plan):
     """Read-only current-boot and immutable-file expected-before evidence.
 
@@ -907,40 +957,17 @@ def preflight_target(plan):
     destination = (retained_recovery_prestate(Path('/'),plan.as_dict()) if recovery
                    else prospective_generation_prestate(Path('/'),plan.as_dict()['release_digest']))
     installed = successor_generation_prestate(Path("/"))
-    # A timer-driven oneshot can be activating during an otherwise healthy
-    # predecessor read. Promotion cannot accept that transient state. Wait
-    # read-only BEFORE staging/placement instead of orphaning a generation
-    # which was already known to be ineligible for promotion.
-    deadline = time.monotonic() + 30
-    invariant = None
-    previous_sample = None
-    while True:
-        try:
-            bootstrap = (bootstrap_prestate(Path('/'), read_bootstrap_unit, host_time=plan.as_dict()['host_time'])
-                         if 'host_time' in plan.as_dict() else bootstrap_prestate(Path('/'), read_bootstrap_unit))
-            settled = all(unit['ActiveState'] in {'active', 'inactive', 'failed'}
-                          for unit in bootstrap['units'].values())
-            sample = bootstrap
-        except HostPhaseReadChanged as changed:
-            # A rejected read is not expected-before evidence. Retain its
-            # static projection only to reject drift across reacquisitions.
-            sample, settled = changed.before, False
-        current_invariant = _bootstrap_phase_invariant(sample)
-        if invariant is not None and current_invariant != invariant:
+    def verify_read_invariants():
+        if _target_prestate(Path('/'), plan.as_dict()) != before:
+            raise TransactionError('PUBLIC_TARGET_CHANGED_DURING_PREFLIGHT')
+        if successor_generation_prestate(Path('/')) != installed:
             raise TransactionError('PUBLIC_BOOTSTRAP_CHANGED_DURING_READ')
-        comparable = {'files': sample.get('files'), 'units': sample['units']}
-        if (previous_sample is not None and comparable != previous_sample
-                and not _only_host_read_phase_changed(previous_sample, comparable)):
-            raise TransactionError('PUBLIC_BOOTSTRAP_CHANGED_DURING_READ')
-        previous_sample = comparable
-        invariant = current_invariant
-        if time.monotonic() > deadline:
-            raise TransactionError('PUBLIC_TRANSIENT_UNIT_PREFLIGHT_DENIED')
-        if settled:
-            break
-        if time.monotonic() >= deadline:
-            raise TransactionError('PUBLIC_TRANSIENT_UNIT_PREFLIGHT_DENIED')
-        time.sleep(0.25)
+        current_destination = (retained_recovery_prestate(Path('/'), plan.as_dict()) if recovery
+                               else prospective_generation_prestate(Path('/'), plan.as_dict()['release_digest']))
+        if current_destination != destination:
+            raise TransactionError('PUBLIC_GENERATION_DESTINATION_CHANGED')
+    bootstrap = _await_bootstrap_prestate(Path('/'), read_bootstrap_unit, verify_read_invariants,
+                                          host_time=plan.as_dict().get('host_time'))
     if any(unit['UnitFileState'] not in {'', 'enabled', 'disabled', 'static'}
            for unit in bootstrap['units'].values()):
         raise TransactionError('PUBLIC_PROMOTION_UNIT_PRESTATE_DENIED')
@@ -1033,8 +1060,12 @@ def _placed_target_prestate(root, fields, selector, candidate_record, source_dig
                 'parent':{'device':info.st_dev,'inode':info.st_ino,'uid':0,'gid':0,'mode':'0755'}}
     before=_target_prestate(root,fields); destination=observe()
     installed=successor_generation_prestate(root)
-    bootstrap=(bootstrap_prestate(root,read_unit,host_time=fields['host_time'])
-               if 'host_time' in fields else bootstrap_prestate(root,read_unit))
+    def verify_read_invariants():
+        if (_target_prestate(root, fields) != before or observe() != destination
+                or successor_generation_prestate(root) != installed):
+            raise TransactionError('PUBLIC_TARGET_CHANGED_DURING_PREFLIGHT')
+    bootstrap = _await_bootstrap_prestate(root, read_unit, verify_read_invariants,
+                                          host_time=fields.get('host_time'))
     if _target_prestate(root,fields)!=before or observe()!=destination:
         raise TransactionError('PUBLIC_TARGET_CHANGED_DURING_PREFLIGHT')
     return {**before,'installed_prestate':installed,'bootstrap_prestate':bootstrap,
@@ -1160,7 +1191,7 @@ def host_time_dropin_preflight(root):
                 raise TransactionError('PUBLIC_HOST_TIME_DROPIN_CONFLICT')
 
 
-def capture_bootstrap_predecessor(root, expected, read_unit):
+def capture_bootstrap_predecessor(root, expected, read_unit, *, verify_invariants=lambda: None):
     """Capture exact donor image bytes privately, not just recovery hashes.
 
     The enclosing transaction must hold its lock and durably retain/sign this
@@ -1169,8 +1200,7 @@ def capture_bootstrap_predecessor(root, expected, read_unit):
     """
     root = Path(os.path.abspath(root))
     policy = expected.get('host_time')
-    if bootstrap_prestate(root, read_unit, host_time=policy) != expected:
-        raise TransactionError('PUBLIC_BOOTSTRAP_PRESTATE_CHANGED')
+    _await_bootstrap_prestate(root, read_unit, verify_invariants, host_time=policy, expected=expected)
     captured = {}
     try:
         for before in expected['files']:
@@ -1179,8 +1209,7 @@ def capture_bootstrap_predecessor(root, expected, read_unit):
             if row != before:
                 raise TransactionError('PUBLIC_BOOTSTRAP_PRESTATE_CHANGED')
             captured[target] = data
-        if bootstrap_prestate(root, read_unit, host_time=policy) != expected:
-            raise TransactionError('PUBLIC_BOOTSTRAP_PRESTATE_CHANGED')
+        _await_bootstrap_prestate(root, read_unit, verify_invariants, host_time=policy, expected=expected)
     except OSError:
         raise TransactionError('PUBLIC_BOOTSTRAP_READ_DENIED') from None
     return captured

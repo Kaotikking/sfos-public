@@ -302,8 +302,22 @@ def locked_prepared_generation(plan_path, expected_plan_sha256, evidence,
         verify_ownership()
         recheck_prepared_target(plan_path, expected_plan_sha256, evidence)
         target = evidence['target_prestate']
+        def verify_capture():
+            from . import public_generation_transaction as transaction
+            verify_ownership()
+            checked = transaction._verify_plan(_load_plan(Path(plan_path), expected_plan_sha256))
+            fields = plan.as_dict()
+            native = transaction._target_prestate(Path('/'), fields)
+            destination = (transaction.retained_recovery_prestate(Path('/'), fields)
+                           if 'recovery' in fields else transaction.prospective_generation_prestate(
+                               Path('/'), fields['release_digest']))
+            if (checked.encoded != plan.encoded
+                    or any(native[key] != target[key] for key in ('current_boot_id', 'host_identity', 'immutable_rows'))
+                    or transaction.successor_generation_prestate(Path('/')) != target['installed_prestate']
+                    or destination != target['generation_destination']):
+                raise TransactionError('PUBLIC_CAPTURE_STATE_CHANGED')
         images = capture_bootstrap_predecessor(Path('/'), target['bootstrap_prestate'],
-                                               read_bootstrap_unit)
+                                               read_bootstrap_unit, verify_invariants=verify_capture)
         selectors = capture_selector_predecessor(Path('/'), target['installed_prestate'])
         verify_ownership()
         recheck_prepared_target(plan_path, expected_plan_sha256, evidence)
