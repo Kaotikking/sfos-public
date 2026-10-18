@@ -281,6 +281,32 @@ def _only_host_read_phase_changed(before, after):
     return before != after
 
 
+def _await_promotion_unit_prestate(io, expected, verify_invariants):
+    """Reacquire exact signed state after retirement; never accept a phase as CAS.
+
+    The same read-only budget as pre-placement preflight applies. Expiry denies
+    promotion; it never terminates a service/installer or releases its custody.
+    Only the already-declared Host collector lifecycle may differ while reading.
+    """
+    if any(row['ActiveState'] not in {'active', 'inactive', 'failed'}
+           or row['UnitFileState'] not in {'', 'enabled', 'disabled', 'static'}
+           for row in expected.values()):
+        raise TransactionError('PUBLIC_PROMOTION_UNIT_PRESTATE_DENIED')
+    before = {'units': expected}
+    deadline = time.monotonic() + 30
+    while True:
+        verify_invariants()
+        observed = {name: io.unit_state(name) for name in expected}
+        if time.monotonic() > deadline:
+            raise TransactionError('PUBLIC_PROMOTION_UNIT_PRESTATE_DENIED')
+        if observed == expected:
+            return
+        if (not _only_host_read_phase_changed(before, {'units': observed})
+                or time.monotonic() >= deadline):
+            raise TransactionError('PUBLIC_PROMOTION_UNIT_PRESTATE_DENIED')
+        time.sleep(0.25)
+
+
 @contextmanager
 def public_generation_lock(root, source_plan_sha256, boot_id, *, recovery_plan=None):
     """The donor's exclusive transaction lock, without its recovery effects.
@@ -2663,11 +2689,9 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
     journal_path=io.receipt_directory+'/forward-state.json'
     journal=io.read(journal_path)
     verify_prepared_forward_state(base64.b64decode(journal['content_b64']),prestate_raw,body,public)
-    # Explicit states exclude asynchronous/transient unit changes and masks.
-    for name,expected in body['unit_prestate'].items():
-        if (io.unit_state(name)!=expected or expected['ActiveState'] not in {'active','inactive','failed'}
-                or expected['UnitFileState'] not in {'','enabled','disabled','static'}):
-            raise TransactionError('PUBLIC_PROMOTION_UNIT_PRESTATE_DENIED')
+    # Retirement can outlast a Host collection cycle. Reacquire the exact
+    # signed settled state; transient phases never become accepted prestate.
+    _await_promotion_unit_prestate(io, body['unit_prestate'], verify_invariants)
     # This path replaces VM4010's already-enabled Outpost, not first-boot
     # enablement. Preserve the complete existing wants-link footprint. A
     # disabled/missing/static target needs its own captured link transaction;
