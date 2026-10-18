@@ -684,7 +684,8 @@ def quiesce_kernel_retirement(root,successor,prepared,verify_ownership):
  retirement_preservation_binding(prepared['plan'],prepared['manifest'],prepared['layout'],
      expected,prepared['observe'](),current_boot_id=fields['current_boot_id'])
  names=AUTHORITY_UNITS+OTHER_KERNEL_UNITS
- units={**read_authority_unit_prestate(cleanup=True),**read_other_kernel_unit_prestate(cleanup=True)}
+ units={**_read_kernel_units(AUTHORITY_UNITS,allow_transitional=True,retirement_prestate=True),
+        **_read_kernel_units(OTHER_KERNEL_UNITS,allow_transitional=True,retirement_prestate=True)}
  # Stop propagation includes inverse BindsTo/PartOf and explicit stop edges,
  # not only inverse Requires. No unrelated dependent may be stopped.
  for name in names:
@@ -2403,10 +2404,11 @@ def _unit_active(name,row):
      {'waiting','running','elapsed'} if name==RESIDENCY_UNITS[0] else {'running'})
 
 
-def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,retirement_controls=False):
+def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,retirement_controls=False,retirement_prestate=False):
  import subprocess
  deny(type(service_controls) is not bool or type(allow_transitional) is not bool
-      or type(retirement_controls) is not bool or (service_controls and retirement_controls)
+      or type(retirement_controls) is not bool or type(retirement_prestate) is not bool
+      or (service_controls and (retirement_controls or retirement_prestate))
       or (service_controls and allow_transitional) or
       (names not in (OPERATIONS_SERVICES,OPERATIONS_ENDPOINT[:1]) if service_controls else names not in (AUTHORITY_UNITS,OTHER_KERNEL_UNITS,RESIDENCY_UNITS)),
       'KERNEL_UNIT_SET_DENIED')
@@ -2418,7 +2420,7 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,r
  captured={}
  for name in names:
   selected_properties=properties
-  if retirement_controls:
+  if retirement_controls or retirement_prestate:
    selected_properties+=('Job',)
    if name.endswith('.service'):selected_properties+=('MainPID','ControlPID','ControlGroup')
   try:
@@ -2440,8 +2442,14 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,r
        or not value['ActiveState'] or not value['SubState'],
        'KERNEL_AUTHORITY_UNIT_PRESTATE_DENIED')
   if value['LoadState']=='not-found':
+   # systemd retains failed evidence after removing a unit and daemon-reload.
+   # Recognize it only in retirement, with native absence of jobs/processes;
+   # this is never Kernel readiness or permission to reset failed history.
+   absent_state=(value['ActiveState'],value['SubState'])==('inactive','dead')
+   retained_failure=((retirement_controls or retirement_prestate)
+                     and (value['ActiveState'],value['SubState'])==('failed','failed'))
    deny(value['FragmentPath'] or value['UnitFileState']
-        or value['ActiveState']!='inactive' or value['SubState']!='dead',
+        or not (absent_state or retained_failure),
         'KERNEL_AUTHORITY_UNIT_PRESTATE_DENIED')
   else:
    fragment=('serein-kernel-client-gateway@.service'
@@ -2458,7 +2466,7 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,r
    deny(not (settled or transitional)
         or value['UnitFileState'] not in {'enabled','disabled','static'},
         'KERNEL_AUTHORITY_UNIT_UNSETTLED_DENIED')
-  if retirement_controls:
+  if retirement_controls or (retirement_prestate and value['LoadState']=='not-found'):
    deny(value['ActiveState'] not in {'inactive','failed'} or value['Job']
         or (name.endswith('.service') and (value['MainPID']!='0' or value['ControlPID']!='0'
                                          or value['ControlGroup'])),
