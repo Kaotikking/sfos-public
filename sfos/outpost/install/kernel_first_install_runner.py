@@ -52,11 +52,6 @@ INTERFACE_UNITS=('serein-kernel-client-gateway-haos.socket','serein-kernel-clien
 HEX40=re.compile(r"[0-9a-f]{40}\Z")
 HEX64=re.compile(r"[0-9a-f]{64}\Z")
 MAX_FILE_BYTES=16*1024*1024
-# A Host observation is already rejected as stale after 30 seconds by the
-# installed observer contracts below.  Give an in-flight, same-boot collector
-# that full existing freshness budget; this is an absolute deadline and never
-# turns a pending attempt into evidence.
-HOST_SETTLE_DEADLINE_SECONDS=30.0
 
 class RunnerDenied(RuntimeError):pass
 class WitnessPublicationUncertain(RunnerDenied):pass
@@ -842,20 +837,35 @@ def _settled_host_gate(host_path,boot_id):
  """Wait only for collection evidence; never execute using a pending sample.
 
  The recurring collector can begin between two installer boundaries. Keep the
- ordinary observer fail-closed, but let the transaction wait briefly for that
+ ordinary observer fail-closed, but let the transaction wait for that
  exact attempt to finish. Failed, replaced, wrong-boot and abandoned attempts
  remain denials. No service action, old-sample fallback or timestamp rewrite.
  """
  import time
  from outpost.host_vitality import HostCollectionAttempts
  from outpost.reboot_vitality import RebootVitalityError
- deadline=time.monotonic()+HOST_SETTLE_DEADLINE_SECONDS
+ from .public_generation_transaction import read_bootstrap_unit
+ native_static=None
+ def phase():
+  nonlocal native_static
+  deny(current_boot()!=boot_id,'KERNEL_HOST_BOOT_CHANGED')
+  unit=read_bootstrap_unit('serein-outpost-host-witness.service')
+  pair=(unit['ActiveState'],unit['SubState'])
+  deny(unit['LoadState']!='loaded' or pair not in {('activating','start'),('inactive','dead')},
+       'KERNEL_HOST_COLLECTOR_DENIED')
+  fixed={key:value for key,value in unit.items() if key not in {'ActiveState','SubState'}}
+  deny(native_static is not None and fixed!=native_static,'KERNEL_HOST_COLLECTOR_CHANGED')
+  native_static=fixed
+  deny(current_boot()!=boot_id,'KERNEL_HOST_BOOT_CHANGED')
+  return pair
  def read_unlocked(reader):
   # The collector's exclusive flock is transient, not invalid evidence.
   # Retry only that exact lock result; every read still validates all bytes.
-  # All reads share the original deadline and no cached state is returned.
+  # Retry only while the exact current-boot native collector is running.
+  # Elapsed acquisition time is not freshness evidence or an install cutoff.
   while True:
-   deny(time.monotonic()>=deadline,'KERNEL_HOST_ATTEMPT_DENIED')
+   deny(current_boot()!=boot_id,'KERNEL_HOST_BOOT_CHANGED')
+   if native_static is not None:phase()
    try:
     value=reader()
    except (RunnerDenied,RebootVitalityError) as exc:
@@ -863,10 +873,11 @@ def _settled_host_gate(host_path,boot_id):
     if (isinstance(exc,RunnerDenied) and str(exc)!='KERNEL_HOST_GATE_DENIED'
         or not isinstance(cause,RebootVitalityError)
         or str(cause)!='VITALITY_CHRONOLOGY_BUSY'):raise
-    deny(time.monotonic()>=deadline,'KERNEL_HOST_ATTEMPT_DENIED')
+    deny(phase()!=('activating','start'),'KERNEL_HOST_ATTEMPT_DENIED')
     time.sleep(0.1)
    else:
-    deny(time.monotonic()>=deadline,'KERNEL_HOST_ATTEMPT_DENIED')
+    deny(current_boot()!=boot_id,'KERNEL_HOST_BOOT_CHANGED')
+    if native_static is not None:phase()
     return value
  try:return read_unlocked(lambda:current_host_gate(host_path,boot_id))
  except RunnerDenied as exc:
@@ -878,7 +889,6 @@ def _settled_host_gate(host_path,boot_id):
   while True:
    if (not latest or latest['start']!=pinned
        or pinned['payload']['boot_id']!=boot_id or pinned['observed_at']>time.time()):raise
-   if time.monotonic()>=deadline:raise
    terminal=latest['terminal']
    if terminal is not None:
     if terminal['event_kind']!='HOST_COLLECTION_SUCCEEDED':raise
@@ -886,7 +896,17 @@ def _settled_host_gate(host_path,boot_id):
     # still prove the exact latest state; this is not a cached PASS.
     result=read_unlocked(lambda:current_host_gate(host_path,boot_id))
     deny(read_unlocked(attempts.latest)!=latest,'KERNEL_HOST_OBSERVATION_CHANGED')
-    deny(time.monotonic()>=deadline,'KERNEL_HOST_ATTEMPT_DENIED')
+    return result
+   if phase()==('inactive','dead'):
+    # A oneshot can finish between chronology and native reads. Read strict
+    # evidence once more, accepting only this pinned successful completion.
+    # Inactive pending evidence is abandoned, never a reason to keep waiting.
+    finished=read_unlocked(attempts.latest)
+    deny(not finished or finished['start']!=pinned or finished['terminal'] is None
+         or finished['terminal']['event_kind']!='HOST_COLLECTION_SUCCEEDED',
+         'KERNEL_HOST_ATTEMPT_DENIED')
+    result=read_unlocked(lambda:current_host_gate(host_path,boot_id))
+    deny(read_unlocked(attempts.latest)!=finished,'KERNEL_HOST_OBSERVATION_CHANGED')
     return result
    time.sleep(0.1)
    latest=read_unlocked(attempts.latest)
