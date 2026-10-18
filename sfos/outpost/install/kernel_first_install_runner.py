@@ -412,9 +412,14 @@ def read_retirement_dependencies():
    deny(not separator or key in fields,'KERNEL_RETIREMENT_DEPENDENCY_READ_DENIED')
    fields[key]=value
   missing_kernel=(name in AUTHORITY_UNITS+OTHER_KERNEL_UNITS and fields.get('LoadState')=='not-found')
+  retired_busy=(name=='serein-kernel-operations-heartbeat.service' and fields.get('LoadState')=='error')
+  if retired_busy:
+   # Reuse the strict native quiescence reader, including exact EBUSY and
+   # fragment identity. Preserve the actual dependency graph, never empty it.
+   observed=_read_kernel_units(OTHER_KERNEL_UNITS,retirement_prestate=True)[name]
+   deny(observed['LoadState']!='error','KERNEL_RETIREMENT_DEPENDENCY_READ_DENIED')
   deny(set(fields)!=set(properties)|{'Id','LoadState'} or fields['Id']!=name
-       or (fields['LoadState']!='loaded' and not missing_kernel)
-       or (missing_kernel and any(fields[key] for key in properties)),
+       or (fields['LoadState']!='loaded' and not missing_kernel and not retired_busy),
        'KERNEL_RETIREMENT_DEPENDENCY_READ_DENIED')
   row={}
   for key in properties:
@@ -424,6 +429,14 @@ def read_retirement_dependencies():
             for value in values) or len(values)!=len(set(values)),
         'KERNEL_RETIREMENT_DEPENDENCY_READ_DENIED')
    row[key]=sorted(values)
+  if missing_kernel:
+   # A partially placed Kernel may refer to its still-missing unit. Retain
+   # exact inverse references from this same domain; no forward dependency or
+   # foreign dependent can be converted to an empty/independent node.
+   deny(any(row[key] for key in forward)
+        or any(child not in AUTHORITY_UNITS+OTHER_KERNEL_UNITS
+               for key in properties if key not in forward for child in row[key]),
+        'KERNEL_RETIREMENT_DEPENDENCY_READ_DENIED')
   result[name]=row
   pending.update(child for key in forward for child in row[key] if child not in result)
  return result
@@ -2689,8 +2702,36 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,r
    key,separator,item=line.partition('=')
    deny(not separator or key in value,'KERNEL_AUTHORITY_UNIT_PRESTATE_DENIED')
    value[key]=item
+  # A retired, failed unit can be loaded again as its exact new fragment is
+  # placed. systemd may retain EBUSY until the transaction's daemon-reload.
+  # Capture that error only as quiescent retirement evidence, never readiness.
+  retained_busy=(value.get('LoadState')=='error'
+      and name=='serein-kernel-operations-heartbeat.service'
+      and (retirement_controls or retirement_prestate))
+  if retained_busy:
+   try:
+    detailed=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
+        '--property='+','.join(selected_properties+('LoadError',)),name],
+        capture_output=True,text=True,timeout=15,check=True,
+        env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},stdin=subprocess.DEVNULL,close_fds=True)
+   except (OSError,subprocess.SubprocessError) as exc:
+    raise RunnerDenied('KERNEL_AUTHORITY_UNIT_READ_DENIED') from exc
+   deny(len(detailed.stdout)>16384,'KERNEL_AUTHORITY_UNIT_PRESTATE_DENIED')
+   expanded={}
+   for line in detailed.stdout.splitlines():
+    key,separator,item=line.partition('=')
+    deny(not separator or key in expanded,'KERNEL_AUTHORITY_UNIT_PRESTATE_DENIED')
+    expanded[key]=item
+   expected_error=('System.Error.EBUSY "Unit '+name+' failed to load properly, '
+       'please adjust/correct and reload service manager: Device or resource busy"')
+   deny(set(expanded)!=set(selected_properties+('LoadError',))
+        or {k:v for k,v in expanded.items() if k!='LoadError'}!=value
+        or expanded['LoadError']!=expected_error
+        or (value.get('ActiveState'),value.get('SubState'))!=('failed','failed'),
+        'KERNEL_AUTHORITY_UNIT_PRESTATE_DENIED')
+   value=expanded;selected_properties+=('LoadError',)
   deny(set(value)!=set(selected_properties) or value['Id']!=name
-       or value['LoadState'] not in {'loaded','not-found'}
+       or (value['LoadState'] not in {'loaded','not-found'} and not retained_busy)
        or value['NeedDaemonReload'] not in {'yes','no'} or value['DropInPaths']
        or not value['ActiveState'] or not value['SubState'],
        'KERNEL_AUTHORITY_UNIT_PRESTATE_DENIED')
@@ -2719,7 +2760,7 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,r
    deny(not (settled or transitional)
         or value['UnitFileState'] not in {'enabled','disabled','static'},
         'KERNEL_AUTHORITY_UNIT_UNSETTLED_DENIED')
-  if retirement_controls or (retirement_prestate and value['LoadState']=='not-found'):
+  if retirement_controls or (retirement_prestate and value['LoadState'] in {'not-found','error'}):
    deny(value['ActiveState'] not in {'inactive','failed'} or value['Job']
         or (name.endswith('.service') and (value['MainPID']!='0' or value['ControlPID']!='0'
                                          or value['ControlGroup'])),

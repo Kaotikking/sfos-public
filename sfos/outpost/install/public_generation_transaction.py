@@ -389,17 +389,26 @@ def _retained_transaction_binding(fields):
             or set(packet) != {'prior_boot_id', 'request_sha256', 'retained_lock', 'history'}
             or not isinstance(packet['prior_boot_id'], str)
             or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', packet['prior_boot_id'])
-            or packet['prior_boot_id'] == fields.get('current_boot_id')
             or not isinstance(packet['request_sha256'], str)
             or not re.fullmatch('[0-9a-f]{64}', packet['request_sha256'])):
         raise TransactionError('PUBLIC_RETAINED_TRANSACTION_BINDING_DENIED')
     lock = packet['retained_lock']; history = packet['history']
-    if (not isinstance(lock, dict)
-            or set(lock) != {'sha256', 'device', 'inode', 'ctime_ns', 'mtime_ns'}
+    released = lock == {'state':'ABSENT'}
+    if released:
+        # A completed owner scope can leave an interrupted Kernel journal but
+        # no lock. A fresh whole Outpost retirement must acquire normal O_EXCL
+        # ownership; absence is never permission to take over a retained lock.
+        if (packet['prior_boot_id'] != fields.get('current_boot_id')
+                or not isinstance(fields.get('kernel_retirement'),dict)):
+            raise TransactionError('PUBLIC_RETAINED_TRANSACTION_BINDING_DENIED')
+    elif packet['prior_boot_id'] == fields.get('current_boot_id'):
+        raise TransactionError('PUBLIC_RETAINED_TRANSACTION_BINDING_DENIED')
+    if (not isinstance(lock, dict) or (not released and (
+            set(lock) != {'sha256', 'device', 'inode', 'ctime_ns', 'mtime_ns'}
             or any(type(lock[k]) is not int or lock[k] < 0
                    for k in ('device', 'inode', 'ctime_ns', 'mtime_ns'))
             or lock['sha256'] != sha(canonical({'source_plan_sha256':packet['request_sha256'],
-                                              'boot_id':packet['prior_boot_id']}) + b'\n')
+                                              'boot_id':packet['prior_boot_id']}) + b'\n')))
             or not isinstance(history, dict) or len(history) != 3):
         raise TransactionError('PUBLIC_RETAINED_TRANSACTION_BINDING_DENIED')
     parents = set()
@@ -474,6 +483,22 @@ def _retained_generation_ownership(root, source_digest, boot, plan):
                 return data
         finally:
             for descriptor,_,_ in reversed(chain):os.close(descriptor)
+    if expected == {'state':'ABSENT'}:
+        # Reuse ordinary current-boot ownership, not retained-inode recovery.
+        # Every old journal byte stays evidence; no request is replayed.
+        with public_generation_lock(root,source_digest,boot) as ordinary:
+            def released_boundary():
+                ordinary.verify()
+                if (root/'proc/sys/kernel/random/boot_id').read_text().strip()!=boot:
+                    raise TransactionError('PUBLIC_BOOT_DRIFT_DENIED')
+                for absolute,digest in packet['history'].items():
+                    read_bound(absolute,digest)
+            released_boundary()
+            yield _OwnedGeneration({**ordinary,'retained_transaction':packet},released_boundary)
+            released_boundary()
+            _verify_retained_successor_complete(root,plan,read_bound)
+            released_boundary()
+        return
     def boundary():
         if (root/'proc/sys/kernel/random/boot_id').read_text().strip() != boot:
             raise TransactionError('PUBLIC_BOOT_DRIFT_DENIED')
@@ -1336,7 +1361,8 @@ def verify_prestate_receipt(raw, expected, public):
     if 'retained_transaction' in expected:
         required.add('retained_transaction')
         _retained_transaction_binding({'retained_transaction':expected['retained_transaction'],
-                                      'current_boot_id':expected.get('boot_id')})
+                                      'current_boot_id':expected.get('boot_id'),
+                                      'kernel_retirement':expected.get('kernel_retirement')})
     if 'kernel_retirement' in expected:
         required.add('kernel_retirement')
         if ('retained_transaction' not in expected or not isinstance(expected['kernel_retirement'],dict)
