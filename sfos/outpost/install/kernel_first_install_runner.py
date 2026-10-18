@@ -66,7 +66,7 @@ def deny(value,message):
 def canonical(value):return (json.dumps(value,sort_keys=True,separators=(",",":"))+"\n").encode()
 def sha(value):return hashlib.sha256(value).hexdigest()
 def decode(value):return base64.urlsafe_b64decode(value+"="*(-len(value)%4))
-def regular(path,*,fact=False,expected_custody=None,include_identity=False):
+def regular(path,*,fact=False,expected_custody=None,include_identity=False,expected_nlink=1):
  """Read existing custody without changing accounts, keys or permissions."""
  path=Path(path);deny(not path.is_absolute() or ".." in path.parts,"KERNEL_RUNNER_PATH_DENIED")
  descriptors=[]
@@ -81,7 +81,7 @@ def regular(path,*,fact=False,expected_custody=None,include_identity=False):
    modes={0o600} if path in {REQUEST,HOST_STATE,SOURCE_RECEIPT} else ({0o640} if path==SIGNING_KEY else {int(IMMUTABLE_POLICY[str(path)],8)} if str(path) in IMMUTABLE_POLICY else {0o600,0o644,0o755})
    if expected_custody is not None:
     uid,gid,expected_mode=expected_custody;owner={"uid":uid,"gid":gid};modes={expected_mode}
-   deny(not stat.S_ISREG(before.st_mode) or before.st_nlink!=1 or before.st_size>MAX_FILE_BYTES or before.st_uid!=owner["uid"] or mode not in modes,"KERNEL_RUNNER_CUSTODY_DENIED")
+   deny(expected_nlink not in (1,2) or not stat.S_ISREG(before.st_mode) or before.st_nlink!=expected_nlink or before.st_size>MAX_FILE_BYTES or before.st_uid!=owner["uid"] or mode not in modes,"KERNEL_RUNNER_CUSTODY_DENIED")
    if path==HOST_STATE or expected_custody is not None:deny(before.st_gid!=owner["gid"],"KERNEL_RUNNER_CUSTODY_DENIED")
    data=stream.read(MAX_FILE_BYTES+1);after=os.fstat(stream.fileno());named=os.stat(path.name,dir_fd=parent,follow_symlinks=False)
    fingerprint=lambda info:(info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
@@ -156,7 +156,7 @@ def witness_directory(path,publication=None):
  finally:
   for fd,_,_ in reversed(handles):os.close(fd)
 
-def atomic(path,value,directory_fd,check_parent,*,predecessor=None):
+def atomic(path,value,directory_fd,check_parent,*,predecessor=None,check_membership=None):
  """Publish once via link-at: a concurrent witness is never overwritten."""
  expected=canonical(value)
  name=".kernel-witness-"+os.urandom(16).hex();fd=os.open(name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600,dir_fd=directory_fd)
@@ -167,6 +167,7 @@ def atomic(path,value,directory_fd,check_parent,*,predecessor=None):
     fd=-1;stream.write(expected);stream.flush();os.fsync(stream.fileno())
     created=os.fstat(stream.fileno())
    check_parent()
+   if check_membership is not None:check_membership(name)
    if predecessor is None:
     try:os.link(name,path.name,src_dir_fd=directory_fd,dst_dir_fd=directory_fd,follow_symlinks=False)
     except FileExistsError:raise RunnerDenied("KERNEL_WITNESS_COLLISION_DENIED") from None
@@ -187,6 +188,7 @@ def atomic(path,value,directory_fd,check_parent,*,predecessor=None):
   # A post-link discrepancy is uncertain publication, never permission to
   # compensate files underneath a potentially visible witness.
   check_parent()
+  if check_membership is not None:check_membership(None)
   read_fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=directory_fd)
   with os.fdopen(read_fd,'rb') as stream:
    before=os.fstat(stream.fileno())
@@ -281,7 +283,7 @@ def retirement_preservation_paths(plan):
  return files,{'/var/lib/serein/kernel/replay',str(STATE),'/var/lib/ollama/models',selector}
 
 
-def collect_retirement_preserved_state(root,plan,*,current_boot_id):
+def collect_retirement_preserved_state(root,plan,*,current_boot_id,paths=None):
  """Read complete protected inventories without copying contents or changing state.
 
  Native no-follow descriptor traversal and before/after identity checks reject
@@ -290,6 +292,10 @@ def collect_retirement_preserved_state(root,plan,*,current_boot_id):
  Streaming hashes have no installer-kill deadline and retain no private bytes.
  """
  files,directories=retirement_preservation_paths(plan)
+ if paths is not None:
+  deny(not isinstance(paths,set) or not paths or not paths<=files|directories,
+       'KERNEL_RETIREMENT_COLLECTION_SCOPE_DENIED')
+  files=files&paths;directories=directories&paths
  deny(not isinstance(current_boot_id,str) or not re.fullmatch(
       r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}',current_boot_id),
       'KERNEL_RETIREMENT_BOOT_DENIED')
@@ -1004,6 +1010,21 @@ def install_request(path):
  deny(not isinstance(version,str) or version not in {'SereinOutpostKernelInstallRequest/v1','SereinOutpostKernelInstallRequest/v2','SereinOutpostKernelInstallRequest/v3'},'KERNEL_REQUEST_DENIED')
  if version.endswith('/v2'):required.add('offline_companion')
  if version.endswith('/v3'):required.add('native_allocation')
+ if 'outpost_retirement' in request:
+  required.add('outpost_retirement')
+  deny(version!='SereinOutpostKernelInstallRequest/v1' or not isinstance(request.get('installed_predecessor'),dict)
+       or 'failed_construction' in request['installed_predecessor'],
+       'KERNEL_RETIRED_REQUEST_DENIED')
+  retirement=request['outpost_retirement']
+  hashes={'plan_sha256','prestate_sha256','journal_sha256','transaction_sha256','forward_sha256'}
+  deny(not isinstance(retirement,dict) or set(retirement)!=hashes|{'plan_path','selector'}
+       or any(not isinstance(retirement[key],str) or not HEX64.fullmatch(retirement[key]) for key in hashes),
+       'KERNEL_RETIRED_BINDING_DENIED')
+  for key in ('plan_path','selector'):
+   location=retirement[key]
+   deny(not isinstance(location,str) or not location.startswith('/var/lib/serein/rollback/')
+        or '\\' in location or '\x00' in location or str(Path(location))!=location
+        or '..' in Path(location).parts,'KERNEL_RETIRED_PATH_DENIED')
  if 'recovered_predecessor' in request:required.add('recovered_predecessor')
  if 'installed_predecessor' in request:
   required.add('installed_predecessor')
@@ -1143,8 +1164,111 @@ def observe_failed_native_prestate(root,plan,failed,runtime_source,*,expected_re
  return {**captured,'native_plan':native}
 
 
+def capture_retired_kernel_prestate(root,source,plan,expected,*,verify_path=VERIFY_KEY,
+                                   observation_boot_id):
+ """Authenticate completed Outpost retirement, never infer it from absence.
+
+ This is read-only successor evidence. It does not replay the old request,
+ clear exclusion, regenerate identity, or authorize an installation. The
+ complete successor must still bind fresh Host/runtime/source/current boot.
+ """
+ from . import public_generation_transaction as generation
+ root=Path(root);source=Path(source)
+ hashes={'plan_sha256','prestate_sha256','journal_sha256','transaction_sha256','forward_sha256'}
+ deny(not isinstance(expected,dict) or set(expected)!=hashes|{'plan_path','selector'}
+      or any(not isinstance(expected[k],str) or not HEX64.fullmatch(expected[k]) for k in hashes),
+      'KERNEL_RETIRED_BINDING_DENIED')
+ selector=expected['selector'];plan_path=expected['plan_path']
+ deny(not isinstance(selector,str) or not re.fullmatch(
+      r'/var/lib/serein/rollback/outpost-public-generation-\d{8}T\d{6}Z-[0-9a-f]{12}',selector)
+      or not isinstance(plan_path,str) or not plan_path.startswith('/var/lib/serein/rollback/')
+      or '\\' in plan_path or '\x00' in plan_path or str(Path(plan_path))!=plan_path
+      or '..' in Path(plan_path).parts or not plan_path.endswith('/plan.json'),
+      'KERNEL_RETIRED_PATH_DENIED')
+ expected=strict_json(canonical(expected));captured={}
+ def read_bound(path,digest=None,mode=0o600):
+  raw=regular(root/path.lstrip('/'),expected_custody=(0,0,mode))
+  deny(digest is not None and sha(raw)!=digest,'KERNEL_RETIRED_RECORD_CHANGED')
+  deny(path in captured and captured[path]!=(raw,mode),'KERNEL_RETIRED_RECORD_CHANGED')
+  captured[path]=(raw,mode)
+  return raw
+ anchor=regular(verify_path,expected_custody=(0,0,0o644))
+ deny(sha(anchor)!=CANONICAL_AUTHORITY_SHA256,'KERNEL_RETIRED_ANCHOR_DENIED')
+ public=load_pem_public_key(anchor)
+ raw=read_bound(plan_path,expected['plan_sha256']);outpost=strict_json(raw)
+ deny(generation.canonical(outpost)+b'\n'!=raw,'KERNEL_RETIRED_RECORD_DENIED')
+ verified=generation._verify_plan_bytes(outpost,anchor,CANONICAL_AUTHORITY_SHA256)
+ deny(outpost['rollback_selector']!=selector or outpost['current_boot_id']!=observation_boot_id
+      or 'kernel_retirement' not in outpost,'KERNEL_RETIRED_PLAN_DENIED')
+ for filename,key in (('kernel-retirement-prestate.json','prestate_sha256'),
+                      ('kernel-retirement-state.json','journal_sha256'),
+                      ('transaction-receipt.json','transaction_sha256'),
+                      ('forward-state.json','forward_sha256')):
+  read_bound(selector+'/'+filename,expected[key])
+ # Reuse the same signature and complete-forward checks that allowed Outpost
+ # to finish recovery. A RETIRED label without the COMPLETE transaction fails.
+ generation._verify_retained_successor_complete(root,verified,read_bound)
+ def signed(path):
+  raw=read_bound(path);record=strict_json(raw)
+  body={k:v for k,v in record.items() if k not in {'state_signature','state_digest'}}
+  deny(generation.canonical(record)+b'\n'!=raw or record.get('state_digest')!=sha(generation.canonical(
+       {k:v for k,v in record.items() if k!='state_digest'})), 'KERNEL_RETIRED_RECORD_DENIED')
+  try:public.verify(decode(record['state_signature']),generation.canonical(body))
+  except Exception as exc:raise RunnerDenied('KERNEL_RETIRED_SIGNATURE_DENIED') from exc
+  return body
+ prestate=signed(selector+'/kernel-retirement-prestate.json')
+ terminal=signed(selector+'/kernel-retirement-state.json')
+ transaction=signed(selector+'/transaction-receipt.json')
+ packet=outpost['kernel_retirement']
+ manifest=read_json(source/'release-manifest.json');layout=read_json(source/'install-layout.json')
+ retirement_preservation_binding(plan,manifest,layout,packet,packet,current_boot_id=observation_boot_id)
+ rows=retirement_payload_selection(plan,manifest,layout)
+ deny(prestate.get('schema')!='SereinOutpostKernelRetirementPrestate/v1'
+      or prestate.get('source_plan_sha256')!=sha(verified.encoded)
+      or prestate.get('boot_id')!=observation_boot_id or prestate.get('packet')!=packet
+      or packet.get('historical_plan_sha256')!=sha(canonical(plan))
+      or packet.get('public_payload')!=rows
+      or terminal.get('schema')!='SereinOutpostKernelRetirementState/v1'
+      or terminal.get('phase')!='RETIRED' or terminal.get('activation')!='NONE'
+      or terminal.get('stage1')!='UNPROVEN'
+      or transaction.get('kernel_retirement',{}).get('prestate_sha256')!=expected['prestate_sha256']
+      or transaction.get('kernel_retirement',{}).get('journal_sha256')!=expected['journal_sha256'],
+      'KERNEL_RETIRED_HISTORY_BINDING_DENIED')
+ images=prestate.get('public_images')
+ deny(not isinstance(images,dict) or set(images)!={row['target'] for row in rows},
+      'KERNEL_RETIRED_PAYLOAD_DENIED')
+ for row in rows:
+  image=images[row['target']]
+  deny(not isinstance(image,dict) or image.get('target')!=row['target']
+       or image.get('state')!=packet['public_state'].get(row['target'])
+       or (image.get('state')=='PRESENT' and any(image.get(k)!=row[k] for k in ('bytes','sha256','mode')))
+       or image.get('state') not in {'PRESENT','ABSENT'},'KERNEL_RETIRED_PAYLOAD_DENIED')
+ def unchanged():
+  deny((root/'proc/sys/kernel/random/boot_id').read_text().strip()!=observation_boot_id,
+       'KERNEL_RETIRED_BOOT_CHANGED')
+  deny(regular(verify_path,expected_custody=(0,0,0o644))!=anchor
+       or any(regular(root/path.lstrip('/'),expected_custody=(0,0,mode))!=data
+              for path,(data,mode) in captured.items()),'KERNEL_RETIRED_RECORD_CHANGED')
+  deny(any(os.path.lexists(root/row['target'].lstrip('/')) for row in rows)
+       or read_kernel_enablement_prestate(root), 'KERNEL_RETIRED_PAYLOAD_NOT_ABSENT')
+ unchanged()
+ observed=collect_retirement_preserved_state(root,plan,current_boot_id=observation_boot_id)
+ deny(observed!=packet['preserved'],'KERNEL_RETIRED_PRESERVATION_CHANGED')
+ module=load_installer(source,manifest,expected_release=plan['release_digest'])
+ deny(module.capture_runtime_access(root,plan)!=packet['runtime_access'],
+      'KERNEL_RETIRED_RUNTIME_ACCESS_CHANGED')
+ units=_retirement_quiescence()
+ deny(any(row['LoadState']!='not-found' or row['NeedDaemonReload']!='no' for row in units.values()),
+      'KERNEL_RETIRED_UNIT_DEFINITION_CHANGED')
+ unchanged()
+ return {'state':'RETIRED_PREDECESSOR_CAPTURE_ONLY','binding':expected,
+         'historical_plan_sha256':sha(canonical(plan)),'public_payload':rows,
+         'preserved':observed,'units':units,'authority_effect':'NONE','admission_effect':'NONE'}
+
+
 def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_KEY,witness_path=None,
-                                     observation_boot_id=None,runtime_source=None,runtime_release=None):
+                                     observation_boot_id=None,runtime_source=None,runtime_release=None,
+                                     retirement=None):
  """Authenticate exact predecessor material for a whole-domain successor.
 
  A failed construction is capture-only: its historical successful witness
@@ -1202,9 +1326,26 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
       or witness.get('install_status') not in {'INSTALLED_INACTIVE','CONSTRUCTION_OBSERVED'}
       or witness.get('authority_effect')!='NONE'
       or witness.get('witness_digest')!=sha(canonical({k:v for k,v in witness.items() if k!='witness_digest'}))
-      or (failed is None and any(witness.get(k)!=plan.get(k) for k in ('source_commit','source_tree','archive_sha256',
+      or (failed is None and retirement is None and any(witness.get(k)!=plan.get(k) for k in ('source_commit','source_tree','archive_sha256',
           'release_digest','source_receipt_sha256','rollback_selector','native_identity','host_identity','host_projection_digest'))),
       'KERNEL_SUCCESSOR_PREDECESSOR_DENIED')
+ retired=None
+ if retirement is not None:
+  deny(failed is not None,'KERNEL_RETIRED_REQUEST_DENIED')
+  retired=capture_retired_kernel_prestate(root,source,plan,retirement,
+      verify_path=verify_path,observation_boot_id=observed_boot)
+  # The retained witness may be the successful predecessor of the failed
+  # transaction Outpost retired. Keep both identities and histories literal.
+  if witness['rollback_selector']!=plan['rollback_selector']:
+   prior=plan.get('installed_predecessor',{})
+   deny(prior.get('witness_sha256')!=expected['witness_sha256']
+        or prior.get('rollback_selector')!=witness['rollback_selector']
+        or plan['native_identity']!=witness['native_identity']
+        or plan['host_identity']!=witness['host_identity'], 'KERNEL_RETIRED_WITNESS_BINDING_DENIED')
+  else:
+   deny(any(witness.get(k)!=plan.get(k) for k in ('source_commit','source_tree','archive_sha256',
+       'release_digest','source_receipt_sha256','native_identity','host_identity','host_projection_digest')),
+       'KERNEL_RETIRED_WITNESS_BINDING_DENIED')
  if failed is not None:
   prior=plan.get('installed_predecessor')
   deny(not isinstance(prior,dict) or prior.get('witness_sha256')!=expected['witness_sha256']
@@ -1244,12 +1385,17 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
  module=load_installer(source,manifest,expected_release=plan['release_digest'])
  module.verify_host_identity(root,plan)
  receipt={'status':'INSTALLED_INACTIVE','receipt':selector+'/receipt.json'}
- digest=_verify_install_material(root,plan,receipt,source=source)
+ digest=_verify_install_material(root,plan,receipt,source=source,retired_prestate=retired)
  deny(module.journal_read(directory,digest)!=strict_json(captured[directory/'phase-journal.json']),
       'KERNEL_SUCCESSOR_JOURNAL_CHANGED')
- if failed is None:
+ if failed is None and (retired is None or witness['rollback_selector']==plan['rollback_selector']):
   deny(witness.get('installer_receipt_sha256')!=digest,'KERNEL_SUCCESSOR_RECEIPT_DENIED')
- public=module.capture_successor_payload(root,plan['payload'])
+ def public_prestate():
+  if retired is None:return module.capture_successor_payload(root,plan['payload'])
+  result={row['target']:{'prestate':module.target_prestate(root,row)} for row in plan['payload']}
+  deny(any(row['prestate']['state']!='ABSENT' for row in result.values()),'KERNEL_RETIRED_PAYLOAD_NOT_ABSENT')
+  return result
+ public=public_prestate()
  rows=strict_json(captured[directory/'receipt.json'])['replacements']
  generated={}
  for row in rows:
@@ -1258,8 +1404,8 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
        expected_custody=(row['uid'],row['gid'],int(row['mode'],8)),include_identity=True)
  deny(set(generated)!=set(module.GENERATED),'KERNEL_SUCCESSOR_GENERATED_SET_DENIED')
  currentness();module.verify_host_identity(root,plan)
- deny(_verify_install_material(root,plan,receipt,source=source)!=digest
-      or module.capture_successor_payload(root,plan['payload'])!=public,
+ deny(_verify_install_material(root,plan,receipt,source=source,retired_prestate=retired)!=digest
+      or public_prestate()!=public,
       'KERNEL_SUCCESSOR_PRESTATE_CHANGED')
  for row in rows:
   if row['target'] in generated:
@@ -1271,8 +1417,9 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
       'KERNEL_SUCCESSOR_JOURNAL_CHANGED')
  if failed is not None:
   observe_failed_native_prestate(root,plan,failed,runtime_source,expected_release=runtime_release)
- return {'state':'FAILED_PREDECESSOR_CAPTURE_ONLY' if failed is not None else 'INSTALLED_PREDECESSOR_CAPTURE_ONLY',
-         'plan':plan,'receipt_digest':digest,
+ return {'state':('RETIRED_PREDECESSOR_CAPTURE_ONLY' if retired is not None else
+                 'FAILED_PREDECESSOR_CAPTURE_ONLY' if failed is not None else 'INSTALLED_PREDECESSOR_CAPTURE_ONLY'),
+         'plan':plan,'receipt_digest':digest,'retired_prestate':retired,
          'witness':witness,'expected':expected,'public_payload':public,
          'observation_boot_id':observed_boot,
          'generated_prestate':generated,'mutable_private_state':'NOT_QUIESCED',
@@ -1485,11 +1632,19 @@ def build_plan(source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,verify_pa
   bound={k:v for k,v in previous.items() if k not in {'source_root','source_receipt'}}
   installed=capture_installed_kernel_prestate(root,prior_source,bound,verify_path=verify_path,
       witness_path=STATE/'kernel-install-witness.json',observation_boot_id=plan['current_boot_id'],
-      runtime_source=source,runtime_release=plan['release_digest'])
+      runtime_source=source,runtime_release=plan['release_digest'],retirement=request.get('outpost_retirement'))
   prior_receipt,prior_receipt_digest=source_receipt(prior_source,
       Path(root)/previous['source_receipt'].lstrip('/'),verify_path)
   deny(prior_receipt_digest!=installed['plan']['source_receipt_sha256'],
        'KERNEL_SUCCESSOR_SOURCE_RECEIPT_DENIED')
+  if 'outpost_retirement' in request:
+   # Reuse the exact complete preserved public Kernel package. This Outpost
+   # correction does not relabel historical source as the new Outpost commit
+   # or overwrite the protected source inbox before its owning transaction.
+   deny(prior_receipt!=receipt or safe_tree(prior_source)!=safe_tree(source)
+        or any(request[k]!=installed['plan'][k] for k in
+               ('source_parent','source_commit','source_tree','archive_sha256')),
+        'KERNEL_RETIRED_SOURCE_CHANGE_DENIED')
   origin=installed['plan'].get('installation_origin',installed['plan'])
   deny(reserved!=origin['reserved_domain_ids'],'KERNEL_SUCCESSOR_RESERVED_CHANGED')
   old_targets=set(installed['public_payload']);new_targets={row['target'] for row in rows}
@@ -1507,6 +1662,9 @@ def build_plan(source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,verify_pa
   for row in rows:
    if row['target'] in installed['public_payload']:
     fact=installed['public_payload'][row['target']]['prestate']
+    if fact['state']=='ABSENT':
+     prestate.append(fact)
+     continue
     changed=any(fact[k]!=row[k] for k in ('bytes','sha256','mode'))
     prestate.append({**fact,'state':'PRESENT_REPLACE' if changed else 'PRESENT_PRESERVED'})
    else:prestate.append(_capture_added_residency_prestate(root,module,row))
@@ -1548,7 +1706,7 @@ def verify_install(root,plan,receipt,*,source):
  return _verify_install_material(root,plan,receipt,source=source)
 
 
-def _verify_install_material(root,plan,receipt,*,source):
+def _verify_install_material(root,plan,receipt,*,source,retired_prestate=None):
  # Read-only signed material verification, also used by exact failed-attempt
  # recovery. Normal construction separately requires its original Outpost.
  receipt_path=Path(root).joinpath(*Path(receipt["receipt"]).parts[1:]);value=read_json(receipt_path);required={"schema","plan_sha256","boot_id","branch_order","prestate","replacements","rollback_selector","rollback_auth_sha256","receipt_signature","receipt_digest"};deny(set(value)!=required or value.get("schema")!="SereinPublicKernelFirstInstallReceipt/v1","KERNEL_INSTALL_RECEIPT_SCHEMA_DENIED");digest=value.pop("receipt_digest",None);deny(digest!=sha(canonical(value)) or value.get("plan_sha256")!=sha(canonical(plan)) or value.get("boot_id")!=plan["current_boot_id"] or value.get("rollback_selector")!=plan["rollback_selector"] or value.get("branch_order")!=list(ORDER),"KERNEL_INSTALL_RECEIPT_DENIED")
@@ -1638,8 +1796,16 @@ def _verify_install_material(root,plan,receipt,*,source):
   for filename,field in (('plan.json','plan_sha256'),('receipt.json','receipt_sha256'),('phase-journal.json','journal_sha256')):
    raw=regular(Path(root)/prior_selector.lstrip('/')/filename,expected_custody=(0,0,0o600))
    deny(sha(raw)!=previous[field],'KERNEL_RECOVERED_HISTORY_CHANGED')
+ if retired_prestate is not None:
+  deny(retired_prestate.get('state')!='RETIRED_PREDECESSOR_CAPTURE_ONLY'
+       or retired_prestate.get('historical_plan_sha256')!=sha(canonical(plan))
+       or retired_prestate.get('public_payload')!=plan['payload'], 'KERNEL_RETIRED_HISTORY_BINDING_DENIED')
+ retired_targets={row['target'] for row in plan['payload']} if retired_prestate is not None else set()
  for row in replacements:
   path=Path(root).joinpath(*Path(row["target"]).parts[1:])
+  if row['target'] in retired_targets:
+   deny(os.path.lexists(path),'KERNEL_RETIRED_PAYLOAD_NOT_ABSENT')
+   continue
   # One descriptor-bound observation binds content, custody and final named
   # inode. A separate lstat/read can falsely accept a same-byte replacement.
   observed=regular(path,fact=True,expected_custody=(row['uid'],row['gid'],int(row['mode'],8)),include_identity=True)
@@ -3963,6 +4129,18 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
  # Do not introduce a service-owned privileged lock or a new root service.
  boot=current_boot();request_raw=regular(request_path)
  request=install_request(request_path)
+ retired_request='outpost_retirement' in request
+ if retired_request:
+  # The historical inbox is protected by Outpost's retirement receipt.
+  # A fresh request is a separate immutable input, never an overwrite/replay.
+  location=Path(request_path)
+  deny(location.is_relative_to(STATE) or not location.is_relative_to(Path(root)/'var/lib/serein/rollback')
+       or location.name!='install-request.json','KERNEL_RETIRED_REQUEST_PATH_DENIED')
+  forbidden={request['installed_predecessor']['rollback_selector'],
+      request['installed_predecessor']['source_root'],request['rollback_selector'],
+      request['outpost_retirement']['selector'],str(Path(request['outpost_retirement']['plan_path']).parent)}
+  deny(any(location.is_relative_to(Path(root)/name.lstrip('/')) for name in forbidden),
+       'KERNEL_RETIRED_REQUEST_PATH_DENIED')
  deny(type(construct) is not bool,'KERNEL_CONSTRUCTION_MODE_DENIED')
  complete=(construct or request['schema'] in {'SereinOutpostKernelInstallRequest/v2','SereinOutpostKernelInstallRequest/v3'}
            or compute_expectation is not None or read_compute_expectation is not None
@@ -3993,7 +4171,10 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
         'KERNEL_WITNESS_PREDECESSOR_CHANGED')
    prior_witness=(raw,fact)
   else:deny(os.path.lexists(STATE/"kernel-install-witness.json"),"KERNEL_WITNESS_COLLISION_DENIED")
+  retired_placement=retired_request
   def inactive_kernel_units():
+   if retired_placement:
+    return _retirement_quiescence()
    authority=read_authority_unit_prestate();other=read_other_kernel_unit_prestate()
    deny(set(authority)!=set(AUTHORITY_UNITS) or set(other)!=set(OTHER_KERNEL_UNITS),
         'KERNEL_UNIT_SET_DENIED')
@@ -4004,7 +4185,8 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
    return units
   successor='installed_predecessor' in request
   deny(successor and not complete,'KERNEL_SUCCESSOR_COMPLETE_CONSTRUCTION_REQUIRED')
-  unit_prestate=({**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()} if successor else inactive_kernel_units())
+  unit_prestate=(_retirement_quiescence() if retired_request else
+      {**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()} if successor else inactive_kernel_units())
   enablement_prestate=read_kernel_enablement_prestate(root) if complete else None
   if complete:
    deny(any(row['NeedDaemonReload']!='no' for row in unit_prestate.values()),
@@ -4039,8 +4221,10 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
     failed_plan=read_json(Path(root)/previous['rollback_selector'].lstrip('/')/'plan.json')
     deny(sha(canonical(failed_plan))!=previous['plan_sha256'],'KERNEL_FAILED_PLAN_CHANGED')
     observe_failed_native_prestate(root,failed_plan,failed,runtime_source,expected_release=plan['release_digest'])
+  retirement_guard=lambda:None
   def material_boundary():
    check_material()
+   retirement_guard()
    failed_runtime_boundary(source)
    if 'native_allocation' in request and not runtime_disposition['native_mutating']:
     current_runtime=load_offline_installer(source,read_json(source/'release-manifest.json'),
@@ -4074,7 +4258,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
         witness_path=STATE/'kernel-install-witness.json',observation_boot_id=plan['current_boot_id'],
         runtime_source=(Path(root)/plan['rollback_selector'].lstrip('/')/'candidate-source'
                         if os.path.lexists(Path(root)/plan['rollback_selector'].lstrip('/')/'candidate-source') else source),
-        runtime_release=plan['release_digest'])
+        runtime_release=plan['release_digest'],retirement=request.get('outpost_retirement'))
    def verify_restored():
     # Restored runtime bytes alone cannot restart a generation against a new
     # canonical source inbox. Require its original signed provider binding.
@@ -4133,11 +4317,100 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
      deny(_read_failed_authority_endpoint(rows)!=authority_controls,'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
     atomic(STATE/('kernel-successor-quiescence-'+sha(request_raw)+'.json'),
         evidence,witness_fd,evidence_boundary)
-   successor_scope.enter_context(_quiesce_installed_kernel(unit_prestate,guard=material_boundary,
-       verify_predecessor=verify_predecessor,verify_restored=verify_restored,publication=publication,
-       predecessor_boot_id=plan['installed_predecessor']['current_boot_id'],
-       current_boot_id=plan['current_boot_id'],
-       retain_prestate=retain_prestate,failed_predecessor='failed_construction' in previous))
+   if retired_request:
+    captured=verify_predecessor()
+    deny(captured['state']!='RETIRED_PREDECESSOR_CAPTURE_ONLY'
+         or any(row['LoadState']!='not-found' for row in unit_prestate.values())
+         or _retirement_quiescence()!=unit_prestate,'KERNEL_RETIRED_PRESTATE_CHANGED')
+    retired_capture=captured['retired_prestate']
+    retired_plan=captured['plan']
+    old_request=STATE/'install-request.json'
+    old_request_raw=regular(old_request,expected_custody=(0,0,0o600))
+    old_request_fact=regular(old_request,fact=True,include_identity=True,expected_custody=(0,0,0o600))
+    retired_publication=False
+    retired_inbox_owned=False
+    retired_inbox_replaced=False
+    retired_inbox_transition=False
+    retired_inbox_fact=None
+    retired_inbox_linked=False
+    retired_inbox_intent=None
+    retired_intent_raw=None
+    retired_intent_fact=None
+    canonical_request={k:v for k,v in request.items() if k!='outpost_retirement'}
+    canonical_request_raw=canonical(canonical_request)
+    archived_request_path=Path(root)/plan['rollback_selector'].lstrip('/')/'predecessor-request.json'
+    held_request_path=archived_request_path.with_name('retained-inode-'+sha(str(old_request).encode()))
+    retired_intent_path=archived_request_path.with_name('request-publication-intent.json')
+    archived_request_fact=None
+    retired_evidence_path=request_path.parent/('outpost-retirement-input-'+sha(request_raw)+'.json')
+    retired_evidence_raw=None
+    state_name='/'+STATE.relative_to(root).as_posix()
+    state_rows={row['path']:regular(STATE/row['path'],fact=True,include_identity=True)
+                for row in safe_tree(STATE)}
+    def state_directory_facts():
+     result={}
+     for path in [STATE,*sorted(STATE.rglob('*'))]:
+      info=path.lstat()
+      deny(stat.S_ISLNK(info.st_mode),'KERNEL_RETIRED_HISTORY_CHANGED')
+      if stat.S_ISDIR(info.st_mode):
+       result[path.relative_to(STATE).as_posix()]=(info.st_dev,info.st_ino,info.st_uid,info.st_gid,
+                                                   stat.S_IMODE(info.st_mode))
+     return result
+    state_directories=state_directory_facts()
+    protected_files,_=retirement_preservation_paths(retired_plan)
+    protected_files.discard('/var/lib/serein/kernel/authority/installed-policy-evidence.json')
+    def retirement_guard():
+     info=old_request.lstat()
+     links=2 if retired_inbox_linked and (info.st_dev,info.st_ino)==old_request_fact[5:7] else 1
+     inbox=regular(old_request,expected_custody=(0,0,0o600),expected_nlink=links)
+     inbox_fact=regular(old_request,fact=True,include_identity=True,expected_custody=(0,0,0o600),expected_nlink=links)
+     if retired_inbox_transition:
+      prior=old_request_fact[:-1]+(links,)
+      deny(not ((inbox==old_request_raw and inbox_fact==prior) or
+                (inbox==canonical_request_raw and inbox_fact==retired_inbox_fact)),
+           'KERNEL_RETIRED_REQUEST_CHANGED')
+     elif retired_inbox_owned:
+      deny(inbox!=canonical_request_raw or inbox_fact!=retired_inbox_fact,'KERNEL_RETIRED_REQUEST_CHANGED')
+     else:
+      deny(inbox!=old_request_raw or inbox_fact!=old_request_fact,'KERNEL_RETIRED_REQUEST_CHANGED')
+     if retired_inbox_linked:
+      deny(regular(held_request_path,expected_custody=(0,0,0o600),expected_nlink=links)!=old_request_raw
+           or regular(held_request_path,fact=True,include_identity=True,expected_custody=(0,0,0o600),
+              expected_nlink=links)!=old_request_fact[:-1]+(links,), 'KERNEL_RETIRED_REQUEST_HISTORY_CHANGED')
+     if archived_request_fact is not None:
+      deny(regular(archived_request_path,expected_custody=(0,0,0o600))!=old_request_raw
+           or regular(archived_request_path,fact=True,include_identity=True,
+              expected_custody=(0,0,0o600))!=archived_request_fact,'KERNEL_RETIRED_REQUEST_HISTORY_CHANGED')
+     if retired_intent_fact is not None:
+      deny(regular(retired_intent_path,expected_custody=(0,0,0o600))!=retired_intent_raw
+           or regular(retired_intent_path,fact=True,include_identity=True,
+              expected_custody=(0,0,0o600))!=retired_intent_fact,'KERNEL_RETIRED_INTENT_CHANGED')
+     protected={retired_plan['rollback_selector']}
+     if not (retired_publication or retired_inbox_replaced):protected.add(state_name)
+     observed=collect_retirement_preserved_state(root,retired_plan,current_boot_id=boot,paths=protected)
+     deny(observed!={name:retired_capture['preserved'][name] for name in protected},
+          'KERNEL_RETIRED_PRESERVATION_CHANGED')
+     for name in protected_files:
+      fact=retired_capture['preserved'][name]
+      deny(regular(root/name.lstrip('/'),fact=True,include_identity=True,
+            expected_custody=(fact['uid'],fact['gid'],int(fact['mode'],8)))!=
+           (fact['sha256'],fact['uid'],fact['gid'],int(fact['mode'],8),
+            fact['bytes'],fact['device'],fact['inode'],fact['nlink']),
+           'KERNEL_RETIRED_PRESERVATION_CHANGED')
+     if retired_publication or retired_inbox_replaced:
+      deny(state_directory_facts()!=state_directories,'KERNEL_RETIRED_HISTORY_CHANGED')
+      for name,fact in state_rows.items():
+       if name!='install-request.json' and not (retired_publication and name=='kernel-install-witness.json'):
+        deny(regular(STATE/name,fact=True,include_identity=True)!=fact,'KERNEL_RETIRED_HISTORY_CHANGED')
+     if retired_evidence_raw is not None:
+      deny(regular(retired_evidence_path,expected_custody=(0,0,0o600))!=retired_evidence_raw,
+           'KERNEL_RETIRED_OWNER_EVIDENCE_CHANGED')
+   else:
+    successor_scope.enter_context(_quiesce_installed_kernel(unit_prestate,guard=material_boundary,
+        verify_predecessor=verify_predecessor,verify_restored=verify_restored,publication=publication,
+        predecessor_boot_id=plan['installed_predecessor']['current_boot_id'],
+        current_boot_id=plan['current_boot_id'],
+        retain_prestate=retain_prestate,failed_predecessor='failed_construction' in previous))
    successor_unit_prestate=unit_prestate
    unit_prestate=inactive_kernel_units()
   def boundary():
@@ -4149,6 +4422,28 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
   boundary()
   if installer is None:
    installer=module.install;rollback_installer=module.rollback
+  if retired_request:
+   # Write the owner binding BEFORE package placement. The fresh request's
+   # existing directory is outside the protected inbox and the new selector
+   # that the unchanged Kernel installer must create itself.
+   from .public_generation_transaction import _signed_transition_record
+   retired_evidence={'schema':'SereinKernelSuccessorQuiescence/v1','boot_id':boot,
+       'request_sha256':sha(request_raw),'request_path':'/'+request_path.relative_to(root).as_posix(),
+       'canonical_request_sha256':sha(canonical_request_raw),
+       'predecessor_request_sha256':sha(old_request_raw),
+       'predecessor_request_fact':list(old_request_fact),
+       'predecessor_request_archive':'/'+archived_request_path.relative_to(root).as_posix(),
+       'predecessor_request_retained_inode':'/'+held_request_path.relative_to(root).as_posix(),
+       'plan_sha256':sha(canonical(plan)),'rollback_selector':plan['rollback_selector'],
+       'retirement':request['outpost_retirement'],'unit_prestate':unit_prestate,
+       'predecessor_restart':'DENIED_RETIRED_GENERATION','authority_effect':'NONE','stage1':'UNPROVEN'}
+   encoded=_signed_transition_record(retired_evidence,private,private.public_key())
+   module.atomic(retired_evidence_path,encoded,'0600',boundary,create_only=True)
+   retired_evidence_raw=encoded
+   # Complete revalidation at the last pre-install boundary, including all
+   # retained private roots. Later boundaries retain the original inbox and
+   # history, while the installer owns only its declared replacement rows.
+   verify_predecessor()
   boundary()
   receipt=installer(root,source,plan,boundary=boundary,native_material=native_material,policy_evidence=policy_evidence);canonical_receipt=Path(root).joinpath(*Path(plan["rollback_selector"]+"/receipt.json").parts[1:])
   runtime_access_attempted=False
@@ -4169,6 +4464,48 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
    guard()
   try:
    deny(receipt.get("status")!="INSTALLED_INACTIVE" or receipt.get("receipt")!=plan["rollback_selector"]+"/receipt.json","KERNEL_INSTALL_RECEIPT_DENIED");deny("sha256:"+sha(canonical(safe_tree(source)))!=plan["source_inventory_digest"],"KERNEL_SOURCE_CHANGED_DURING_INSTALL");receipt_digest=verify_install(root,plan,receipt,source=source)
+   if retired_request:
+    # Before any lifecycle/replay activity, prove every unchanged protected
+    # root again, including complete model bytes. Only the signed policy row
+    # is a declared replacement at this point.
+    protected=set(retired_capture['preserved'])-{'/var/lib/serein/kernel/authority/installed-policy-evidence.json'}
+    observed=collect_retirement_preserved_state(root,retired_plan,current_boot_id=boot,paths=protected)
+    deny(observed!={name:retired_capture['preserved'][name] for name in protected},
+         'KERNEL_RETIRED_PRESERVATION_CHANGED')
+    # Preserve exact historical input before advancing the existing canonical
+    # inbox. This is inside the complete owner transaction, before any start.
+    # Kernel receives its unchanged strict schema; the signed Outpost envelope
+    # separately retains the retirement binding, never a hidden grant.
+    module.atomic(archived_request_path,old_request_raw,'0600',boundary,create_only=True)
+    archived_request_fact=regular(archived_request_path,fact=True,include_identity=True,
+        expected_custody=(0,0,0o600))
+    boundary()
+    retired_inbox_replaced=True
+    retired_inbox_transition=True
+    os.link(old_request,held_request_path,follow_symlinks=False)
+    retired_inbox_linked=True
+    module.sync_parent(held_request_path)
+    boundary()
+    def request_intent(identity):
+     nonlocal retired_inbox_fact,retired_inbox_intent,retired_intent_raw,retired_intent_fact
+     retired_inbox_fact=(sha(canonical_request_raw),0,0,0o600,len(canonical_request_raw),
+         identity['device'],identity['inode'],1)
+     retired_inbox_intent={'schema':'SereinKernelRequestPublicationIntent/v1','boot_id':boot,
+         'request_sha256':sha(canonical_request_raw),'plan_sha256':sha(canonical(plan)),
+         'predecessor_request_sha256':sha(old_request_raw),'ownership':identity,
+         'target':'/'+old_request.relative_to(root).as_posix()}
+     retired_intent_raw=_signed_transition_record(retired_inbox_intent,private,private.public_key())
+     module.atomic(retired_intent_path,retired_intent_raw,'0600',boundary,create_only=True)
+     retired_intent_fact=regular(retired_intent_path,fact=True,include_identity=True,
+         expected_custody=(0,0,0o600))
+     boundary()
+    module.atomic(old_request,canonical_request_raw,'0600',boundary,on_intent=request_intent)
+    deny(regular(old_request,fact=True,include_identity=True,expected_custody=(0,0,0o600))!=retired_inbox_fact,
+         'KERNEL_RETIRED_REQUEST_CHANGED')
+    retired_inbox_owned=True;retired_inbox_transition=False
+    deny(install_request(old_request)!=canonical_request,'KERNEL_RETIRED_REQUEST_CHANGED')
+    boundary()
+    deny({row['path'] for row in safe_tree(STATE)}!=set(state_rows),'KERNEL_RETIRED_HISTORY_CHANGED')
    witness={"schema":"SereinOutpostKernelInstallWitness/v1","target":"VM4010","boot_id":plan["current_boot_id"],"source_commit":plan["source_commit"],"source_tree":plan["source_tree"],"archive_sha256":plan["archive_sha256"],"source_receipt_sha256":plan["source_receipt_sha256"],"release_digest":plan["release_digest"],"installer_receipt_sha256":receipt_digest,"branch_order":list(ORDER),"install_status":receipt["status"],"admission":"INDEPENDENT_AUDIT_PENDING","stage1":"NOT_READY","rollback_selector":plan["rollback_selector"],"authority_effect":"NONE"}
    witness.update(json.loads(canonical({name:plan[name] for name in
        ('native_identity','host_identity','host_projection_digest')})))
@@ -4177,6 +4514,20 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
     # before calling, and refresh restored files on the safe compensation road.
     definitions_refresh_attempted=True
     refresh_definitions(boundary)
+    if retired_request:
+     # Preserve the missing-unit failure evidence above, then clear only the
+     # retired Kernel's manager latches as part of complete construction.
+     # No old program or request is reactivated and no live patch is applied.
+     failed=tuple(name for name,row in unit_prestate.items() if row['ActiveState']=='failed')
+     if failed:
+      import subprocess
+      boundary()
+      try:subprocess.run(['/usr/bin/systemctl','--no-ask-password','reset-failed',*failed],
+          check=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+          close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
+      except (OSError,subprocess.SubprocessError) as exc:raise RunnerDenied('KERNEL_RETIRED_NEW_UNIT_RESET_FAILED') from exc
+     retired_placement=False
+     boundary()
     deny(verify_install(root,plan,receipt,source=source)!=receipt_digest,
          'KERNEL_INSTALL_RECEIPT_CHANGED')
     for name,row in unit_poststate.items():
@@ -4189,7 +4540,13 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
                     if retained_enabled else {'static','disabled'})),
           'KERNEL_UNIT_REFRESH_READBACK_DENIED')
     def finalize(observations,verify_lifecycle):
+     nonlocal retired_publication
      material_boundary()
+     if retired_request:
+      terminal_roots={'/var/lib/ollama/models',retired_plan['rollback_selector']}
+      terminal=collect_retirement_preserved_state(root,retired_plan,current_boot_id=boot,paths=terminal_roots)
+      deny(terminal!={name:retired_capture['preserved'][name] for name in terminal_roots},
+           'KERNEL_RETIRED_PRESERVATION_CHANGED')
      deny(verify_install(root,plan,receipt,source=source)!=receipt_digest,
           'KERNEL_INSTALL_RECEIPT_CHANGED')
      verify_lifecycle()
@@ -4207,6 +4564,13 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
      witness['runtime_access_prestate']=plan['runtime_access_prestate']
      witness['runtime_access_poststate']=runtime_access_poststate
      if successor:witness['installed_predecessor_unit_prestate']=successor_unit_prestate
+     if retired_request:
+      witness['outpost_retirement']=request['outpost_retirement']
+      witness['outpost_retirement_input_path']='/'+retired_evidence_path.relative_to(root).as_posix()
+      witness['outpost_retirement_input_sha256']=sha(regular(retired_evidence_path,
+          expected_custody=(0,0,0o600)))
+      witness['request_publication_intent_path']='/'+retired_intent_path.relative_to(root).as_posix()
+      witness['request_publication_intent_sha256']=sha(retired_intent_raw)
      def publication_boundary():
       material_boundary()
       verify_lifecycle()
@@ -4214,13 +4578,24 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
            'KERNEL_UNIT_PUBLICATION_CHANGED')
      witness['witness_digest']=sha(canonical(witness))
      publication_boundary()
+     if retired_request:
+      deny({row['path'] for row in safe_tree(STATE)}!=set(state_rows),'KERNEL_RETIRED_HISTORY_CHANGED')
+     # Only the final owner may replace its witness. atomic() still compares
+     # the exact predecessor; the old request and history stay guarded.
+     if retired_request:retired_publication=True
      try:atomic(STATE/'kernel-install-witness.json',witness,witness_fd,publication_boundary,
-                **({'predecessor':prior_witness} if prior_witness is not None else {}))
+                **({'predecessor':prior_witness} if prior_witness is not None else {}),
+                **({'check_membership':lambda temporary:deny(
+                    {row['path'] for row in safe_tree(STATE)}!=set(state_rows)|({temporary} if temporary else set()),
+                    'KERNEL_RETIRED_HISTORY_CHANGED')} if retired_request else {}))
      except WitnessPublicationUncertain:
       # Retain disposition even if service cleanup raises a different error.
       publication['completed']=True
       raise
      publication['completed']=True
+     if retired_request:
+      retirement_guard()
+      deny({row['path'] for row in safe_tree(STATE)}!=set(state_rows),'KERNEL_RETIRED_HISTORY_CHANGED')
      return witness
     runtime_access_attempted=True
     runtime_access_poststate=module.apply_runtime_access(root,plan,boundary)
@@ -4228,7 +4603,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
      material_boundary()
      deny(module.capture_runtime_access(root,plan)!=runtime_access_poststate,
           'KERNEL_RUNTIME_ACCESS_CHANGED')
-    return _complete_kernel_lifecycle(plan,receipt,request,prepared,compute_expectation,
+    return _complete_kernel_lifecycle(plan,receipt,canonical_request if retired_request else request,prepared,compute_expectation,
         boundary=construction_boundary,read_compute_expectation=read_compute_expectation,
         signed_runtime_plan=signed_runtime_plan,runtime_disposition=runtime_disposition,
         finalize=finalize,
@@ -4287,12 +4662,41 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
     # Lifecycle cleanup has quiesced all owned units. Do not compensate files
     # under an unresolved permission effect, including a tmpfiles timeout.
     module.restore_runtime_access(root,plan,compensation_boundary)
+   if retired_request and retired_inbox_linked:
+    # All owned units are inactive and exact current-input ownership was
+    # rechecked above. Restore only this transaction's inbox delta; retain
+    # the archive/evidence and never execute or restart the predecessor.
+    compensation_boundary()
+    retired_inbox_transition=True
+    info=old_request.lstat()
+    if (info.st_dev,info.st_ino)==old_request_fact[5:7]:
+     # Publication never happened; only our exact retained hardlink exists.
+     compensation_boundary()
+     held_request_path.unlink();module.sync_parent(held_request_path)
+    else:
+     deny(regular(old_request,fact=True,include_identity=True,expected_custody=(0,0,0o600))!=retired_inbox_fact,
+          'KERNEL_RETIRED_REQUEST_COMPENSATION_DENIED')
+     compensation_boundary()
+     os.replace(held_request_path,old_request)
+     module.sync_parent(old_request);module.sync_parent(held_request_path)
+    retired_inbox_linked=False
+    deny(regular(old_request,expected_custody=(0,0,0o600))!=old_request_raw,
+         'KERNEL_RETIRED_REQUEST_COMPENSATION_DENIED')
+    deny(regular(old_request,fact=True,include_identity=True,expected_custody=(0,0,0o600))!=old_request_fact,
+         'KERNEL_RETIRED_REQUEST_COMPENSATION_DENIED')
+    retired_inbox_owned=False;retired_inbox_transition=False
    deny(rollback_installer is None,"KERNEL_POSTINSTALL_ROLLBACK_UNAVAILABLE")
    rollback_installer(root,canonical_receipt,boundary=compensation_boundary)
    if definitions_refresh_attempted:
     try:
      refresh_definitions(compensation_boundary)
-     deny(inactive_kernel_units()!=unit_prestate,'KERNEL_UNIT_COMPENSATION_READBACK_DENIED')
+     if retired_request:
+      terminal=_retirement_quiescence()
+      deny(set(terminal)!=set(unit_prestate) or any(
+          row['LoadState']!='not-found' or row['NeedDaemonReload']!='no'
+          or (row['ActiveState'],row['SubState'])!=('inactive','dead') for row in terminal.values()),
+          'KERNEL_UNIT_COMPENSATION_READBACK_DENIED')
+     else:deny(inactive_kernel_units()!=unit_prestate,'KERNEL_UNIT_COMPENSATION_READBACK_DENIED')
     except Exception as cleanup_error:
      raise RunnerDenied('KERNEL_UNIT_COMPENSATION_UNPROVEN') from cleanup_error
    raise
@@ -4668,20 +5072,26 @@ def main(argv=None):
  """
  import argparse,sys
  parser=argparse.ArgumentParser(description=__doc__)
+ parser.add_argument('--request',type=Path,
+     help='Fresh signed-retirement successor request; never overwrite or replay the preserved inbox')
  parser.add_argument('--model')
  parser.add_argument('--model-digest')
  parser.add_argument('--observe-compute',action='store_true',
      help='Read an already-acquired compute expectation on private stdin; not required for construction')
  args=parser.parse_args(argv)
  deny(os.geteuid()!=0,"KERNEL_INSTALLER_ROOT_REQUIRED")
+ request_args={}
+ if args.request is not None:
+  deny('outpost_retirement' not in install_request(args.request),'KERNEL_RETIRED_REQUEST_REQUIRED')
+  request_args={'request_path':args.request}
  if args.model is None and args.model_digest is None and not args.observe_compute:
-  return run(construct=True)
+  return run(construct=True,**request_args)
  model=_compute_model({'model':args.model,'model_digest':args.model_digest})
  if not args.observe_compute:
-  return run(construct=True,compute_expectation=model)
+  return run(construct=True,compute_expectation=model,**request_args)
  def read_expectation():
   return _read_compute_handoff(sys.stdin.buffer)
- return run(construct=True,compute_expectation=model,read_compute_expectation=read_expectation)
+ return run(construct=True,compute_expectation=model,read_compute_expectation=read_expectation,**request_args)
 
 if __name__=="__main__":
  main()
