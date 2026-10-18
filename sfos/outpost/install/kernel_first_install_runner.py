@@ -1337,11 +1337,78 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
   # The retained witness may be the successful predecessor of the failed
   # transaction Outpost retired. Keep both identities and histories literal.
   if witness['rollback_selector']!=plan['rollback_selector']:
-   prior=plan.get('installed_predecessor',{})
-   deny(prior.get('witness_sha256')!=expected['witness_sha256']
-        or prior.get('rollback_selector')!=witness['rollback_selector']
-        or plan['native_identity']!=witness['native_identity']
-        or plan['host_identity']!=witness['host_identity'], 'KERNEL_RETIRED_WITNESS_BINDING_DENIED')
+   deny(plan['native_identity']!=witness['native_identity']
+        or plan['host_identity']!=witness['host_identity'],'KERNEL_RETIRED_WITNESS_BINDING_DENIED')
+   ancestor=plan;seen={plan['rollback_selector']}
+   while ancestor['rollback_selector']!=witness['rollback_selector']:
+    prior=ancestor.get('installed_predecessor')
+    fields={'rollback_selector','plan_sha256','receipt_sha256','journal_sha256',
+            'witness_sha256','current_boot_id','machine_id_sha256'}
+    deny(not isinstance(prior,dict) or set(prior) not in (fields,fields|{'failed_construction'})
+         or prior.get('witness_sha256')!=expected['witness_sha256']
+         or prior.get('machine_id_sha256')!=expected['machine_id_sha256']
+         or any(not isinstance(prior.get(k),str) or not HEX64.fullmatch(prior[k])
+                for k in fields-{'rollback_selector','current_boot_id'}),
+         'KERNEL_RETIRED_WITNESS_BINDING_DENIED')
+    if 'failed_construction' in prior:_failed_construction_descriptor(prior['failed_construction'])
+    location=prior['rollback_selector']
+    deny(not isinstance(location,str) or not re.fullmatch(
+         r'/var/lib/serein/rollback/kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',location)
+         or location in seen,'KERNEL_RETIRED_HISTORY_PATH_DENIED')
+    seen.add(location);chain_directory=root/location.lstrip('/')
+    history={}
+    for filename,field in (('plan.json','plan_sha256'),('receipt.json','receipt_sha256'),
+                           ('phase-journal.json','journal_sha256'),('rollback-auth.key',None)):
+     path=chain_directory/filename
+     raw=regular(path,expected_custody=(0,0,0o600))
+     deny((field is not None and sha(raw)!=prior[field])
+          or (path in captured and captured[path]!=raw),'KERNEL_RETIRED_HISTORY_CHANGED')
+     captured[path]=raw
+     if field is not None:
+      history[filename]=strict_json(raw)
+      deny(not isinstance(history[filename],dict) or canonical(history[filename])!=raw,
+           'KERNEL_RETIRED_HISTORY_DENIED')
+    ancestor=history['plan.json']
+    deny(ancestor.get('schema')!='SereinPublicKernelFirstInstallPlan/v1'
+         or ancestor.get('target_vm_id')!='VM4010' or ancestor.get('rollback_selector')!=location
+         or ancestor.get('current_boot_id')!=prior['current_boot_id']
+         or ancestor.get('authority_sha256')!=sha(anchor)
+         or ancestor.get('native_identity')!=witness['native_identity']
+         or ancestor.get('host_identity')!=witness['host_identity'],
+         'KERNEL_RETIRED_HISTORY_BINDING_DENIED')
+    try:load_pem_public_key(anchor).verify(decode(ancestor['signature']),canonical(
+         {k:v for k,v in ancestor.items() if k!='signature'}))
+    except Exception as exc:raise RunnerDenied('KERNEL_RETIRED_HISTORY_SIGNATURE_DENIED') from exc
+    record=history['receipt.json']
+    required={'schema','plan_sha256','boot_id','branch_order','prestate','replacements',
+              'rollback_selector','rollback_auth_sha256','receipt_signature','receipt_digest'}
+    deny(set(record)!=required or record.get('schema')!='SereinPublicKernelFirstInstallReceipt/v1'
+         or record['receipt_digest']!=sha(canonical({k:v for k,v in record.items() if k!='receipt_digest'}))
+         or record['plan_sha256']!=prior['plan_sha256'] or record['boot_id']!=ancestor['current_boot_id']
+         or record['rollback_selector']!=location or record['branch_order']!=list(ORDER)
+         or record['prestate']!=ancestor.get('target_prestate'), 'KERNEL_RETIRED_HISTORY_RECEIPT_DENIED')
+    auth=captured[chain_directory/'rollback-auth.key']
+    body={k:v for k,v in record.items() if k not in {'receipt_signature','receipt_digest'}}
+    deny(len(auth)!=32 or sha(auth)!=record['rollback_auth_sha256']
+         or not isinstance(record['receipt_signature'],str) or not hmac.compare_digest(
+         base64.urlsafe_b64encode(hmac.new(auth,canonical(body),hashlib.sha256).digest()).decode().rstrip('='),
+         record['receipt_signature']),'KERNEL_RETIRED_HISTORY_RECEIPT_SIGNATURE_DENIED')
+    replacements=record['replacements'];prestate=record['prestate']
+    deny(not isinstance(replacements,list) or not isinstance(prestate,list)
+         or any(not isinstance(row,dict) or 'target' not in row for row in replacements+prestate),
+         'KERNEL_RETIRED_HISTORY_RECEIPT_DENIED')
+    preserved={row['target'] for row in prestate if row.get('state')=='PRESENT_PRESERVED'}
+    journal=history['phase-journal.json']
+    deny(journal.get('schema')!='SereinKernelRollbackJournal/v1'
+         or journal.get('receipt_digest')!=record['receipt_digest']
+         or journal.get('state')!='INSTALLED_INACTIVE'
+         or journal.get('completed')!=[row['target'] for row in replacements if row['target'] not in preserved],
+         'KERNEL_RETIRED_HISTORY_JOURNAL_DENIED')
+   deny(any(witness.get(k)!=ancestor.get(k) for k in ('source_commit','source_tree','archive_sha256',
+        'release_digest','source_receipt_sha256','native_identity','host_identity','host_projection_digest'))
+        or witness['boot_id']!=ancestor['current_boot_id']
+        or witness.get('installer_receipt_sha256')!=record['receipt_digest'],
+        'KERNEL_RETIRED_WITNESS_BINDING_DENIED')
   else:
    deny(any(witness.get(k)!=plan.get(k) for k in ('source_commit','source_tree','archive_sha256',
        'release_digest','source_receipt_sha256','native_identity','host_identity','host_projection_digest')),
