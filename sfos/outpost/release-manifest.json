@@ -1,6 +1,6 @@
 {
   "schema": "SereinOutpostSourceRelease/v2",
-  "generation": "G40",
+  "generation": "G41",
   "classification": "PUBLIC_HOST_GATE_SAFE_UNCOMMISSIONED",
   "payload": [
     {
@@ -15,18 +15,18 @@
     },
     {
       "path": "install/kernel_first_install_runner.py",
-      "bytes": 251449,
-      "sha256": "93d75de31aa41316f3bd2542dfe9703bfa0c1ca6c1ee0c93cfa359c428b9a0d5"
+      "bytes": 286913,
+      "sha256": "be08418b166690c12eaa9cd465eed1ac97c9ff0983fbef3c79eb7275a143fd40"
     },
     {
       "path": "install/public_generation_transaction.py",
-      "bytes": 141292,
-      "sha256": "c0a56a92c0d0d2c0328d508f8564e7badff1777c29534e5a58eed521134df33f"
+      "bytes": 175486,
+      "sha256": "32ffabc03303778d71a28fdaa282163c666940a310578734335cd563a12160d4"
     },
     {
       "path": "install/public_installer_cli.py",
-      "bytes": 33436,
-      "sha256": "e91464ce5f55d45508aa8f9fe5e11ed53b7e8596cec88307cb52503f8c894d70"
+      "bytes": 34571,
+      "sha256": "95b68d03c9770851a946170fcb7cba07965cfac84b926fb19161e5158a2a8c5a"
     },
     {
       "path": "install/transaction.py",
@@ -85,13 +85,13 @@
     },
     {
       "path": "outpost/reboot_vitality.py",
-      "bytes": 23169,
-      "sha256": "c58171e86c71e9203d5e1cba52e250dbf2179c254862bf2d9e6d5fea32e5fab8"
+      "bytes": 25255,
+      "sha256": "67d7212d1d13634db0078cfd696b69fc1f2e38d1bd62e24c36678f1a49c9f59d"
     },
     {
       "path": "outpost/service.py",
-      "bytes": 13379,
-      "sha256": "77fc168995d70f399990cfc82d9e2bd370d7c20438c4163c3963386e324e8af5"
+      "bytes": 13550,
+      "sha256": "3b23318f1f445d1c3fcbe4799435da9aecb395d2e5e15f5e85d9b837a4dfec03"
     },
     {
       "path": "outpost/vitals_aggregation.py",
@@ -105,13 +105,13 @@
     },
     {
       "path": "outpost/vitals_runtime.py",
-      "bytes": 22981,
-      "sha256": "527c536f7cd533f13051050e7277141df331ee98cb3807a5c1c088aa8901d67a"
+      "bytes": 26107,
+      "sha256": "2e4d5984e98eee4a50c071e4582e58bfc17b92079a1b47f21f81e0d246697a4b"
     },
     {
       "path": "outpost/watchdog.py",
-      "bytes": 8020,
-      "sha256": "f797bd8612faf66abe5cd909ddd1884289dbba7438d266a6395a73fc612ac027"
+      "bytes": 8239,
+      "sha256": "831e0f5d8e62ecb5178d07ecfdf74857b9820218e4946dfbc098e86904e386b6"
     },
     {
       "path": "systemd/serein-https-gateway-adapter.service",
@@ -184,5 +184,5 @@
       "required_before_host_gate": true
     }
   ],
-  "self_digest": "sha256:117ebcba039af65fa4a24ed8624f96377af47b69f308a2314f039503e3ede7b5"
+  "self_digest": "sha256:056a47156f89ea59f7313162936770c419cf9ede55c2eb2eca2bd7f5019182f3"
 }

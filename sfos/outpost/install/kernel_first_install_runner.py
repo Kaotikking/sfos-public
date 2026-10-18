@@ -226,6 +226,592 @@ def payload_rows(source,manifest,layout):
  deny({row["branch"] for row in rows}!=set(ORDER),"KERNEL_COMPLETE_BRANCH_SET_REQUIRED")
  rows.sort(key=lambda row:(ORDER.index(row["branch"]),row["target"]));return rows
 
+def retirement_payload_selection(plan,manifest,layout):
+ """Select complete public program material, never private state or authority.
+
+ This pure check is one prerequisite of whole-generation retirement, not an
+ executable retirement command. The caller must separately authenticate the
+ historical plan and current successor, prove exclusive ownership, and bind
+ fresh file/service custody. No historical request is admitted for replay.
+ """
+ deny(not isinstance(plan,dict) or not isinstance(manifest,dict)
+      or not isinstance(layout,dict),'KERNEL_RETIREMENT_INPUT_DENIED')
+ rows=payload_rows(None,manifest,layout)
+ deny(plan.get('schema')!='SereinPublicKernelFirstInstallPlan/v1'
+      or plan.get('target_vm_id')!='VM4010'
+      or not isinstance(manifest.get('self_digest'),str)
+      or not re.fullmatch(r'sha256:[0-9a-f]{64}',manifest['self_digest'])
+      or plan.get('release_digest')!=manifest['self_digest']
+      or plan.get('payload')!=rows,'KERNEL_RETIREMENT_INVENTORY_DENIED')
+ prefixes=('/usr/lib/serein/kernel/',
+           '/usr/lib/python3/dist-packages/serein_stage1/',
+           '/usr/libexec/serein/serein-kernel-',
+           '/etc/systemd/system/serein-kernel-')
+ exact={ '/usr/libexec/serein/'+name for name in
+         ('serein-observation-audit','serein-conversation-runtime','serein-ollama-warmup') }
+ exact.update('/etc/systemd/system/'+name+suffix for name,suffixes in
+      (('serein-observation-audit',('.service','.socket')),
+       ('serein-conversation-runtime',('.service','.socket')),
+       ('serein-ollama-warmup',('.service','.timer'))) for suffix in suffixes)
+ seen=set()
+ for row in rows:
+  target=row['target']
+  deny(not target.startswith('/') or str(Path(target))!=target
+       or '..' in Path(target).parts or target in seen
+       or target in IMMUTABLE_POLICY
+       or not (target in exact or any(target.startswith(p) and target!=p for p in prefixes)),
+       'KERNEL_RETIREMENT_TARGET_DENIED')
+  deny(type(row['bytes']) is not int or row['bytes']<0
+       or not isinstance(row['sha256'],str) or not HEX64.fullmatch(row['sha256'])
+       or row['mode'] not in ('0644','0755'),'KERNEL_RETIREMENT_ROW_DENIED')
+  seen.add(target)
+ # Return an isolated copy: later caller mutation cannot change source truth.
+ return strict_json(canonical({'payload':rows}))['payload']
+
+def retirement_preservation_paths(plan):
+ """Closed preservation set from the existing Kernel and Outpost contracts."""
+ selector=plan.get('rollback_selector') if isinstance(plan,dict) else None
+ deny(not isinstance(selector,str) or not re.fullmatch(
+      r'/var/lib/serein/rollback/kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',selector),
+      'KERNEL_RETIREMENT_HISTORY_DENIED')
+ files={'/var/lib/serein/kernel/authority/'+name for name in (
+  'replay.key','replay-descriptor.json','domain-identity.pem','domain-identity.json',
+  'installed-policy-evidence.json')}
+ files|=set(IMMUTABLE_POLICY)|{'/etc/serein/kernel/replay-peer.env','/etc/machine-id','/etc/hostname'}
+ return files,{'/var/lib/serein/kernel/replay',str(STATE),'/var/lib/ollama/models',selector}
+
+
+def collect_retirement_preserved_state(root,plan,*,current_boot_id):
+ """Read complete protected inventories without copying contents or changing state.
+
+ Native no-follow descriptor traversal and before/after identity checks reject
+ changed files, changed directory membership, links and special objects. This
+ is an observation, not a snapshot/quiescence or installation authorization.
+ Streaming hashes have no installer-kill deadline and retain no private bytes.
+ """
+ files,directories=retirement_preservation_paths(plan)
+ deny(not isinstance(current_boot_id,str) or not re.fullmatch(
+      r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}',current_boot_id),
+      'KERNEL_RETIREMENT_BOOT_DENIED')
+ flags=os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK
+ fingerprint=lambda s:(s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gid,s.st_nlink,
+                       s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+ def common(s):
+  return dict(uid=s.st_uid,gid=s.st_gid,mode=f'{stat.S_IMODE(s.st_mode):04o}',
+              device=s.st_dev,inode=s.st_ino)
+ def read_file(fd,*,virtual=False):
+  before=os.fstat(fd)
+  deny(not stat.S_ISREG(before.st_mode) or before.st_nlink!=1,
+       'KERNEL_RETIREMENT_COLLECTION_KIND_DENIED')
+  digest=hashlib.sha256();size=0
+  while True:
+   chunk=os.read(fd,1024*1024)
+   if not chunk:break
+   digest.update(chunk);size+=len(chunk)
+  deny((not virtual and size!=before.st_size) or fingerprint(before)!=fingerprint(os.fstat(fd)),
+       'KERNEL_RETIREMENT_COLLECTION_CHANGED')
+  return dict(state='FILE',sha256=digest.hexdigest(),bytes=size,nlink=before.st_nlink,**common(before))
+ def read_directory(fd):
+  before=os.fstat(fd);names=sorted(os.listdir(fd));entries=[]
+  deny(not stat.S_ISDIR(before.st_mode),'KERNEL_RETIREMENT_COLLECTION_KIND_DENIED')
+  for name in names:
+   named=os.stat(name,dir_fd=fd,follow_symlinks=False)
+   deny(not (stat.S_ISREG(named.st_mode) or stat.S_ISDIR(named.st_mode)),
+        'KERNEL_RETIREMENT_COLLECTION_KIND_DENIED')
+   child=os.open(name,flags|(os.O_DIRECTORY if stat.S_ISDIR(named.st_mode) else 0),dir_fd=fd)
+   try:
+    deny(fingerprint(named)!=fingerprint(os.fstat(child)),
+         'KERNEL_RETIREMENT_COLLECTION_CHANGED')
+    fact=read_directory(child) if stat.S_ISDIR(named.st_mode) else read_file(child)
+    deny(fingerprint(named)!=fingerprint(os.stat(name,dir_fd=fd,follow_symlinks=False)),
+         'KERNEL_RETIREMENT_COLLECTION_CHANGED')
+    entries.append({'name':name,'fact':fact})
+   finally:os.close(child)
+  deny(names!=sorted(os.listdir(fd)) or fingerprint(before)!=fingerprint(os.fstat(fd)),
+       'KERNEL_RETIREMENT_COLLECTION_CHANGED')
+  return dict(state='DIRECTORY',inventory_sha256=sha(canonical({'entries':entries})),
+              entry_count=sum(1+(row['fact'].get('entry_count',0)) for row in entries),**common(before))
+ rootfd=os.open(root,flags|os.O_DIRECTORY)
+ def collect(path,directory=False,optional=False):
+  handles=[];parent=rootfd;chain=[]
+  def verify_chain():
+   for ancestor,name,opened,initial in chain:
+    deny(initial!=fingerprint(os.fstat(opened)) or initial!=fingerprint(os.stat(name,dir_fd=ancestor,follow_symlinks=False)),
+         'KERNEL_RETIREMENT_COLLECTION_CHANGED')
+  try:
+   parts=Path(path).parts[1:]
+   for part in parts[:-1]:
+    fd=os.open(part,flags|os.O_DIRECTORY,dir_fd=parent)
+    handles.append(fd);chain.append((parent,part,fd,fingerprint(os.fstat(fd))));parent=fd
+   try:fd=os.open(parts[-1],flags|(os.O_DIRECTORY if directory else 0),dir_fd=parent)
+   except FileNotFoundError:
+    if optional:
+     # Absence is evidence about the named parent, not an orphaned descriptor.
+     # Apply the same ancestor identity check used for present objects.
+     verify_chain()
+     try:os.stat(parts[-1],dir_fd=parent,follow_symlinks=False)
+     except FileNotFoundError:pass
+     else:raise RunnerDenied('KERNEL_RETIREMENT_COLLECTION_CHANGED')
+     verify_chain()
+     return {'state':'ABSENT'}
+    raise
+   handles.append(fd);before=os.fstat(fd)
+   result=read_directory(fd) if directory else read_file(fd,virtual=path=='/proc/sys/kernel/random/boot_id')
+   deny(fingerprint(before)!=fingerprint(os.stat(parts[-1],dir_fd=parent,follow_symlinks=False)),
+        'KERNEL_RETIREMENT_COLLECTION_CHANGED')
+   verify_chain()
+   return result
+  finally:
+   for fd in reversed(handles):os.close(fd)
+ try:
+  before=collect('/proc/sys/kernel/random/boot_id')
+  deny(before['sha256']!=sha((current_boot_id+'\n').encode('ascii')),
+       'KERNEL_RETIREMENT_COLLECTION_BOOT_CHANGED')
+  result={path:collect(path) for path in sorted(files)}
+  result.update({path:collect(path,directory=True,optional=path=='/var/lib/serein/kernel/replay')
+                 for path in sorted(directories)})
+  # Large model/history reads must not hide a changed earlier identity/key.
+  # This is still observation, not quiescence of the mutable directory trees.
+  deny(any(result[path]!=collect(path) for path in sorted(files)),
+       'KERNEL_RETIREMENT_COLLECTION_CHANGED')
+  deny(before!=collect('/proc/sys/kernel/random/boot_id'),'KERNEL_RETIREMENT_COLLECTION_BOOT_CHANGED')
+  return result
+ except OSError as exc:raise RunnerDenied('KERNEL_RETIREMENT_COLLECTION_READ_DENIED') from exc
+ finally:os.close(rootfd)
+
+
+def read_retirement_dependencies():
+ """Collect the reachable manager graph through the existing read-only road.
+
+ No start/stop/reload/enable operation is available here. Missing or malformed
+ manager output is UNKNOWN, never an empty graph or independence proof.
+ """
+ import shlex,subprocess
+ properties=('Requires','Wants','BindsTo','PartOf','RequiredBy','WantedBy','Triggers','TriggeredBy',
+             'BoundBy','ConsistsOf','PropagatesStopTo')
+ forward=('Requires','Wants','BindsTo','PartOf','Triggers')
+ pending=set(AUTHORITY_UNITS+OTHER_KERNEL_UNITS)|{
+  'serein-outpost.target','serein-outpost.service','serein-outpost-presentation.service',
+  'serein-https-gateway-adapter.service'}
+ result={}
+ while pending:
+  name=min(pending);pending.remove(name)
+  if name in result:continue
+  try:
+   reply=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
+    '--property='+','.join(('Id','LoadState')+properties),'--',name],capture_output=True,text=True,
+    timeout=15,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+    stdin=subprocess.DEVNULL,close_fds=True)
+  except (OSError,subprocess.SubprocessError) as exc:
+   raise RunnerDenied('KERNEL_RETIREMENT_DEPENDENCY_READ_DENIED') from exc
+  deny(len(reply.stdout)>16384,'KERNEL_RETIREMENT_DEPENDENCY_READ_DENIED')
+  fields={}
+  for line in reply.stdout.splitlines():
+   key,separator,value=line.partition('=')
+   deny(not separator or key in fields,'KERNEL_RETIREMENT_DEPENDENCY_READ_DENIED')
+   fields[key]=value
+  missing_kernel=(name in AUTHORITY_UNITS+OTHER_KERNEL_UNITS and fields.get('LoadState')=='not-found')
+  deny(set(fields)!=set(properties)|{'Id','LoadState'} or fields['Id']!=name
+       or (fields['LoadState']!='loaded' and not missing_kernel)
+       or (missing_kernel and any(fields[key] for key in properties)),
+       'KERNEL_RETIREMENT_DEPENDENCY_READ_DENIED')
+  row={}
+  for key in properties:
+   try:values=shlex.split(fields[key],posix=True)
+   except ValueError as exc:raise RunnerDenied('KERNEL_RETIREMENT_DEPENDENCY_READ_DENIED') from exc
+   deny(any(not value or any(c.isspace() or ord(c)<32 for c in value) or '/' in value
+            for value in values) or len(values)!=len(set(values)),
+        'KERNEL_RETIREMENT_DEPENDENCY_READ_DENIED')
+   row[key]=sorted(values)
+  result[name]=row
+  pending.update(child for key in forward for child in row[key] if child not in result)
+ return result
+
+
+def capture_retirement_packet(root,plan,manifest,layout,*,current_boot_id,
+                              read_dependencies,read_runtime_access):
+ """Join native file/link observations with the owner's bounded read adapters.
+
+ This does not authenticate a successor or acquire transaction ownership.
+ The returned packet is capture-only and must be signed/bound and freshly
+ rechecked by the complete installer before any retirement effect.
+ """
+ root=Path(root)
+ rows=retirement_payload_selection(plan,manifest,layout)
+ def public_facts():
+  result=[]
+  for row in rows:
+   # A fresh generation may encounter a prior retirement interrupted after
+   # some public program removals. Bind absence explicitly, through opened
+   # ancestors; never infer it from a failed read or missing private state.
+   path=root/row['target'].lstrip('/');handles=[]
+   identity=lambda value:(value.st_dev,value.st_ino,value.st_uid,value.st_gid,value.st_mode)
+   try:
+    parent=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    handles.append((parent,None,None,identity(os.fstat(parent))))
+    for name in path.parts[1:-1]:
+     child=os.open(name,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=parent)
+     handles.append((child,parent,name,identity(os.fstat(child))));parent=child
+    try:opened=os.stat(path.name,dir_fd=parent,follow_symlinks=False)
+    except FileNotFoundError:opened=None
+    if opened is None:
+     fact=None
+     try:os.stat(path.name,dir_fd=parent,follow_symlinks=False)
+     except FileNotFoundError:pass
+     else:raise RunnerDenied('KERNEL_RETIREMENT_INSTALLED_PAYLOAD_CHANGED')
+    else:
+     fact=regular(path,fact=True,include_identity=True,expected_custody=(0,0,int(row['mode'],8)))
+     deny((fact[0],fact[4])!=(row['sha256'],row['bytes'])
+          or fact[5:7]!=(opened.st_dev,opened.st_ino),
+          'KERNEL_RETIREMENT_INSTALLED_PAYLOAD_CHANGED')
+    for fd,parent_fd,name,before in handles[1:]:
+     deny(identity(os.fstat(fd))!=before
+          or identity(os.stat(name,dir_fd=parent_fd,follow_symlinks=False))!=before,
+          'KERNEL_RETIREMENT_CAPTURE_CHANGED')
+   except OSError as exc:raise RunnerDenied('KERNEL_RETIREMENT_PUBLIC_READ_DENIED') from exc
+   finally:
+    for fd,_,_,_ in reversed(handles):os.close(fd)
+   result.append(fact)
+  return result
+ before=public_facts()
+ links=read_kernel_enablement_prestate(root)
+ dependencies=read_dependencies()
+ access=read_runtime_access()
+ protected=collect_retirement_preserved_state(root,plan,current_boot_id=current_boot_id)
+ # Do not let a file replacement, changed link or adapter result during a
+ # long model-inventory read masquerade as one coherent prestate.
+ deny(before!=public_facts() or links!=read_kernel_enablement_prestate(root)
+      or dependencies!=read_dependencies() or access!=read_runtime_access(),
+      'KERNEL_RETIREMENT_CAPTURE_CHANGED')
+ packet={'boot_id':current_boot_id,'historical_plan_sha256':sha(canonical(plan)),
+         'public_payload':rows,'public_state':{row['target']:'ABSENT' if fact is None else 'PRESENT'
+                                             for row,fact in zip(rows,before)},
+         'preserved':protected,'enablement_links':links,
+         'dependencies':dependencies,'runtime_access':access}
+ retirement_preservation_binding(plan,manifest,layout,packet,packet,current_boot_id=current_boot_id)
+ return strict_json(canonical(packet))
+
+
+def retirement_preservation_binding(plan,manifest,layout,expected,observed,*,current_boot_id):
+ """Pure retirement prestate comparison; never an execution authorization.
+
+ Expected facts must come from the separately authenticated successor packet;
+ observed facts must be freshly collected by its owner. Equality here neither
+ authenticates those inputs nor proves quiescence/exclusive ownership. This
+ function cannot retire files, stop units, replay a request or alter a lock.
+ Missing protected-state coverage fails closed, including absent-state facts.
+ """
+ rows=retirement_payload_selection(plan,manifest,layout)
+ fields={'boot_id','historical_plan_sha256','public_payload','public_state','preserved',
+         'enablement_links','dependencies','runtime_access'}
+ deny(not isinstance(current_boot_id,str) or not re.fullmatch(
+      r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}',current_boot_id),
+      'KERNEL_RETIREMENT_BOOT_DENIED')
+ # These are preservation roots, never deletion roots. Directory facts bind
+ # a complete collector inventory digest; this comparator cannot certify the
+ # collector or turn a directory's stat into evidence for all its contents.
+ files,directories=retirement_preservation_paths(plan)
+ units=set(AUTHORITY_UNITS+OTHER_KERNEL_UNITS)
+ observers={'serein-outpost.target','serein-outpost.service','serein-outpost-presentation.service',
+            'serein-https-gateway-adapter.service'}
+ for value in (expected,observed):
+  deny(not isinstance(value,dict) or set(value)!=fields
+       or value['boot_id']!=current_boot_id
+       or value['historical_plan_sha256']!=sha(canonical(plan))
+       or value['public_payload']!=rows,'KERNEL_RETIREMENT_PACKET_DENIED')
+  deny(not isinstance(value['public_state'],dict)
+       or set(value['public_state'])!={row['target'] for row in rows}
+       or any(state not in ('PRESENT','ABSENT') for state in value['public_state'].values()),
+       'KERNEL_RETIREMENT_PUBLIC_STATE_DENIED')
+  facts=value['preserved']
+  deny(not isinstance(facts,dict) or set(facts)!=files|directories,
+       'KERNEL_RETIREMENT_PRESERVATION_COVERAGE_DENIED')
+  for path,fact in facts.items():
+   deny(not isinstance(fact,dict),'KERNEL_RETIREMENT_PRESERVATION_FACT_DENIED')
+   if fact=={'state':'ABSENT'}:
+    deny(path!='/var/lib/serein/kernel/replay','KERNEL_RETIREMENT_PRESERVATION_FACT_DENIED')
+    continue
+   keys={'state','sha256','bytes','uid','gid','mode','device','inode','nlink'}
+   if path in directories:keys={'state','inventory_sha256','entry_count','uid','gid','mode','device','inode'}
+   digest='inventory_sha256' if path in directories else 'sha256'
+   deny(set(fact)!=keys or fact['state']!=('DIRECTORY' if path in directories else 'FILE')
+        or not isinstance(fact[digest],str) or not HEX64.fullmatch(fact[digest])
+        or not isinstance(fact['mode'],str) or not re.fullmatch(r'0[0-7]{3}',fact['mode'])
+        or any(type(fact[k]) is not int or fact[k]<0 for k in keys-{'state',digest,'mode'})
+        or fact['inode']==0 or (path in files and fact['nlink']!=1),
+        'KERNEL_RETIREMENT_PRESERVATION_FACT_DENIED')
+  links=value['enablement_links']
+  deny(not isinstance(links,list),'KERNEL_RETIREMENT_LINK_DENIED');seen=set()
+  for link in links:
+   deny(not isinstance(link,dict) or set(link)!={'unit','path','target','fact'},
+        'KERNEL_RETIREMENT_LINK_DENIED')
+   name=link['unit'];path=link['path'];fact=link['fact']
+   deny(name not in units or not isinstance(path,str) or path in seen
+        or not re.fullmatch(r'/(?:etc|run)/systemd/system/[^/]+\.(?:wants|requires)/'+re.escape(name),path)
+        or not isinstance(link['target'],str)
+        or os.path.normpath(os.path.join(os.path.dirname(path),link['target']))!='/etc/systemd/system/'+name
+        or not isinstance(fact,list) or len(fact)!=8
+        or any(type(n) is not int or n<0 for n in fact)
+        or fact[1]==0 or fact[2:4]!=[0,0] or fact[5]!=1
+        or not stat.S_ISLNK(fact[4]),'KERNEL_RETIREMENT_LINK_DENIED')
+   seen.add(path)
+  dependencies=value['dependencies']
+  deny(not isinstance(dependencies,dict) or not (units|observers)<=set(dependencies),
+       'KERNEL_RETIREMENT_DEPENDENCY_COVERAGE_DENIED')
+  for name,deps in dependencies.items():
+   deny(not isinstance(deps,dict) or set(deps)!={'Requires','Wants','BindsTo','PartOf','RequiredBy','WantedBy','Triggers','TriggeredBy','BoundBy','ConsistsOf','PropagatesStopTo'}
+        or any(not isinstance(v,list) or any(not isinstance(n,str) or not n for n in v)
+               or len(v)!=len(set(v)) for v in deps.values()),
+        'KERNEL_RETIREMENT_DEPENDENCY_DENIED')
+  forward=('Requires','Wants','BindsTo','PartOf','Triggers')
+  def closure(roots):
+   seen=set();pending=list(roots)
+   while pending:
+    name=pending.pop()
+    if name in seen:continue
+    deny(name not in dependencies,'KERNEL_RETIREMENT_DEPENDENCY_COVERAGE_DENIED')
+    seen.add(name)
+    pending.extend(child for key in forward for child in dependencies[name][key])
+   return seen
+  # The whole reachable dependency graph is required, not just direct rows.
+  # Cycles are ordinary systemd topology; a missing node remains UNKNOWN.
+  deny(closure(units|observers)!=set(dependencies),
+       'KERNEL_RETIREMENT_DEPENDENCY_COVERAGE_DENIED')
+  deny(bool(closure(observers)&units),'KERNEL_RETIREMENT_OBSERVER_DEPENDENCY_DENIED')
+  access=value['runtime_access']
+  deny(not isinstance(access,dict) or set(access)!={'path','dev','ino','uid','gid','mode','access_acl_hex','default_acl_hex'}
+       or access['path']!='/run/serein/stage1' or access['mode']!='0750'
+       or any(type(access[k]) is not int or access[k]<0 for k in ('dev','ino','uid','gid'))
+       or access['ino']==0 or access['default_acl_hex'] is not None
+       or (access['access_acl_hex'] is not None and (not isinstance(access['access_acl_hex'],str)
+           or not re.fullmatch(r'(?:[0-9a-f]{2})+',access['access_acl_hex']))),
+       'KERNEL_RETIREMENT_RUNTIME_ACCESS_DENIED')
+ deny(expected!=observed,'KERNEL_RETIREMENT_PRESTATE_CHANGED')
+ return {'state':'RETIREMENT_PRESTATE_COMPARED_ONLY','boot_id':current_boot_id,
+         'packet_sha256':sha(canonical(expected)),'authority_effect':'NONE',
+         'exclusive_ownership':'UNPROVEN','mutable_private_state':'NOT_QUIESCED'}
+
+
+def prepare_kernel_retirement(root,successor):
+ """Authenticate historical source and fresh preservation inside Outpost.
+
+ The old request/plan is evidence only; it is never executed or retimestamped.
+ Only the separately verified fresh complete Outpost plan selects retirement.
+ This preparation has no unit/file effects and cannot release a transaction.
+ """
+ from .public_generation_transaction import VerifiedSourcePlan,_retained_transaction_binding
+ deny(type(successor) is not VerifiedSourcePlan or not successor.authority_custody_proven,
+      'KERNEL_RETIREMENT_SUCCESSOR_REQUIRED')
+ fields=successor.as_dict();binding=_retained_transaction_binding(fields)
+ expected=fields.get('kernel_retirement')
+ deny(not isinstance(expected,dict),'KERNEL_RETIREMENT_PACKET_DENIED')
+ root=Path(root)
+ history={path:regular(root/path.lstrip('/'),expected_custody=(0,0,0o600))
+          for path in binding['history']}
+ deny(any(sha(raw)!=binding['history'][path] for path,raw in history.items()),
+      'KERNEL_RETIREMENT_HISTORY_CHANGED')
+ plan_path=next(path for path in history if path.endswith('/plan.json'))
+ historical=strict_json(history[plan_path])
+ anchor=regular(root/str(VERIFY_KEY).lstrip('/'),expected_custody=(0,0,0o644))
+ deny(sha(anchor)!=successor.authority_sha256 or historical.get('authority_sha256')!=sha(anchor),
+      'KERNEL_RETIREMENT_ANCHOR_DENIED')
+ try:
+  load_pem_public_key(anchor).verify(decode(historical['signature']),
+      canonical({k:v for k,v in historical.items() if k!='signature'}))
+ except Exception as exc:raise RunnerDenied('KERNEL_RETIREMENT_SIGNATURE_DENIED') from exc
+ deny(historical.get('current_boot_id')!=binding['prior_boot_id']
+      or historical.get('rollback_selector')!=str(Path(plan_path).parent)
+      or sha(canonical(historical))!=expected.get('historical_plan_sha256'),
+      'KERNEL_RETIREMENT_HISTORY_BINDING_DENIED')
+ source=root/str(SOURCE).lstrip('/')
+ inventory=safe_tree(source)
+ deny('sha256:'+sha(canonical(inventory))!=historical.get('source_inventory_digest'),
+      'KERNEL_RETIREMENT_SOURCE_CHANGED')
+ manifest=read_json(source/'release-manifest.json');layout=read_json(source/'install-layout.json')
+ retirement_payload_selection(historical,manifest,layout)
+ module=load_installer(source,manifest,expected_release=historical['release_digest'])
+ def observe():
+  return capture_retirement_packet(root,historical,manifest,layout,
+      current_boot_id=fields['current_boot_id'],read_dependencies=read_retirement_dependencies,
+      read_runtime_access=lambda:module.capture_runtime_access(root,historical))
+ observed=observe()
+ retirement_preservation_binding(historical,manifest,layout,expected,observed,
+                                 current_boot_id=fields['current_boot_id'])
+ def verify_source():
+  deny(any(regular(root/path.lstrip('/'),expected_custody=(0,0,0o600))!=raw
+           for path,raw in history.items()) or safe_tree(source)!=inventory
+       or regular(root/str(VERIFY_KEY).lstrip('/'),expected_custody=(0,0,0o644))!=anchor,
+       'KERNEL_RETIREMENT_SOURCE_CHANGED')
+ verify_source()
+ return {'plan':historical,'manifest':manifest,'layout':layout,'expected':expected,
+         'observe':observe,'verify_source':verify_source,'runtime_access':lambda:module.capture_runtime_access(root,historical)}
+
+
+def _retirement_stop_units(names):
+ """Native fixed Kernel stop road; no start, timer, reboot or other unit."""
+ import subprocess
+ deny(not isinstance(names,tuple) or not names
+      or len(set(names))!=len(names)
+      or not set(names)<=set(AUTHORITY_UNITS+OTHER_KERNEL_UNITS),
+      'KERNEL_RETIREMENT_UNIT_SET_DENIED')
+ try:
+  subprocess.run(['/usr/bin/systemctl','stop','--',*names],check=True,
+      capture_output=True,stdin=subprocess.DEVNULL,close_fds=True,
+      env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
+ except (OSError,subprocess.SubprocessError) as exc:
+  raise RunnerDenied('KERNEL_RETIREMENT_STOP_FAILED') from exc
+
+
+def _retirement_quiescence():
+ """Require stopped native jobs/process groups, not only an inactive label."""
+ return {**_read_kernel_units(AUTHORITY_UNITS,retirement_controls=True),
+         **_read_kernel_units(OTHER_KERNEL_UNITS,retirement_controls=True)}
+
+
+def quiesce_kernel_retirement(root,successor,prepared,verify_ownership):
+ """First constituent of the complete successor, never a standalone CLI.
+
+ Close activation sockets/timer before their services. Exact protected state
+ and runtime ACL must be unchanged after stop; a failed comparison keeps all
+ program files in place and evidence intact. No predecessor is reactivated.
+ """
+ from .public_generation_transaction import VerifiedSourcePlan
+ deny(type(successor) is not VerifiedSourcePlan or not successor.authority_custody_proven
+      or not callable(verify_ownership),'KERNEL_RETIREMENT_SUCCESSOR_REQUIRED')
+ fields=successor.as_dict();expected=fields.get('kernel_retirement')
+ deny(expected!=prepared['expected'],'KERNEL_RETIREMENT_PACKET_DENIED')
+ verify_ownership();prepared['verify_source']()
+ retirement_preservation_binding(prepared['plan'],prepared['manifest'],prepared['layout'],
+     expected,prepared['observe'](),current_boot_id=fields['current_boot_id'])
+ names=AUTHORITY_UNITS+OTHER_KERNEL_UNITS
+ units={**read_authority_unit_prestate(cleanup=True),**read_other_kernel_unit_prestate(cleanup=True)}
+ # Stop propagation includes inverse BindsTo/PartOf and explicit stop edges,
+ # not only inverse Requires. No unrelated dependent may be stopped.
+ for name in names:
+  deny(any(item not in names for key in ('RequiredBy','BoundBy','ConsistsOf','PropagatesStopTo')
+           for item in expected['dependencies'][name][key]),
+       'KERNEL_RETIREMENT_FOREIGN_DEPENDENT_DENIED')
+ loaded={name for name,value in units.items() if value['LoadState']=='loaded'}
+ groups=(tuple(name for name in names if name in loaded and name.endswith(('.socket','.timer'))),
+         tuple(name for name in reversed(names) if name in loaded and name.endswith('.service')))
+ for group in groups:
+  verify_ownership();prepared['verify_source']()
+  if group:_retirement_stop_units(group)
+ after=_retirement_quiescence()
+ deny(set(after)!=set(names) or any(value['ActiveState'] not in {'inactive','failed'}
+      for value in after.values()),'KERNEL_RETIREMENT_QUIESCENCE_DENIED')
+ verify_ownership()
+ retirement_preservation_binding(prepared['plan'],prepared['manifest'],prepared['layout'],
+     expected,prepared['observe'](),current_boot_id=fields['current_boot_id'])
+ return {'state':'KERNEL_UNITS_QUIESCED','boot_id':fields['current_boot_id'],
+         'source_plan_sha256':sha(successor.encoded),'before':units,'after':after,
+         'preserved':expected['preserved'],'runtime_access':expected['runtime_access'],
+         'stage1':'UNPROVEN','activation':'NONE'}
+
+
+def retire_kernel_in_generation(root,successor,prepared,io,private,public,verify_ownership):
+ """Retire only authenticated Kernel program/enablement in one Outpost install.
+
+ Public program prestate and every write-ahead step remain signed in the new
+ transaction directory. Identity, replay, models, source and old history are
+ never removal targets. Failure retains evidence; there is no rollback or
+ standalone unlock/retirement command.
+ """
+ from .public_generation_transaction import (_effect_row,_signed_transition_record,
+                                             VerifiedSourcePlan)
+ deny(type(successor) is not VerifiedSourcePlan or not successor.authority_custody_proven,
+      'KERNEL_RETIREMENT_SUCCESSOR_REQUIRED')
+ root=Path(root);fields=successor.as_dict();expected=fields.get('kernel_retirement')
+ deny(expected!=prepared['expected'] or io.root!=root
+      or io.receipt_directory!=fields['rollback_selector'],
+      'KERNEL_RETIREMENT_PACKET_DENIED')
+ rows=retirement_payload_selection(prepared['plan'],prepared['manifest'],prepared['layout'])
+ targets={row['target'] for row in rows}
+ prestate_path=io.receipt_directory+'/kernel-retirement-prestate.json'
+ journal_path=io.receipt_directory+'/kernel-retirement-state.json'
+ io.allowed.update(targets|{prestate_path,journal_path})
+ verify_ownership();prepared['verify_source']()
+ retirement_preservation_binding(prepared['plan'],prepared['manifest'],prepared['layout'],
+     expected,prepared['observe'](),current_boot_id=fields['current_boot_id'])
+ images={row['target']:io.read(row['target']) for row in rows}
+ for row in rows:
+  image=images[row['target']]
+  deny(image.get('state')!=expected['public_state'][row['target']]
+       or (image.get('state')=='PRESENT' and any(image.get(k)!=row[k] for k in ('bytes','sha256','mode'))),
+       'KERNEL_RETIREMENT_INSTALLED_PAYLOAD_CHANGED')
+ record={'schema':'SereinOutpostKernelRetirementPrestate/v1',
+         'source_plan_sha256':sha(successor.encoded),'boot_id':fields['current_boot_id'],
+         'packet':expected,'public_images':images}
+ prestate=_effect_row(prestate_path,_signed_transition_record(record,private,public))
+ io.replace(prestate_path,{'target':prestate_path,'state':'ABSENT'},prestate)
+ journal={'target':journal_path,'state':'ABSENT'}
+ def advance(phase,target=None):
+  nonlocal journal
+  verify_ownership();prepared['verify_source']()
+  deny(io.read(prestate_path)!=prestate,'KERNEL_RETIREMENT_PRESTATE_CHANGED')
+  body={'schema':'SereinOutpostKernelRetirementState/v1','source_plan_sha256':sha(successor.encoded),
+        'boot_id':fields['current_boot_id'],'prestate_sha256':prestate['sha256'],
+        'phase':phase,'target':target,'stage1':'UNPROVEN','activation':'NONE'}
+  after=_effect_row(journal_path,_signed_transition_record(body,private,public))
+  io.replace(journal_path,journal,after);journal=after
+ advance('PREPARED')
+ quiesced=quiesce_kernel_retirement(root,successor,prepared,verify_ownership)
+ advance('QUIESCED')
+ def preserved(*,full=False):
+  verify_ownership();prepared['verify_source']()
+  if full:
+   deny(collect_retirement_preserved_state(root,prepared['plan'],current_boot_id=fields['current_boot_id'])
+        !=expected['preserved'],'KERNEL_RETIREMENT_PRESERVED_STATE_CHANGED')
+  else:
+   files,_=retirement_preservation_paths(prepared['plan'])
+   for path in files:
+    fact=expected['preserved'][path]
+    observed=regular(root/path.lstrip('/'),fact=True,include_identity=True,
+        expected_custody=(fact['uid'],fact['gid'],int(fact['mode'],8)))
+    deny(observed!=(fact['sha256'],fact['uid'],fact['gid'],int(fact['mode'],8),
+                   fact['bytes'],fact['device'],fact['inode'],fact['nlink']),
+         'KERNEL_RETIREMENT_PRESERVED_STATE_CHANGED')
+  deny(prepared['runtime_access']()!=expected['runtime_access'],
+       'KERNEL_RETIREMENT_PRESERVED_STATE_CHANGED')
+  units=_retirement_quiescence()
+  deny(any(value['ActiveState'] not in {'inactive','failed'} for value in units.values()),
+       'KERNEL_RETIREMENT_QUIESCENCE_DENIED')
+ def link_fact(parent,name):
+  value=os.stat(name,dir_fd=parent,follow_symlinks=False)
+  return [value.st_dev,value.st_ino,value.st_uid,value.st_gid,value.st_mode,value.st_nlink,
+          value.st_mtime_ns,value.st_ctime_ns]
+ for link in expected['enablement_links']:
+  preserved();advance('LINK_INTENT',link['path'])
+  io.allowed.add(link['path'])
+  with io.parent(link['path']) as (parent,name,recheck):
+   deny(link_fact(parent,name)!=link['fact'] or os.readlink(name,dir_fd=parent)!=link['target'],
+        'KERNEL_RETIREMENT_ENABLEMENT_CHANGED')
+   recheck();os.unlink(name,dir_fd=parent);os.fsync(parent);recheck()
+  advance('LINK_RETIRED',link['path'])
+ for row in rows:
+  preserved();advance('PAYLOAD_INTENT',row['target'])
+  if images[row['target']]['state']=='ABSENT':
+   deny(io.read(row['target'])!=images[row['target']],'KERNEL_RETIREMENT_INSTALLED_PAYLOAD_CHANGED')
+   advance('PAYLOAD_ALREADY_ABSENT',row['target'])
+  else:
+   io.replace(row['target'],images[row['target']],{'target':row['target'],'state':'ABSENT'})
+   advance('PAYLOAD_RETIRED',row['target'])
+ def terminal(*,full=False):
+  preserved(full=full)
+  deny(read_kernel_enablement_prestate(root)!=[]
+       or any(io.read(row['target'])!={'target':row['target'],'state':'ABSENT'} for row in rows),
+       'KERNEL_RETIREMENT_TERMINAL_DENIED')
+  deny(io.read(prestate_path)!=prestate,'KERNEL_RETIREMENT_PRESTATE_CHANGED')
+ terminal(full=True);advance('RETIRED')
+ return {'result':'KERNEL_PROGRAM_RETIRED_PRIVATE_STATE_PRESERVED',
+         'source_plan_sha256':sha(successor.encoded),'boot_id':fields['current_boot_id'],
+         'prestate_sha256':prestate['sha256'],'journal_sha256':journal['sha256'],
+         'payload_count':len(rows),'enablement_count':len(expected['enablement_links']),
+         'removed_count':sum(image['state']=='PRESENT' for image in images.values()),
+         'already_absent_count':sum(image['state']=='ABSENT' for image in images.values()),
+         'quiescence':quiesced['state'],'stage1':'UNPROVEN','activation':'NONE'},terminal
+
+
 def current_host_gate(host_path,boot_id):
  """Consume the canonical data-derived Host witness, not verdict labels."""
  import time
@@ -459,14 +1045,21 @@ def install_request(path):
        or any(not isinstance(expected[key],list) for key in ('files','runtime_objects','directories','immutable_inputs')),'KERNEL_OFFLINE_REQUEST_DENIED')
  return request
 
-def capture_outpost_generation(root):
- """Bind the existing selected generation, without exposing its selector."""
+def read_outpost_generation(root):
+ """Read verified selected bytes; observation is not permission to execute them."""
  from .generation_launcher import read_selector
  from outpost.service import _validate_generation_identity
  root=Path(root)
  selector,generation=read_selector(root/'var/lib/serein-outpost/generation-state/current.json',
                                   root/'usr/share/serein/outpost-generations')
  _validate_generation_identity(selector)
+ return selector,generation
+
+
+def capture_outpost_generation(root):
+ """Bind this executor to the existing selected generation."""
+ root=Path(root)
+ selector,generation=read_outpost_generation(root)
  executing=Path(__file__).absolute()
  expected=generation/'install/kernel_first_install_runner.py'
  deny(root==Path('/') and executing!=expected.absolute(),'KERNEL_OUTPOST_EXECUTOR_GENERATION_DENIED')
@@ -1639,6 +2232,20 @@ def _verify_recovered_target_prestate(module,root,prestate):
 
 
 def recover_failed_construction(root,source,receipt_path,expected):
+ return _failed_construction(root,source,receipt_path,expected)
+
+
+def observe_failed_construction(root,source,receipt_path,expected,retained_lock):
+ """Authenticate the exact interrupted attempt without acquiring/releasing a lock.
+
+ This does not admit recovery, execute compensation, or bypass normal O_EXCL.
+ A legacy lock lacks original process-incarnation evidence; report that gap.
+ """
+ deny(not isinstance(retained_lock,dict),'KERNEL_RECOVERY_LOCK_OBSERVATION_DENIED')
+ return _failed_construction(root,source,receipt_path,expected,retained_lock=retained_lock)
+
+
+def _failed_construction(root,source,receipt_path,expected,*,retained_lock=None):
  """Exact failed-attempt compensation owned by the current Outpost successor.
 
  No restart, continuation, admission or arbitrary service action. The failed
@@ -1697,7 +2304,8 @@ def recover_failed_construction(root,source,receipt_path,expected):
  links=read_kernel_enablement_prestate(root)
  def material_boundary():
   runtime.observe_runtime(expected=expected['preserved_runtime'])
-  deny(current_boot()!=boot or capture_outpost_generation(root)!=expected['current_outpost_generation'],
+  selected=(read_outpost_generation(root)[0] if retained_lock is not None else capture_outpost_generation(root))
+  deny(current_boot()!=boot or selected!=expected['current_outpost_generation'],
        'KERNEL_RECOVERY_CURRENTNESS_CHANGED')
   module.verify_host_identity(root,plan)
   deny(read(directory/'plan.json')!=plan_raw or read(receipt_path)!=receipt_raw or read(request_path)!=request_raw
@@ -1707,22 +2315,34 @@ def recover_failed_construction(root,source,receipt_path,expected):
        or read_kernel_enablement_prestate(root)!=links,'KERNEL_RECOVERY_PRESERVED_STATE_CHANGED')
   deny('sha256:'+sha(canonical(safe_tree(source)))!=plan['source_inventory_digest'],
        'KERNEL_RECOVERY_SOURCE_CHANGED')
+ def installed_boundary():
+  material_boundary()
+  # Validate selector custody before any service effect, not during cleanup.
+  checked=module.journal_read(directory,receipt['receipt_digest'])
+  deny(checked!=journal or read(directory/'phase-journal.json')!=journal_raw,
+       'KERNEL_RECOVERY_RECORD_CHANGED')
+  _verify_install_material(root,plan,{'receipt':plan['rollback_selector']+'/receipt.json'},source=source)
+  # Recheck write-ahead ownership before each service group and compensation.
+  deny(not isinstance(journal.get('ownership'),list) or
+       [row.get('target') for row in journal['ownership']]!=journal['completed'],
+       'KERNEL_RECOVERY_OWNERSHIP_DENIED')
+  for row in journal['ownership']:
+   path=root/row['target'].lstrip('/');info=path.lstat()
+   deny((info.st_dev,info.st_ino)!=(row['device'],row['inode']),
+        'KERNEL_RECOVERY_FOREIGN_TARGET')
+ if retained_lock is not None:
+  from .public_generation_transaction import observe_interrupted_public_lock
+  installed_boundary()
+  observation=observe_interrupted_public_lock(root,expected['request_sha256'],boot,retained_lock)
+  installed_boundary()
+  return {'result':'FAILED_CONSTRUCTION_OBSERVED','boot_id':boot,
+      'rollback_selector':plan['rollback_selector'],'plan_sha256':expected['plan_sha256'],
+      'receipt_sha256':expected['receipt_sha256'],'journal_sha256':expected['journal_sha256'],
+      'request_sha256':expected['request_sha256'],'witness_sha256':expected['witness_sha256'],
+      'current_outpost_generation':expected['current_outpost_generation'],
+      'retained_lock':observation,'mutation_effect':'NONE','recovery_admitted':False,
+      'stage1':'NOT_READY'}
  with public_generation_lock(root,expected['receipt_sha256'],boot):
-  def installed_boundary():
-   material_boundary()
-   # Validate selector custody before any service effect, not during cleanup.
-   checked=module.journal_read(directory,receipt['receipt_digest'])
-   deny(checked!=journal or read(directory/'phase-journal.json')!=journal_raw,
-        'KERNEL_RECOVERY_RECORD_CHANGED')
-   _verify_install_material(root,plan,{'receipt':plan['rollback_selector']+'/receipt.json'},source=source)
-   # Recheck write-ahead ownership before each service group and compensation.
-   deny(not isinstance(journal.get('ownership'),list) or
-        [row.get('target') for row in journal['ownership']]!=journal['completed'],
-        'KERNEL_RECOVERY_OWNERSHIP_DENIED')
-   for row in journal['ownership']:
-    path=root/row['target'].lstrip('/');info=path.lstat()
-    deny((info.st_dev,info.st_ino)!=(row['device'],row['inode']),
-         'KERNEL_RECOVERY_FOREIGN_TARGET')
   installed_boundary()
   before={**read_authority_unit_prestate(cleanup=True),**read_other_kernel_unit_prestate(cleanup=True)}
   stopped=set()
@@ -1783,9 +2403,10 @@ def _unit_active(name,row):
      {'waiting','running','elapsed'} if name==RESIDENCY_UNITS[0] else {'running'})
 
 
-def _read_kernel_units(names,*,service_controls=False,allow_transitional=False):
+def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,retirement_controls=False):
  import subprocess
  deny(type(service_controls) is not bool or type(allow_transitional) is not bool
+      or type(retirement_controls) is not bool or (service_controls and retirement_controls)
       or (service_controls and allow_transitional) or
       (names not in (OPERATIONS_SERVICES,OPERATIONS_ENDPOINT[:1]) if service_controls else names not in (AUTHORITY_UNITS,OTHER_KERNEL_UNITS,RESIDENCY_UNITS)),
       'KERNEL_UNIT_SET_DENIED')
@@ -1796,9 +2417,13 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False):
                'Restart','RestartUSec','NRestarts','Result','KillMode')
  captured={}
  for name in names:
+  selected_properties=properties
+  if retirement_controls:
+   selected_properties+=('Job',)
+   if name.endswith('.service'):selected_properties+=('MainPID','ControlPID','ControlGroup')
   try:
    result=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
-       '--property='+','.join(properties),name],capture_output=True,text=True,
+       '--property='+','.join(selected_properties),name],capture_output=True,text=True,
        timeout=15,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
        stdin=subprocess.DEVNULL,close_fds=True)
   except (OSError,subprocess.SubprocessError) as exc:
@@ -1809,7 +2434,7 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False):
    key,separator,item=line.partition('=')
    deny(not separator or key in value,'KERNEL_AUTHORITY_UNIT_PRESTATE_DENIED')
    value[key]=item
-  deny(set(value)!=set(properties) or value['Id']!=name
+  deny(set(value)!=set(selected_properties) or value['Id']!=name
        or value['LoadState'] not in {'loaded','not-found'}
        or value['NeedDaemonReload'] not in {'yes','no'} or value['DropInPaths']
        or not value['ActiveState'] or not value['SubState'],
@@ -1833,6 +2458,11 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False):
    deny(not (settled or transitional)
         or value['UnitFileState'] not in {'enabled','disabled','static'},
         'KERNEL_AUTHORITY_UNIT_UNSETTLED_DENIED')
+  if retirement_controls:
+   deny(value['ActiveState'] not in {'inactive','failed'} or value['Job']
+        or (name.endswith('.service') and (value['MainPID']!='0' or value['ControlPID']!='0'
+                                         or value['ControlGroup'])),
+        'KERNEL_RETIREMENT_QUIESCENCE_DENIED')
   if service_controls:
    deny(any(not re.fullmatch(r'[0-9]{1,20}',value[key]) for key in
             ('MainPID','ExecMainStartTimestampMonotonic','NRestarts'))

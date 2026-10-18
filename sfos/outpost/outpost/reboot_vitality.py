@@ -137,6 +137,7 @@ class VitalityChronology:
         self._summary_cache = None
         self._summary_failure = None
         self._summary_lock = threading.Lock()
+        self._append_cache = None
 
     def _open(self, *, writing: bool):
         if self.path.is_symlink() or any(parent.is_symlink() for parent in self.path.parents):
@@ -366,16 +367,45 @@ class VitalityChronology:
             raise RebootVitalityError("VITALITY_CHRONOLOGY_CUSTODY_DENIED")
         fd, directories = self._open(writing=True)
         try:
-            rows = self._read_locked(fd)
+            # Reuse parsing only after rehashing every byte of the retained
+            # prefix under the existing exclusive chronology lock. A new
+            # process, changed prefix or truncation still validates cold.
+            initial = os.fstat(fd)
+            cached = self._append_cache
+            digest_state = hashlib.sha256()
+            prefix = None
+            if cached is not None and initial.st_size >= cached[0]:
+                remaining_bytes = cached[0]
+                while remaining_bytes:
+                    block = os.read(fd, min(remaining_bytes, 1024 * 1024))
+                    if not block:
+                        raise RebootVitalityError("VITALITY_CHRONOLOGY_CHANGED_DURING_READ")
+                    digest_state.update(block)
+                    remaining_bytes -= len(block)
+                if digest_state.hexdigest() == cached[1]:
+                    prefix = cached[2]
+            if prefix is None:
+                os.lseek(fd, 0, os.SEEK_SET)
+                digest_state = hashlib.sha256()
+            rows = self._read_locked(fd, prefix, digest_state)
+            after = os.fstat(fd)
+            identity = lambda info: (info.st_dev, info.st_ino, info.st_mode,
+                                     info.st_nlink, info.st_uid, info.st_gid,
+                                     info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            if identity(after) != identity(initial):
+                raise RebootVitalityError("VITALITY_CHRONOLOGY_CHANGED_DURING_READ")
+            self._check_names(fd, directories)
             prior = next((row for row in rows if row["event_id"] == event_id), None)
             if prior:
                 if prior["event_kind"] == event_kind and prior["subject"] == subject and prior["observed_at"] == observed_at and prior["payload"] == candidate:
                     self._sync_locked(fd, directories)
+                    self._append_cache = (initial.st_size, digest_state.hexdigest(), copy.deepcopy(rows))
                     return {**prior, "append_disposition": "IDEMPOTENT_REPLAY"}, rows
                 raise RebootVitalityError("VITALITY_CHRONOLOGY_CONTRADICTION_HOLD")
             body = {"schema": "SereinVitalityChronologyEvent/v1", "sequence": len(rows) + 1, "event_id": event_id, "event_kind": event_kind, "subject": subject, "observed_at": observed_at, "payload": candidate, "previous_hash": rows[-1]["event_hash"] if rows else "GENESIS"}
             record = {**body, "event_hash": _digest(body)}
-            remaining = memoryview(canonical(record))
+            encoded = canonical(record)
+            remaining = memoryview(encoded)
             self._check_names(fd, directories)
             while remaining:
                 written = os.write(fd, remaining)
@@ -383,8 +413,15 @@ class VitalityChronology:
                     raise RebootVitalityError("VITALITY_CHRONOLOGY_WRITE_DENIED")
                 remaining = remaining[written:]
             self._sync_locked(fd, directories)
+            digest_state.update(encoded)
+            rows.append(record)
+            # Callers receive mutable snapshots; never let their mutations
+            # change the private parse evidence retained for the next tick.
+            self._append_cache = (initial.st_size + len(encoded), digest_state.hexdigest(), copy.deepcopy(rows))
+        except BaseException:
+            self._append_cache = None
+            raise
         finally:
             os.close(fd)
             for directory, _, _ in reversed(directories): os.close(directory)
-        rows.append(record)
         return {**record, "append_disposition": "APPENDED"}, rows

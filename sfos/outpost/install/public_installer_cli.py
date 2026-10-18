@@ -295,15 +295,20 @@ def locked_prepared_generation(plan_path, expected_plan_sha256, evidence,
         capture_bootstrap_predecessor, capture_selector_predecessor,
         read_bootstrap_unit)
     plan = recheck_prepared_target(plan_path, expected_plan_sha256, evidence)
+    recovery = ({'recovery_plan':plan} if 'retained_transaction' in plan.as_dict() else {})
     with public_generation_lock(Path('/'), sha(plan.encoded),
-                                plan.as_dict()['current_boot_id']) as lock:
+                                plan.as_dict()['current_boot_id'], **recovery) as lock:
+        verify_ownership=getattr(lock,'verify',lambda:None)
+        verify_ownership()
         recheck_prepared_target(plan_path, expected_plan_sha256, evidence)
         target = evidence['target_prestate']
         images = capture_bootstrap_predecessor(Path('/'), target['bootstrap_prestate'],
                                                read_bootstrap_unit)
         selectors = capture_selector_predecessor(Path('/'), target['installed_prestate'])
+        verify_ownership()
         recheck_prepared_target(plan_path, expected_plan_sha256, evidence)
         staged = _stage_prepared(evidence, release, material, staging_parent)
+        verify_ownership()
         recheck_prepared_target(plan_path, expected_plan_sha256, evidence)
         yield staged, {'image_bytes':images, 'selector_bytes':selectors}, lock
 
@@ -346,34 +351,44 @@ def recorded_prepared_generation(plan_path, expected_plan_sha256, evidence,
     service_account = _bootstrap_service_account() if promote else None
     with locked_prepared_generation(plan_path,expected_plan_sha256,evidence,
                                     release,material,staging_parent=staging_parent) as (staged,capture,lock):
+        verify_ownership=getattr(lock,'verify',lambda:None)
+        def recheck(**kwargs):
+            verify_ownership()
+            return recheck_prepared_target(plan_path,expected_plan_sha256,evidence,**kwargs)
         body = prepared_prestate_receipt(evidence,release,material,capture)
-        plan = recheck_prepared_target(plan_path,expected_plan_sha256,evidence)
+        plan = recheck()
+        if 'retained_transaction' in plan.as_dict():
+            body['retained_transaction']=plan.as_dict()['retained_transaction']
+        retirement=None
+        if 'kernel_retirement' in plan.as_dict():
+            from .kernel_first_install_runner import prepare_kernel_retirement
+            retirement=prepare_kernel_retirement(Path('/'),plan)
+            body['kernel_retirement']=plan.as_dict()['kernel_retirement']
         private, public = load_prestate_signer(plan)
         raw = seal_prestate_receipt(body,private,public)
-        recheck_prepared_target(plan_path,expected_plan_sha256,evidence)
+        recheck()
         receipt = persist_prestate_receipt(Path('/'),plan.as_dict()['rollback_selector'],raw,body,public)
-        recheck_prepared_target(plan_path,expected_plan_sha256,evidence)
+        recheck()
         reread_prestate_receipt(Path('/'),receipt,body,public)
         forward_raw = seal_prepared_forward_state(raw,body,private,public)
         forward = prepared_forward_record(Path('/'),receipt,raw,body,public,create_raw=forward_raw)
-        recheck_prepared_target(plan_path,expected_plan_sha256,evidence)
+        recheck()
         prepared_forward_record(Path('/'),receipt,raw,body,public,journal=forward)
         candidate = prepared_candidate_record(Path('/'),receipt,raw,body,public,
             staged['candidate_selector'],staging_parent,create=True)
-        recheck_prepared_target(plan_path,expected_plan_sha256,evidence)
+        recheck()
         prepared_candidate_record(Path('/'),receipt,raw,body,public,
             staged['candidate_selector'],staging_parent)
         from .transaction import place_inactive_generation
-        recheck_prepared_target(plan_path,expected_plan_sha256,evidence)
+        recheck()
         placement = place_inactive_generation(Path('/'),release,material,
             evidence['target_prestate']['generation_destination'])
-        recheck_prepared_target(plan_path,expected_plan_sha256,evidence,
-            placed={'selector':staged['candidate_selector'],'record':candidate})
+        recheck(placed={'selector':staged['candidate_selector'],'record':candidate})
         prepared_forward_record(Path('/'),receipt,raw,body,public,journal=forward)
         prepared_candidate_record(Path('/'),receipt,raw,body,public,
             staged['candidate_selector'],Path('/usr/share/serein/outpost-generations'),placed=True)
         prepared = {**staged,'prestate_receipt':receipt,'forward_state':forward,
-                    'candidate_record':candidate,'placement':placement,'transaction_lock':lock}
+                    'candidate_record':candidate,'placement':placement,'transaction_lock':dict(lock)}
         if promote:
             from .public_generation_transaction import _GenerationFileIO, _complete_bootstrap_promotion, _target_prestate, _verify_plan
             fields = plan.as_dict()
@@ -382,6 +397,7 @@ def recorded_prepared_generation(plan_path, expected_plan_sha256, evidence,
             if any(immutable_before[key]!=expected_target[key] for key in ('current_boot_id','host_identity','immutable_rows')):
                 raise TransactionError('PUBLIC_TARGET_CHANGED_BEFORE_PROMOTION')
             def invariants():
+                verify_ownership()
                 checked=_verify_plan(_load_plan(Path(plan_path),expected_plan_sha256))
                 if (checked.encoded!=plan.encoded or _target_prestate(Path('/'),fields)!=immutable_before
                         or _bootstrap_service_account()!=service_account):
@@ -399,12 +415,23 @@ def recorded_prepared_generation(plan_path, expected_plan_sha256, evidence,
                             boot_id=fields['current_boot_id'],not_before=not_before,
                             certificate_row=next(row for row in fields['immutable_rows']
                                 if row['target']=='/etc/serein/tls/serein-backend-cert.pem'))
+                        if retirement is not None:
+                            verify_retirement(full=True)
                         return result
                     except TransactionError:
                         if time.monotonic()>=deadline:raise
                         time.sleep(0.5)
             io=(_GenerationFileIO(Path('/'),str(Path(receipt['path']).parent),host_time=fields['host_time'])
                 if 'host_time' in fields else _GenerationFileIO(Path('/'),str(Path(receipt['path']).parent)))
+            if retirement is not None:
+                from .kernel_first_install_runner import retire_kernel_in_generation
+                retirement_result,verify_retirement=retire_kernel_in_generation(
+                    Path('/'),plan,retirement,io,private,public,invariants)
+                base_invariants=invariants
+                def invariants():
+                    base_invariants()
+                    verify_retirement()
+                prepared['kernel_retirement']=retirement_result
             result=_complete_bootstrap_promotion(io,prepared,body,raw,private,public,precheck,invariants,accept)
             yield result
         else:

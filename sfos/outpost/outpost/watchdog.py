@@ -47,7 +47,8 @@ def _write_atomic(path: Path, value: dict[str, Any]) -> None:
 
 
 def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, boot_id_path: Path = BOOT_ID_PATH, observed_at: float | None = None,
-                 host_store: HostVitalityStore | None = None, host_attempts: HostCollectionAttempts | None = None) -> dict[str, Any]:
+                 host_store: HostVitalityStore | None = None, host_attempts: HostCollectionAttempts | None = None,
+                 chronology: VitalityChronology | None = None) -> dict[str, Any]:
     now = time.time() if observed_at is None else observed_at
     try:
         boot_id = boot_id_path.read_text(encoding="ascii").strip()
@@ -85,7 +86,9 @@ def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, 
     }
     state_root = Path(state_root)
     producer_root = state_root.parent / "vitals-producers"
-    chronology = VitalityChronology(state_root / "chronology.jsonl")
+    chronology = VitalityChronology(state_root / "chronology.jsonl") if chronology is None else chronology
+    if chronology.path != state_root / "chronology.jsonl":
+        raise WatchdogError("WATCHDOG_SOURCE_UNAVAILABLE")
     try:
         event, rows = chronology.append_with_snapshot("watchdog:" + digest(state), "OUTPOST_WATCHDOG", "SEREIN_HOST", now, state)
         # Derive prior-boot evidence from the same locked, validated history.

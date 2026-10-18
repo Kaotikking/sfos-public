@@ -174,6 +174,7 @@ class VitalsRuntimeStore:
         self.host_attempts = HostCollectionAttempts(host_root)
         self.producer_root = Path(producer_root)
         self.coordinator_path = self.producer_root.parent / "coordinator/current.json"
+        self.install_observation_path = self.producer_root.parent / "generation-state/install-observation.json"
         self.domain_state_path = Path(domain_state_path)
         self.recovery_path = Path(recovery_path)
         self.chronology = VitalityChronology(self.producer_root.parent / "watchdog/chronology.jsonl")
@@ -372,11 +373,50 @@ class VitalsRuntimeStore:
             except (OSError, ValueError, TypeError):
                 observation = self._unavailable("recovery", "OUTPOST_RECOVERY_WITNESS", "RECOVERY_EVIDENCE_UNAVAILABLE", boot_id, now)
             sources.setdefault("recovery", []).append(observation)
+        install_failed = False
+        if self.install_observation_path.exists():
+            install_failed = True  # Corrupt failure evidence cannot admit Stage 1.
+            try:
+                installed = self._read_json(self.install_observation_path, expected_custody=(0,0,0o644))
+                keys = {'schema','boot_id','generation','observed_at','state','failure_code',
+                        'last_completed_phase','last_completed_step','authority_effect',
+                        'admission_effect','observation_digest'}
+                if (set(installed)!=keys or installed['schema']!='SereinOutpostInstallObservation/v1'
+                        or installed['state']!='FAILED_INSTALL'
+                        or not isinstance(installed['boot_id'],str) or not BOOT.fullmatch(installed['boot_id'])
+                        or not isinstance(installed['generation'],str)
+                        or not re.fullmatch('[0-9a-f]{64}',installed['generation'])
+                        or installed['authority_effect']!='NONE' or installed['admission_effect']!='NONE'
+                        or installed['observation_digest']!=hashlib.sha256(canonical(
+                            {k:v for k,v in installed.items() if k!='observation_digest'})).hexdigest()
+                        or type(installed['last_completed_step']) is not int
+                        or any(not isinstance(installed[key],str) or not re.fullmatch('[A-Z_]{1,96}',installed[key])
+                               for key in ('failure_code','last_completed_phase'))):
+                    raise VitalsRuntimeError('VITALS_INSTALL_OBSERVATION_DENIED')
+                running_generation = _running_generation()
+                if running_generation is None:
+                    raise VitalsRuntimeError('VITALS_INSTALL_OBSERVATION_DENIED')
+                current_failure = (installed['boot_id']==boot_id
+                                   and installed['generation']==running_generation)
+                observation = producer_observation(perspective='recovery',producer='OUTPOST_INSTALLER',
+                    claim='FAILED_INSTALL' if current_failure else 'HISTORICAL_FAILED_INSTALL',
+                    observed_at=installed['observed_at'],boot_id=installed['boot_id'],
+                    evidence_ref='outpost-install:'+installed['observation_digest'],payload=installed)
+                # Historical failure remains attributable, never deleted or
+                # relabelled as the current generation. It grants no admission;
+                # normal current coordinator/Kernel checks still run below.
+                install_failed = current_failure
+            except (OSError,ValueError,TypeError):
+                observation = self._unavailable('recovery','OUTPOST_INSTALLER',
+                    'INSTALL_OBSERVATION_UNAVAILABLE',boot_id,now)
+            sources.setdefault('recovery',[]).append(observation)
         finished = time.time()
         for index, item in enumerate(sources.get("serein", [])):
             if item["claim"] not in {"STAGE1_SUPPORTING_EVIDENCE_AGGREGATED", "STAGE1_READY_CANDIDATE"}:
                 continue
             try:
+                if install_failed:
+                    raise VitalsRuntimeError('VITALS_INSTALL_FAILED_UNADMITTED')
                 selected = coordinator["generation_identity"]
                 if _running_generation() != selected["generation"]:
                     raise VitalsRuntimeError("VITALS_KERNEL_GENERATION_UNAVAILABLE")

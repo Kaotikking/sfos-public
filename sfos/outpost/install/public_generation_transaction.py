@@ -56,6 +56,8 @@ IMAGE_FILES = {
 IMAGE_UNITS = ('serein-outpost-host-witness.service', 'serein-outpost-host-witness.timer', 'serein-outpost.service',
                'serein-outpost-presentation.service', 'serein-https-gateway-adapter.service',
                'serein-outpost.target')
+VITALS_UNITS = ('serein-outpost-presentation.service', 'serein-https-gateway-adapter.service')
+INSTALL_OBSERVATION = '/var/lib/serein-outpost/generation-state/install-observation.json'
 UNIT_PROPERTIES = ('Id', 'LoadState', 'ActiveState', 'SubState', 'UnitFileState',
                    'FragmentPath', 'DropInPaths', 'NeedDaemonReload')
 
@@ -280,13 +282,12 @@ def _only_host_read_phase_changed(before, after):
 
 
 @contextmanager
-def public_generation_lock(root, source_plan_sha256, boot_id):
+def public_generation_lock(root, source_plan_sha256, boot_id, *, recovery_plan=None):
     """The donor's exclusive transaction lock, without its recovery effects.
 
-    Reuse the exact existing lock location and O_EXCL protocol. Never claim,
-    remove or repair someone else's lock. Only this call's ephemeral inode is
-    released. Interrupted-process locks remain explicit evidence, not an
-    automatic instruction to restore or resume a predecessor.
+    Ordinary callers retain O_EXCL. A complete successor may handle the exact
+    retained prior-boot transaction only through a separately verified current
+    source plan. Neither age nor an empty process sample authorizes recovery.
     """
     if (not isinstance(source_plan_sha256, str)
             or not re.fullmatch(r'[0-9a-f]{64}', source_plan_sha256)
@@ -298,6 +299,11 @@ def public_generation_lock(root, source_plan_sha256, boot_id):
     name = '.outpost-public-generation.lock'
     handles, fd, acquired = [], None, None
     payload = canonical({'source_plan_sha256':source_plan_sha256, 'boot_id':boot_id}) + b'\n'
+    if recovery_plan is not None:
+        with _retained_generation_ownership(root, source_plan_sha256, boot_id,
+                                            recovery_plan) as owned:
+            yield owned
+        return
     try:
         current = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         handles.append((current, None, None))
@@ -342,6 +348,334 @@ def public_generation_lock(root, source_plan_sha256, boot_id):
             for descriptor,_,_ in reversed(handles): os.close(descriptor)
 
 
+def _retained_transaction_binding(fields):
+    """Exact signed historical evidence; never a clear-lock switch."""
+    packet = fields.get('retained_transaction')
+    if (not isinstance(packet, dict)
+            or set(packet) != {'prior_boot_id', 'request_sha256', 'retained_lock', 'history'}
+            or not isinstance(packet['prior_boot_id'], str)
+            or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', packet['prior_boot_id'])
+            or packet['prior_boot_id'] == fields.get('current_boot_id')
+            or not isinstance(packet['request_sha256'], str)
+            or not re.fullmatch('[0-9a-f]{64}', packet['request_sha256'])):
+        raise TransactionError('PUBLIC_RETAINED_TRANSACTION_BINDING_DENIED')
+    lock = packet['retained_lock']; history = packet['history']
+    if (not isinstance(lock, dict)
+            or set(lock) != {'sha256', 'device', 'inode', 'ctime_ns', 'mtime_ns'}
+            or any(type(lock[k]) is not int or lock[k] < 0
+                   for k in ('device', 'inode', 'ctime_ns', 'mtime_ns'))
+            or lock['sha256'] != sha(canonical({'source_plan_sha256':packet['request_sha256'],
+                                              'boot_id':packet['prior_boot_id']}) + b'\n')
+            or not isinstance(history, dict) or len(history) != 3):
+        raise TransactionError('PUBLIC_RETAINED_TRANSACTION_BINDING_DENIED')
+    parents = set()
+    for path, digest in history.items():
+        if (not isinstance(path, str) or not re.fullmatch(
+                r'/var/lib/serein/rollback/kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}/(plan|receipt|phase-journal)\.json', path)
+                or not isinstance(digest, str) or not re.fullmatch('[0-9a-f]{64}', digest)):
+            raise TransactionError('PUBLIC_RETAINED_TRANSACTION_BINDING_DENIED')
+        parents.add(str(PurePosixPath(path).parent))
+    if len(parents) != 1:
+        raise TransactionError('PUBLIC_RETAINED_TRANSACTION_BINDING_DENIED')
+    return packet
+
+
+class _OwnedGeneration(dict):
+    """Serializable evidence with a process-local continuity check."""
+    def __init__(self, evidence, verify):
+        super().__init__(evidence)
+        self.verify = verify
+
+
+@contextmanager
+def _retained_generation_ownership(root, source_digest, boot, plan):
+    """Same installer lock, held throughout a fresh complete transaction.
+
+    The old O_EXCL file continues excluding legacy callers. Native flock on
+    that exact inode excludes competing successor installers. Historical
+    bytes are never rewritten. Failure keeps the original file and history;
+    success requires the new signed COMPLETE journal before exact unlink.
+    """
+    import fcntl
+    if (type(plan) is not VerifiedSourcePlan or not plan.authority_custody_proven
+            or sha(plan.encoded) != source_digest
+            or plan.as_dict().get('current_boot_id') != boot):
+        raise TransactionError('PUBLIC_VERIFIED_PLAN_REQUIRED')
+    fields = plan.as_dict(); packet = _retained_transaction_binding(fields)
+    if source_digest == packet['request_sha256']:
+        raise TransactionError('PUBLIC_STALE_REQUEST_DENIED')
+    parent = root/'var/lib/serein/rollback'
+    path = parent/'.outpost-public-generation.lock'
+    handles, fd = [], None
+    body_active = False
+    raw = canonical({'source_plan_sha256':packet['request_sha256'],
+                     'boot_id':packet['prior_boot_id']}) + b'\n'
+    expected = packet['retained_lock']
+    def read_bound(absolute, digest, mode=0o600):
+        target = root/absolute.lstrip('/')
+        chain=[]
+        try:
+            owner=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            chain.append((owner,None,None))
+            for part in target.parent.parts[1:]:
+                child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=owner)
+                chain.append((child,owner,part));owner=child
+            descriptor=os.open(target.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=owner)
+            with os.fdopen(descriptor,'rb') as stream:
+                before=os.fstat(stream.fileno())
+                if (not stat.S_ISREG(before.st_mode) or before.st_nlink!=1
+                        or (before.st_uid,before.st_gid,stat.S_IMODE(before.st_mode))!=(0,0,mode)):
+                    raise TransactionError('PUBLIC_RECOVERY_EVIDENCE_CUSTODY_DENIED')
+                data=stream.read(16*1024*1024+1)
+                after=os.fstat(stream.fileno())
+                named=os.stat(target.name,dir_fd=owner,follow_symlinks=False)
+                fingerprint=lambda item:(item.st_dev,item.st_ino,item.st_size,item.st_mtime_ns,item.st_ctime_ns)
+                if (len(data)>16*1024*1024 or (digest is not None and sha(data)!=digest)
+                        or fingerprint(before)!=fingerprint(after) or fingerprint(before)!=fingerprint(named)):
+                    raise TransactionError('PUBLIC_RECOVERY_EVIDENCE_CHANGED')
+                for child,parent_fd,name in chain[1:]:
+                    opened=os.fstat(child);named=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
+                    if (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino):
+                        raise TransactionError('PUBLIC_RECOVERY_EVIDENCE_DIRECTORY_CHANGED')
+                return data
+        finally:
+            for descriptor,_,_ in reversed(chain):os.close(descriptor)
+    def boundary():
+        if (root/'proc/sys/kernel/random/boot_id').read_text().strip() != boot:
+            raise TransactionError('PUBLIC_BOOT_DRIFT_DENIED')
+        for child, owner, name in handles[1:]:
+            opened=os.fstat(child); named=os.stat(name,dir_fd=owner,follow_symlinks=False)
+            if (opened.st_dev,opened.st_ino)!=(named.st_dev,named.st_ino):
+                raise TransactionError('PUBLIC_LOCK_DIRECTORY_CHANGED')
+        custody=os.fstat(handles[-1][0])
+        if ((custody.st_uid,custody.st_gid)!=(0,0)
+                or stat.S_IMODE(custody.st_mode) not in {0o700,0o755}):
+            raise TransactionError('PUBLIC_LOCK_CUSTODY_DENIED')
+        for item in (os.fstat(fd),os.stat(path.name,dir_fd=handles[-1][0],follow_symlinks=False)):
+            if (not stat.S_ISREG(item.st_mode) or item.st_nlink!=1
+                    or (item.st_uid,item.st_gid,stat.S_IMODE(item.st_mode))!=(0,0,0o600)
+                    or (item.st_dev,item.st_ino,item.st_ctime_ns,item.st_mtime_ns)!=tuple(
+                        expected[k] for k in ('device','inode','ctime_ns','mtime_ns'))):
+                raise TransactionError('PUBLIC_LOCK_OBSERVATION_CHANGED')
+        if os.pread(fd,len(raw)+1,0)!=raw:
+            raise TransactionError('PUBLIC_LOCK_OBSERVATION_CHANGED')
+        for absolute,digest in packet['history'].items():
+            read_bound(absolute,digest)
+    try:
+        current=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        handles.append((current,None,None))
+        for part in parent.parts[1:]:
+            child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=current)
+            handles.append((child,current,part));current=child
+        info=os.fstat(current)
+        if (os.geteuid()!=0 or os.getegid()!=0 or (info.st_uid,info.st_gid)!=(0,0)
+                or stat.S_IMODE(info.st_mode) not in {0o700,0o755}):
+            raise TransactionError('PUBLIC_LOCK_CUSTODY_DENIED')
+        fd=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=current)
+        try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError: raise TransactionError('PUBLIC_TRANSACTION_LOCKED') from None
+        boundary()
+        # The authenticated prior boot excludes its original process. The
+        # retained name excludes O_EXCL entrants and flock excludes successors.
+        # A global /proc sample is not ownership authority; unreadable proc
+        # entries must never be converted to an empty/no-owner observation.
+        body_active = True
+        yield _OwnedGeneration({'path':'/var/lib/serein/rollback/'+path.name,
+               'source_plan_sha256':source_digest,'boot_id':boot,
+               'lock_sha256':expected['sha256'],'retained_transaction':packet},boundary)
+        body_active = False
+        boundary()
+        _verify_retained_successor_complete(root,plan,read_bound)
+        boundary()
+        os.unlink(path.name,dir_fd=current);os.fsync(current)
+    except OSError:
+        if body_active:raise
+        raise TransactionError('PUBLIC_LOCK_IO_DENIED') from None
+    finally:
+        if fd is not None:os.close(fd)
+        for descriptor,_,_ in reversed(handles):os.close(descriptor)
+
+
+def _verify_retained_successor_complete(root, plan, read_bound):
+    """Do not release retained exclusion on a callback or test's say-so."""
+    fields=plan.as_dict(); selector=fields['rollback_selector']
+    if not re.fullmatch(r'/var/lib/serein/rollback/outpost-public-generation-\d{8}T\d{6}Z-[0-9a-f]{12}',selector):
+        raise TransactionError('PUBLIC_RECOVERY_COMPLETION_DENIED')
+    anchor=read_bound('/usr/share/serein/outpost/cognition-verification.pem',
+                      plan.authority_sha256,0o644)
+    public=load_pem_public_key(anchor)
+    raw=read_bound(selector+'/prestate-receipt.json',None)
+    receipt=strict_json(raw)
+    body={key:value for key,value in receipt.items() if key not in {'receipt_signature','receipt_digest'}}
+    verify_prestate_receipt(raw,body,public)
+    if (body.get('source_plan_sha256')!=sha(plan.encoded)
+            or body.get('boot_id')!=fields['current_boot_id']
+            or body.get('retained_transaction')!=fields['retained_transaction']
+            or body.get('kernel_retirement')!=fields.get('kernel_retirement')
+            or body.get('generation_target')!='/usr/share/serein/outpost-generations/'+fields['release_digest'].removeprefix('sha256:')):
+        raise TransactionError('PUBLIC_RECOVERY_COMPLETION_DENIED')
+    journal=strict_json(read_bound(selector+'/forward-state.json',None))
+    unsigned={key:value for key,value in journal.items() if key not in {'state_signature','state_digest'}}
+    expected={key:value for key,value in body.items() if key!='schema'}
+    expected.update(schema='SereinPublicOutpostForwardState/v1',
+                    prestate_receipt_digest=receipt['receipt_digest'],phase='COMPLETE',step=0)
+    if (unsigned!=expected or journal.get('state_digest')!=sha(canonical(
+            {key:value for key,value in journal.items() if key!='state_digest'}))):
+        raise TransactionError('PUBLIC_RECOVERY_COMPLETION_DENIED')
+    try:
+        public.verify(base64.urlsafe_b64decode(journal['state_signature']+'=='),canonical(unsigned))
+    except Exception:
+        raise TransactionError('PUBLIC_RECOVERY_COMPLETION_SIGNATURE_DENIED') from None
+    if 'kernel_retirement' in fields:
+        transaction=strict_json(read_bound(selector+'/transaction-receipt.json',None))
+        signed={key:value for key,value in transaction.items() if key not in {'state_signature','state_digest'}}
+        try:public.verify(base64.urlsafe_b64decode(transaction['state_signature']+'=='),canonical(signed))
+        except Exception:raise TransactionError('PUBLIC_RECOVERY_COMPLETION_SIGNATURE_DENIED') from None
+        retired=signed.get('kernel_retirement',{})
+        if (signed.get('source_plan_sha256')!=sha(plan.encoded)
+                or signed.get('boot_id')!=fields['current_boot_id']
+                or retired.get('result')!='KERNEL_PROGRAM_RETIRED_PRIVATE_STATE_PRESERVED'
+                or retired.get('source_plan_sha256')!=sha(plan.encoded)
+                or retired.get('boot_id')!=fields['current_boot_id']):
+            raise TransactionError('PUBLIC_KERNEL_RETIREMENT_TERMINAL_DENIED')
+        terminal=strict_json(read_bound(selector+'/kernel-retirement-state.json',retired.get('journal_sha256')))
+        terminal_body={key:value for key,value in terminal.items() if key not in {'state_signature','state_digest'}}
+        try:public.verify(base64.urlsafe_b64decode(terminal['state_signature']+'=='),canonical(terminal_body))
+        except Exception:raise TransactionError('PUBLIC_RECOVERY_COMPLETION_SIGNATURE_DENIED') from None
+        if (terminal_body.get('phase')!='RETIRED' or terminal_body.get('source_plan_sha256')!=sha(plan.encoded)
+                or terminal_body.get('boot_id')!=fields['current_boot_id']
+                or terminal_body.get('prestate_sha256')!=retired.get('prestate_sha256')):
+            raise TransactionError('PUBLIC_KERNEL_RETIREMENT_TERMINAL_DENIED')
+        read_bound(selector+'/kernel-retirement-prestate.json',retired.get('prestate_sha256'))
+
+
+def _public_lock_process_identity(raw, pid):
+    """Read Linux proc stat field 22 without splitting a parenthesized comm."""
+    try:
+        text = raw.decode('ascii')
+        prefix, fields = text.rsplit(') ', 1)
+        if int(prefix.split(' (', 1)[0]) != pid:
+            raise ValueError
+        start = fields.split()[19]  # fields starts at stat field 3 (state).
+        if not start.isdigit():
+            raise ValueError
+        return {'pid': pid, 'start_time': start}
+    except (UnicodeError, ValueError, IndexError):
+        raise TransactionError('PUBLIC_LOCK_PROCESS_OBSERVATION_DENIED') from None
+
+
+def _public_lock_fd_owners(device, inode, observer_fd, *, proc=Path('/proc')):
+    """Read-only descriptor evidence; absence never grants lock takeover.
+
+    An unreadable or changing process makes this observation incomplete. The
+    caller must not interpret a partial scan, dead remembered PID, or age as
+    recovery authority. Only this observer's exact descriptor is excluded.
+    """
+    owners = []
+    try:
+        processes = sorted((p for p in proc.iterdir() if p.name.isdecimal()),
+                           key=lambda p: int(p.name))
+        for process in processes:
+            pid = int(process.name)
+            before = _public_lock_process_identity((process/'stat').read_bytes(), pid)
+            # Keep scandir's descriptor alive while examining /proc/self/fd;
+            # listing then closing it would manufacture a disappeared entry.
+            with os.scandir(process/'fd') as descriptors:
+                for descriptor in descriptors:
+                    if not descriptor.name.isdecimal():
+                        raise TransactionError('PUBLIC_LOCK_PROCESS_OBSERVATION_DENIED')
+                    fd = int(descriptor.name)
+                    if (pid, fd) == (os.getpid(), observer_fd):
+                        continue
+                    info = descriptor.stat()
+                    if (info.st_dev, info.st_ino) == (device, inode):
+                        owners.append({**before, 'fd': fd})
+            after = _public_lock_process_identity((process/'stat').read_bytes(), pid)
+            if before != after:
+                raise TransactionError('PUBLIC_LOCK_PROCESS_OBSERVATION_CHANGED')
+    except OSError:
+        raise TransactionError('PUBLIC_LOCK_PROCESS_OBSERVATION_DENIED') from None
+    return sorted(owners, key=lambda row: (row['pid'], row['fd']))
+
+
+def observe_interrupted_public_lock(root, source_plan_sha256, boot_id, expected):
+    """Bind retained-lock bytes/custody and descriptor observations, no effects.
+
+    This is supporting evidence for the existing failed-construction recovery,
+    NOT permission to clear, adopt, rename, resume, or bypass the O_EXCL lock.
+    Legacy lock bytes contain no owner incarnation. Even two empty descriptor
+    samples cannot establish exclusive recovery ownership or authenticate the
+    failed plan/journal. Those remain separate mandatory recovery predicates.
+    """
+    if (not isinstance(source_plan_sha256, str)
+            or not re.fullmatch(r'[0-9a-f]{64}', source_plan_sha256)
+            or not isinstance(boot_id, str)
+            or not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', boot_id)
+            or not isinstance(expected, dict)
+            or set(expected) != {'sha256', 'device', 'inode', 'ctime_ns', 'mtime_ns'}
+            or not isinstance(expected['sha256'], str)
+            or not re.fullmatch(r'[0-9a-f]{64}', expected['sha256'])
+            or any(type(expected[k]) is not int or expected[k] < 0
+                   for k in ('device', 'inode', 'ctime_ns', 'mtime_ns'))):
+        raise TransactionError('PUBLIC_LOCK_BINDING_DENIED')
+    root = Path(os.path.abspath(root))
+    parent = root/'var/lib/serein/rollback'
+    name = '.outpost-public-generation.lock'
+    payload = canonical({'source_plan_sha256': source_plan_sha256, 'boot_id': boot_id}) + b'\n'
+    if sha(payload) != expected['sha256']:
+        raise TransactionError('PUBLIC_LOCK_BINDING_DENIED')
+    handles, fd = [], None
+    try:
+        current = os.open('/', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        handles.append((current, None, None))
+        for part in parent.parts[1:]:
+            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            handles.append((child, current, part)); current = child
+        info = os.fstat(current)
+        if (os.geteuid() != 0 or os.getegid() != 0 or info.st_uid != 0 or info.st_gid != 0
+                or stat.S_IMODE(info.st_mode) not in {0o700, 0o755}):
+            raise TransactionError('PUBLIC_LOCK_CUSTODY_DENIED')
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=current)
+
+        def boundary():
+            for child, owner, part in handles[1:]:
+                opened = os.fstat(child); named = os.stat(part, dir_fd=owner, follow_symlinks=False)
+                if (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino):
+                    raise TransactionError('PUBLIC_LOCK_DIRECTORY_CHANGED')
+            parent_info = os.fstat(current)
+            if ((parent_info.st_uid, parent_info.st_gid) != (0, 0)
+                    or stat.S_IMODE(parent_info.st_mode) not in {0o700, 0o755}):
+                raise TransactionError('PUBLIC_LOCK_CUSTODY_DENIED')
+            opened = os.fstat(fd); named = os.stat(name, dir_fd=current, follow_symlinks=False)
+            for row in (opened, named):
+                if (not stat.S_ISREG(row.st_mode) or row.st_nlink != 1
+                        or (row.st_uid, row.st_gid, stat.S_IMODE(row.st_mode)) != (0, 0, 0o600)
+                        or (row.st_dev, row.st_ino, row.st_ctime_ns, row.st_mtime_ns) != tuple(
+                            expected[k] for k in ('device', 'inode', 'ctime_ns', 'mtime_ns'))):
+                    raise TransactionError('PUBLIC_LOCK_OBSERVATION_CHANGED')
+            if os.pread(fd, len(payload) + 1, 0) != payload:
+                raise TransactionError('PUBLIC_LOCK_OBSERVATION_CHANGED')
+
+        boundary()
+        first = _public_lock_fd_owners(expected['device'], expected['inode'], fd)
+        boundary()
+        second = _public_lock_fd_owners(expected['device'], expected['inode'], fd)
+        boundary()
+        if first != second:
+            raise TransactionError('PUBLIC_LOCK_PROCESS_OBSERVATION_CHANGED')
+        return {'path': '/var/lib/serein/rollback/' + name, **expected,
+                'source_plan_sha256': source_plan_sha256, 'boot_id': boot_id,
+                'descriptor_holders': second, 'owner_incarnation': 'NOT_RECORDED',
+                'continuous_process_inventory': 'UNPROVEN',
+                'exclusive_recovery_ownership': 'UNPROVEN', 'mutation_effect': 'NONE',
+                'recovery_admitted': False}
+    except OSError:
+        raise TransactionError('PUBLIC_LOCK_IO_DENIED') from None
+    finally:
+        if fd is not None: os.close(fd)
+        for descriptor, _, _ in reversed(handles): os.close(descriptor)
+
+
 @dataclass(frozen=True, init=False)
 class FixtureVerifiedSourcePlan:
     """Signed source identity only, not current-boot or installation authority."""
@@ -367,6 +701,47 @@ class VerifiedSourcePlan(FixtureVerifiedSourcePlan):
         object.__setattr__(self, "authority_custody_proven", True)
 
 
+def _interrupted_kernel_binding(fields):
+    """Closed, signed successor-only binding; never a generic stale-lock flag."""
+    packet = fields.get('interrupted_kernel')
+    if (not isinstance(packet, dict)
+            or set(packet) != {'receipt_path', 'expected', 'retained_lock'}
+            or not isinstance(packet['receipt_path'], str)
+            or not re.fullmatch(r'/var/lib/serein/rollback/kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}/receipt.json', packet['receipt_path'])):
+        raise TransactionError('PUBLIC_INTERRUPTED_KERNEL_BINDING_DENIED')
+    expected = packet['expected']; lock = packet['retained_lock']
+    hashes = {'plan_sha256', 'receipt_sha256', 'journal_sha256', 'witness_sha256', 'request_sha256'}
+    if (not isinstance(expected, dict)
+            or set(expected) != hashes | {'current_outpost_generation', 'preserved_runtime'}
+            or any(not isinstance(expected[k], str) or not re.fullmatch('[0-9a-f]{64}', expected[k]) for k in hashes)
+            or not isinstance(lock, dict)
+            or set(lock) != {'sha256', 'device', 'inode', 'ctime_ns', 'mtime_ns'}
+            or any(type(lock[k]) is not int or lock[k] < 0 for k in ('device', 'inode', 'ctime_ns', 'mtime_ns'))):
+        raise TransactionError('PUBLIC_INTERRUPTED_KERNEL_BINDING_DENIED')
+    payload = canonical({'source_plan_sha256': expected['request_sha256'],
+                         'boot_id': fields.get('current_boot_id')}) + b'\n'
+    current = expected['current_outpost_generation']; runtime = expected['preserved_runtime']
+    if (lock['sha256'] != sha(payload) or not isinstance(current, dict)
+            or set(current) != {'schema', 'generation', 'release_digest', 'predecessor_receipt_sha256',
+                                'inventory_digest', 'selector_digest'}
+            or current.get('schema') != 'SereinOutpostGenerationSelector/v1'
+            or any(not isinstance(current[k], str) or not re.fullmatch('[0-9a-f]{64}', current[k])
+                   for k in ('generation', 'predecessor_receipt_sha256', 'inventory_digest', 'selector_digest'))
+            or current['release_digest'] != 'sha256:' + current['generation']
+            or current['selector_digest'] != sha(canonical({k:v for k,v in current.items() if k != 'selector_digest'}))
+            or current['release_digest'] == fields.get('release_digest')
+            or not isinstance(runtime, dict)
+            or set(runtime) != {'boot_id', 'pid', 'start_time', 'binary_sha256', 'binary_bytes', 'model_root'}
+            or runtime.get('boot_id') != fields.get('current_boot_id')
+            or type(runtime.get('pid')) is not int or runtime['pid'] < 1
+            or not isinstance(runtime.get('start_time'), str) or not re.fullmatch('[0-9]+', runtime['start_time'])
+            or not isinstance(runtime.get('binary_sha256'), str) or not re.fullmatch('[0-9a-f]{64}', runtime['binary_sha256'])
+            or type(runtime.get('binary_bytes')) is not int or runtime['binary_bytes'] < 1
+            or runtime.get('model_root') != '/var/lib/ollama/models'):
+        raise TransactionError('PUBLIC_INTERRUPTED_KERNEL_BINDING_DENIED')
+    return packet
+
+
 def _verify_plan_bytes(plan, authority_bytes, expected_authority_sha256):
     """Pure signed-plan proof; caller supplies an independently pinned anchor.
 
@@ -375,10 +750,23 @@ def _verify_plan_bytes(plan, authority_bytes, expected_authority_sha256):
     """
     required = {"schema", "repository", "repo_url", "ref", "commit", "tree", "archive_url", "archive_sha256", "release_digest", "authority_key_id", "authority_sha256", "signature", "current_boot_id", "immutable_rows", "rollback_selector"}
     if (not isinstance(plan, dict) or not required <= set(plan)
-            or set(plan) - required not in (set(), {'recovery'}, {'host_time'})
+            or set(plan) - required not in (set(), {'recovery'}, {'host_time'}, {'interrupted_kernel'},
+                                           {'retained_transaction'}, {'retained_transaction','host_time'},
+                                           {'retained_transaction','kernel_retirement'},
+                                           {'retained_transaction','kernel_retirement','host_time'})
             or plan.get("schema") != "SereinPublicOutpostGenerationPlan/v1"):
         raise TransactionError("PUBLIC_PLAN_SHAPE_DENIED")
     plan = strict_json(canonical(plan))
+    if 'interrupted_kernel' in plan:
+        _interrupted_kernel_binding(plan)
+    if 'retained_transaction' in plan:
+        _retained_transaction_binding(plan)
+    if 'kernel_retirement' in plan:
+        if (not isinstance(plan['kernel_retirement'],dict)
+                or set(plan['kernel_retirement'])!={'boot_id','historical_plan_sha256','public_payload','public_state',
+                    'preserved','enablement_links','dependencies','runtime_access'}
+                or plan['kernel_retirement']['boot_id']!=plan['current_boot_id']):
+            raise TransactionError('PUBLIC_KERNEL_RETIREMENT_BINDING_DENIED')
     if 'host_time' in plan:
         host_time_configuration(plan['host_time'])
     if 'recovery' in plan:
@@ -486,6 +874,8 @@ def preflight_target(plan):
     """
     if type(plan) is not VerifiedSourcePlan or not plan.authority_custody_proven:
         raise TransactionError("PUBLIC_VERIFIED_PLAN_REQUIRED")
+    if 'interrupted_kernel' in plan.as_dict():
+        _observe_bound_interrupted_kernel(Path('/'), plan)
     before = _target_prestate(Path("/"), plan.as_dict())
     recovery = 'recovery' in plan.as_dict()
     destination = (retained_recovery_prestate(Path('/'),plan.as_dict()) if recovery
@@ -536,6 +926,29 @@ def preflight_target(plan):
         raise TransactionError('PUBLIC_GENERATION_DESTINATION_CHANGED')
     return {**before, "installed_prestate": installed, 'bootstrap_prestate': bootstrap,
             'generation_destination':destination}
+
+
+def _observe_bound_interrupted_kernel(root, plan, *, promoted=False):
+    """Consume the signed preflight through the existing read-only verifier.
+
+    The fixed Kernel inbox and receipt selector remain private on the target.
+    This may run from the incoming complete Outpost installer; it does not
+    execute the inactive generation as an admitted Outpost/domain authority.
+    """
+    if type(plan) is not VerifiedSourcePlan or not plan.authority_custody_proven:
+        raise TransactionError('PUBLIC_VERIFIED_PLAN_REQUIRED')
+    from . import kernel_first_install_runner as runner
+    fields = plan.as_dict(); packet = _interrupted_kernel_binding(fields)
+    expected = strict_json(canonical(packet['expected']))
+    if promoted:
+        selected, _ = runner.read_outpost_generation(root)
+        if (selected['release_digest'] != fields['release_digest']
+                or selected['predecessor_receipt_sha256'] != sha(plan.encoded)):
+            raise TransactionError('PUBLIC_INTERRUPTED_KERNEL_SUCCESSOR_DENIED')
+        expected['current_outpost_generation'] = selected
+    return runner.observe_failed_construction(root,
+        Path(root)/'var/lib/serein-outpost/kernel/source/sfos/kernel',
+        Path(root)/packet['receipt_path'].lstrip('/'), expected, packet['retained_lock'])
 
 
 def prospective_generation_prestate(root, release_digest):
@@ -865,6 +1278,15 @@ def verify_prestate_receipt(raw, expected, public):
     value = strict_json(raw)
     required = {'schema','source_plan_sha256','boot_id','generation_target',
                 'selector_pre','image_files','unit_prestate'}
+    if 'retained_transaction' in expected:
+        required.add('retained_transaction')
+        _retained_transaction_binding({'retained_transaction':expected['retained_transaction'],
+                                      'current_boot_id':expected.get('boot_id')})
+    if 'kernel_retirement' in expected:
+        required.add('kernel_retirement')
+        if ('retained_transaction' not in expected or not isinstance(expected['kernel_retirement'],dict)
+                or expected['kernel_retirement'].get('boot_id')!=expected['boot_id']):
+            raise TransactionError('PUBLIC_KERNEL_RETIREMENT_BINDING_DENIED')
     if (set(expected) != required or expected['schema'] != 'SereinPublicOutpostPrestateReceipt/v1'
             or set(value) != required | {'receipt_signature','receipt_digest'}):
         raise TransactionError('PUBLIC_PRESTATE_RECEIPT_DENIED')
@@ -1420,7 +1842,8 @@ def read_generation_witness(root, *, expected_generation, boot_id, not_before,
             'admission':'UNPROVEN','authority_effect':'NONE','mutation_effect':'NONE'}
 
 
-def read_vitals_witness(*, expected_generation, boot_id, not_before, certificate_row):
+def read_vitals_witness(*, expected_generation, boot_id, not_before, certificate_row,
+                       failed_install_digest=None):
     """Supporting local presentation/TLS proof, never public-edge acceptance.
 
     Reuse the installed fixed edge and its immutable certificate. No secret
@@ -1434,12 +1857,32 @@ def read_vitals_witness(*, expected_generation, boot_id, not_before, certificate
     from outpost import vitals_edge
     from outpost.http_readonly import html_body
     from outpost.service import validate_coordinator_witness
+    from outpost.vitals_aggregation import validate_producer
+
+    if failed_install_digest is not None and (not isinstance(failed_install_digest,str)
+            or not re.fullmatch('[0-9a-f]{64}',failed_install_digest)):
+        raise TransactionError('PUBLIC_VITALS_FAILURE_BINDING_DENIED')
 
     def projection(raw):
         value=strict_json(raw)
         if (not vitals_edge._surface_ready(raw) or value['current_boot_id']!=boot_id
                 or not not_before<=value['generated_at']<=time.time()):
             raise TransactionError('PUBLIC_VITALS_PROJECTION_DENIED')
+        if failed_install_digest is not None:
+            rows=[item for item in value['sections']['recovery']['perspectives']
+                  if item['producer']=='OUTPOST_INSTALLER']
+            if len(rows)!=1:
+                raise TransactionError('PUBLIC_VITALS_FAILURE_BINDING_DENIED')
+            row=validate_producer({k:v for k,v in rows[0].items() if k!='freshness'})
+            observation=row['payload']
+            if (row['claim']!='FAILED_INSTALL' or row['boot_id']!=boot_id
+                    or observation.get('state')!='FAILED_INSTALL'
+                    or observation.get('boot_id')!=boot_id
+                    or observation.get('generation')!=expected_generation['generation']
+                    or observation.get('observation_digest')!=failed_install_digest
+                    or sha(canonical({k:v for k,v in observation.items() if k!='observation_digest'}))!=failed_install_digest):
+                raise TransactionError('PUBLIC_VITALS_FAILURE_BINDING_DENIED')
+            return value
         rows=[item for item in value['sections']['domains']['perspectives']
               if item['producer']=='OUTPOST_DOMAIN_COORDINATOR']
         if len(rows)!=1 or 'coordinator' not in rows[0]['payload']:
@@ -1490,7 +1933,8 @@ def read_vitals_witness(*, expected_generation, boot_id, not_before, certificate
         _read_target_fact(Path('/'),'/etc/serein/tls/serein-backend-cert.pem',expected=certificate_row)
     except (OSError,ValueError,KeyError,TypeError,http.client.HTTPException) as error:
         raise TransactionError('PUBLIC_VITALS_ACCEPTANCE_DENIED') from error
-    return {'result':'LOCAL_VITALS_JSON_HTML_OBSERVED','boot_id':boot_id,
+    return {'result':('LOCAL_VITALS_FAILURE_JSON_HTML_OBSERVED' if failed_install_digest is not None
+                      else 'LOCAL_VITALS_JSON_HTML_OBSERVED'),'boot_id':boot_id,
             'generation':expected_generation['generation'],
             'local_projection':local['projection_digest'],'api_projection':api['projection_digest'],
             'html_projection':rendered['projection_digest'],'certificate_sha256':certificate_row['sha256'],
@@ -1990,6 +2434,7 @@ class _GenerationFileIO:
         self.last_time_checks = {}
         self.first_time_failure = None
         self.allowed = {item[0] for item in IMAGE_FILES.values()} | {
+            INSTALL_OBSERVATION,
             '/var/lib/serein-outpost/generation-state/current.json',
             '/var/lib/serein-outpost/generation-state/lkg.json',
             receipt_directory+'/forward-state.json',
@@ -2046,6 +2491,14 @@ class _GenerationFileIO:
 
     def read(self,absolute):
         with self.parent(absolute) as (fd,name,_):return self._read(fd,name,absolute)
+
+    def selected_generation(self):
+        from .generation_launcher import read_selector, LaunchDenied
+        try:
+            return read_selector(self.root/'var/lib/serein-outpost/generation-state/current.json',
+                                 self.root/'usr/share/serein/outpost-generations')[0]
+        except LaunchDenied:
+            raise TransactionError('PUBLIC_SELECTOR_READBACK_DENIED') from None
 
     def replace(self,absolute,before,after):
         if before.get('target')!=absolute or after.get('target')!=absolute:
@@ -2173,9 +2626,10 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
     """Complete the existing donor transaction, not a second installer.
 
     Called under the same verified-plan lock after exact inactive placement.
-    Candidate checks never grant admission. Failure compensates only this
-    invocation's exact captured changes, never substitutes LKG or resumes an
-    old journal. Current/LKG custody and unprivileged units remain unchanged.
+    Candidate checks never grant admission. Failure preserves the captured
+    prestate and failed generation as evidence; it never selects or starts a
+    predecessor. A subsequent attempt needs a new complete generation and
+    fresh authority, not replay of this journal. Lock ownership is unchanged.
     """
     verify_prestate_receipt(prestate_raw,body,public)
     policy = io.host_time
@@ -2244,14 +2698,21 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
         if (selected.get('target') != current['target']
                 or strict_json(base64.b64decode(selected['content_b64'], validate=True)) != selector):
             raise TransactionError('PUBLIC_RETAINED_SELECTOR_DENIED')
-    started=False
+    startup_unchanged = all(row['pre']==row['post'] for row in body['image_files']
+                            if row['target'] in {target for target,_ in IMAGE_FILES.values()})
+    vitals_cutover_complete = not startup_unchanged
     try:
         for index,name in enumerate(reversed(unit_names),1):
             verify_invariants()
-            if body['unit_prestate'][name]['ActiveState']=='active':io.unit('stop',name)
+            if (body['unit_prestate'][name]['ActiveState']=='active'
+                    and not (startup_unchanged and name in VITALS_UNITS)):
+                io.unit('stop',name)
             advance('PREPARED',index)
         for index,row in enumerate(body['image_files'],1):
-            verify_invariants();io.replace(row['target'],row['pre'],row['post']);advance('IMAGE',index)
+            verify_invariants()
+            if io.read(row['target'])!=row['pre']:raise TransactionError('PUBLIC_EFFECT_CAS_DENIED')
+            if row['pre']!=row['post']:io.replace(row['target'],row['pre'],row['post'])
+            advance('IMAGE',index)
         io.unit('daemon-reload');advance('DAEMON_RELOAD')
         time_witness = None
         if policy is not None:
@@ -2262,10 +2723,16 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
         # unadmitted. Only current moves, atomically, after all image writes.
         if io.read(lkg['target'])!=lkg:raise TransactionError('PUBLIC_LKG_SELECTOR_CAS_DENIED')
         verify_invariants();io.replace(current['target'],current,selected);advance('SELECTORS')
+        if startup_unchanged:
+            for name in reversed(VITALS_UNITS):
+                verify_invariants();io.unit('stop',name)
+                if io.unit_state(name)['ActiveState'] not in {'inactive','failed'}:
+                    raise TransactionError('PUBLIC_VITALS_READINESS_DENIED')
+            vitals_cutover_complete = True
         not_before=time.time()
         # Existing enablement is retained exactly; no wants link is changed.
         advance('TARGET_ENABLED')
-        started=True;io.unit('start','serein-outpost.target');advance('TARGET_STARTED')
+        io.unit('start','serein-outpost.target');advance('TARGET_STARTED')
         units={name:io.unit_state(name) for name in IMAGE_UNITS}
         if (units['serein-outpost.target']['ActiveState']!='active'
                 or units['serein-outpost.target']['UnitFileState']!='enabled'
@@ -2302,6 +2769,14 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
                 'prestate_receipt_digest':strict_json(prestate_raw)['receipt_digest'],
                 'current_boot_witness':witness,'outpost_admission':'UNPROVEN',
                 'sfos_admission':'UNPROVEN','stage1':'UNPROVEN','downstream_activation':'NONE'}
+        if 'kernel_retirement' in body:
+            retirement=prepared.get('kernel_retirement')
+            if (not isinstance(retirement,dict)
+                    or retirement.get('result')!='KERNEL_PROGRAM_RETIRED_PRIVATE_STATE_PRESERVED'
+                    or retirement.get('source_plan_sha256')!=body['source_plan_sha256']
+                    or retirement.get('boot_id')!=body['boot_id']):
+                raise TransactionError('PUBLIC_KERNEL_RETIREMENT_TERMINAL_DENIED')
+            result['kernel_retirement']=retirement
         if policy is not None:
             result['host_time'] = {'before':time_before, 'after':time_witness,
                                   'clock_effect':clock_effect,
@@ -2310,7 +2785,11 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
             result['preserved_lkg_selector'] = strict_json(base64.b64decode(lkg['content_b64']))
             result['preserved_lkg_sha256'] = lkg['sha256']
         path=io.receipt_directory+'/transaction-receipt.json'
-        io.replace(path,{'target':path,'state':'ABSENT'},_effect_row(path,_signed_transition_record(result,private,public)))
+        # This write precedes the terminal journal commit. It cannot itself
+        # claim that commit succeeded, including after a crash or fsync error.
+        supporting = {**result, 'result':'INSTALLATION_WITNESS_RECORDED',
+                      'terminal_journal_required':'forward-state.json:COMPLETE'}
+        io.replace(path,{'target':path,'state':'ABSENT'},_effect_row(path,_signed_transition_record(supporting,private,public)))
         advance('COMPLETE')
         return result
     except BaseException as failure:
@@ -2343,35 +2822,111 @@ def _complete_bootstrap_promotion(io,prepared,body,prestate_raw,private,public,
                 if key in {'observation_read','synchronized','offset_in_bounds',
                            'LinkNTPServers','RuntimeNTPServers','SystemNTPServers',
                            'FallbackNTPServers','ServerName','ServerAddress'} and type(value) is bool}
-        # No speculative cleanup, predecessor selection, disk restore or reboot.
-        # If concurrent state/immutable identity changed, stop without overwrite.
+        # A failed successor is not permission to reactivate its predecessor.
+        # Keep image/selector bytes and the signed prestate as evidence. Stop
+        # only this transaction's Outpost units; never repair the retained lock,
+        # rewrite history, rewind Host time, or claim failed bytes are accepted.
         try:
             verify_invariants()
             if io.read(lkg['target'])!=lkg:raise TransactionError('PUBLIC_RECOVERY_LKG_CHANGED')
-            if started:
-                for name in reversed(unit_names):io.unit('stop',name)
-            elif policy is not None:
-                io.unit('stop', HOST_TIME_UNIT)
-            for row in [dict(target=current['target'],pre=current,post=selected),*reversed(body['image_files'])]:
-                observed=io.read(row['target'])
-                if observed==row['post']:io.replace(row['target'],observed,row['pre'])
-                elif observed!=row['pre']:raise TransactionError('PUBLIC_RECOVERY_CAS_DENIED')
-            io.unit('daemon-reload')
-            for name in unit_names:
-                if body['unit_prestate'][name]['ActiveState']=='active':io.unit('start',name)
-            # Starting the captured target may pull in a dependency that was
-            # inactive before this transaction. Command success isn't parity.
-            for name in reversed(unit_names):
-                if (body['unit_prestate'][name]['ActiveState']=='inactive'
-                        and io.unit_state(name)['ActiveState']!='inactive'):
+            # Only the fully placed, hash-verified CURRENT successor may keep
+            # or start its independent read-only observer after a failure.
+            # Never select/start predecessor material or a partially placed image.
+            observer_safe = False
+            retained_observer = False
+            try:
+                observer_safe = (io.read(current['target'])==selected
+                    and all(io.read(row['target'])==row['post'] for row in body['image_files'])
+                    and io.selected_generation()==selector)
+                retained_observer = (startup_unchanged and io.read(current['target'])==current
+                    and io.selected_generation()==strict_json(base64.b64decode(current['content_b64'])))
+            except (OSError, ValueError, TransactionError):
+                pass
+            observation = {'schema':'SereinOutpostInstallObservation/v1',
+                'boot_id':body['boot_id'],'generation':selector['generation'],
+                'observed_at':time.time(),'state':'FAILED_INSTALL',
+                'failure_code':failure_record['code'],'last_completed_phase':last_phase,
+                'last_completed_step':last_step,'authority_effect':'NONE','admission_effect':'NONE'}
+            observation['observation_digest']=sha(canonical(observation))
+            observation_written = False
+            try:
+                before_observation=io.read(INSTALL_OBSERVATION)
+                io.replace(INSTALL_OBSERVATION,before_observation,
+                           _effect_row(INSTALL_OBSERVATION,canonical(observation)+b'\n','0644'))
+                observation_written = True
+            except (OSError, ValueError, TransactionError):
+                pass  # Recording failure must not skip independently safe stops.
+            observer_safe = observer_safe and observation_written
+            contained = True
+            unit_outcomes = []
+            for name in reversed(IMAGE_UNITS):
+                if name in VITALS_UNITS and (observer_safe or (retained_observer
+                        and body['unit_prestate'][name]['ActiveState']=='active')):
+                    continue
+                verify_invariants()
+                outcome = {'unit':name,'stop_returned':False,'active_state':'UNKNOWN'}
+                try:
                     io.unit('stop',name)
+                    outcome['stop_returned'] = True
+                except BaseException:
+                    contained = False
+                unit_outcomes.append(outcome)
+            for outcome in unit_outcomes:
+                try:
+                    state = io.unit_state(outcome['unit'])['ActiveState']
+                    outcome['active_state'] = state if state in {
+                        'active','inactive','failed','activating','deactivating','reloading'} else 'UNKNOWN'
+                    if outcome['active_state'] not in {'inactive','failed'}:
+                        contained = False
+                except BaseException:
+                    contained = False
             verify_invariants()
-            for row in body['image_files']:
-                if io.read(row['target'])!=row['pre']:raise TransactionError('PUBLIC_RECOVERY_READBACK_DENIED')
-            if io.read(current['target'])!=current:raise TransactionError('PUBLIC_RECOVERY_READBACK_DENIED')
-            for name,expected in body['unit_prestate'].items():
-                if io.unit_state(name)!=expected:raise TransactionError('PUBLIC_RECOVERY_UNIT_STATE_DENIED')
-            advance('RESTORED_CAPTURED_PRESTATE')
+            if io.read(lkg['target'])!=lkg:raise TransactionError('PUBLIC_RECOVERY_LKG_CHANGED')
+            failure_record['mutating_units_contained'] = contained
+            failure_record['unit_outcomes'] = unit_outcomes
+            failure_record['vitals_successor_selected'] = observer_safe
+            failure_record['vitals_existing_observer_preservation_attempted'] = retained_observer
+            if retained_observer:
+                failure_record['vitals_existing_observer_generation'] = strict_json(
+                    base64.b64decode(current['content_b64']))['generation']
+            failure_record['install_observation_written'] = observation_written
+            failure_record['vitals_endpoint_verification'] = 'INDEPENDENT_READBACK_REQUIRED'
+            failure_record['vitals_units_active'] = False
+            if observer_safe:
+                # Same selected complete generation, never the target (which
+                # would pull in the failed coordinator) or another domain.
+                cutover_safe = vitals_cutover_complete
+                if not cutover_safe:
+                    cutover_safe = True
+                    # A partial cutover cannot start either successor process
+                    # until BOTH old observer processes have stopped.
+                    for name in reversed(VITALS_UNITS):
+                        verify_invariants()
+                        try:
+                            io.unit('stop',name)
+                            if io.unit_state(name)['ActiveState'] not in {'inactive','failed'}:
+                                cutover_safe = False
+                        except (OSError, TransactionError):
+                            cutover_safe = False
+                if cutover_safe:
+                    for name in VITALS_UNITS:
+                        verify_invariants()
+                        if io.selected_generation()!=selector:
+                            raise TransactionError('PUBLIC_SELECTOR_READBACK_DENIED')
+                        try:
+                            if io.unit_state(name)['ActiveState']!='active':
+                                io.unit('start',name)
+                            if io.unit_state(name)['ActiveState']!='active':
+                                break
+                        except (OSError, TransactionError):
+                            break  # Do not start edge without its presentation.
+                try:
+                    failure_record['vitals_units_active'] = cutover_safe and all(
+                        io.unit_state(name)['ActiveState']=='active' for name in VITALS_UNITS)
+                except (OSError, TransactionError):
+                    pass
+            advance('FAILED_INSTALL_RETAINED' if contained else 'FAILED_INSTALL_CONTAINMENT_UNPROVEN')
         except BaseException:
-            raise TransactionError('PUBLIC_INSTALL_FAILED_RECOVERY_UNPROVEN') from failure
-        raise TransactionError('PUBLIC_INSTALL_FAILED_CAPTURED_PRESTATE_RESTORED') from failure
+            raise TransactionError('PUBLIC_INSTALL_FAILED_EVIDENCE_UNPROVEN') from failure
+        raise TransactionError('PUBLIC_INSTALL_FAILED_GENERATION_RETAINED' if contained
+                               else 'PUBLIC_INSTALL_FAILED_CONTAINMENT_UNPROVEN') from failure
