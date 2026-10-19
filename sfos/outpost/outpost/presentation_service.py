@@ -50,7 +50,11 @@ class PresentationHandler(socketserver.StreamRequestHandler):
                 raise ValueError("REQUEST_DENIED")
             result = present(self.server.host_vitality_store,
                              request["method"], request["path"], request["accept"],
-                             BOOT_ID_PATH.read_text(encoding="ascii").strip())
+                             BOOT_ID_PATH.read_text(encoding="ascii").strip(),
+                             # Reserve response encoding/flush time inside the
+                             # existing exchange deadline. Slow evidence means
+                             # a readable unavailable witness, never old success.
+                             snapshot_timeout=max(0.0, deadline - time.monotonic() - 0.25))
             response = {"status":result.status, "content_type":result.content_type,
                         "headers":list(result.headers),
                         "body_base64":base64.b64encode(result.body).decode("ascii")}
@@ -80,19 +84,24 @@ class PresentationServer(socketserver.ThreadingMixIn, socketserver.UnixStreamSer
         store = self.host_vitality_store
         if (not isinstance(store, VitalsRuntimeStore)
                 or not store.chronology_needs_validation()
-                or not self._cold_chronology_slot.acquire(blocking=False)):
+                or not store._presentation_acquisition.acquire(blocking=False)):
             return
         try:
             # This same bounded handler has already flushed truthful unavailable
             # evidence. Acquire only parsing evidence, never a cached readiness
             # verdict; later requests still hash all bytes via read_summary.
-            if store.chronology_needs_validation():
-                try:
-                    store.chronology.read_summary()
-                except (OSError, ValueError, TypeError):
-                    pass
+            if not self._cold_chronology_slot.acquire(blocking=False):
+                return
+            try:
+                if store.chronology_needs_validation():
+                    try:
+                        store.chronology.read_summary()
+                    except (OSError, ValueError, TypeError):
+                        pass
+            finally:
+                self._cold_chronology_slot.release()
         finally:
-            self._cold_chronology_slot.release()
+            store._presentation_acquisition.release()
 
     def process_request(self, request, client_address):
         if not self._request_slots.acquire(blocking=False):

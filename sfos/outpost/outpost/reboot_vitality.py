@@ -410,7 +410,8 @@ class VitalityChronology:
             if prior:
                 if prior["event_kind"] == event_kind and prior["subject"] == subject and prior["observed_at"] == observed_at and prior["payload"] == candidate:
                     self._sync_locked(fd, directories)
-                    self._append_cache = (initial.st_size, digest_state.hexdigest(), copy.deepcopy(rows))
+                    self._append_cache = (initial.st_size, digest_state.hexdigest(),
+                        [{**row, "payload": copy.deepcopy(row["payload"])} for row in rows])
                     return {**prior, "append_disposition": "IDEMPOTENT_REPLAY"}, rows
                 raise RebootVitalityError("VITALITY_CHRONOLOGY_CONTRADICTION_HOLD")
             body = {"schema": "SereinVitalityChronologyEvent/v1", "sequence": len(rows) + 1, "event_id": event_id, "event_kind": event_kind, "subject": subject, "observed_at": observed_at, "payload": candidate, "previous_hash": rows[-1]["event_hash"] if rows else "GENESIS"}
@@ -428,7 +429,12 @@ class VitalityChronology:
             rows.append(record)
             # Callers receive mutable snapshots; never let their mutations
             # change the private parse evidence retained for the next tick.
-            self._append_cache = (initial.st_size + len(encoded), digest_state.hexdigest(), copy.deepcopy(rows))
+            # _read_locked validates every metadata field as an immutable
+            # scalar. Isolate each row dictionary and recursively isolate its
+            # payload, without re-traversing fixed scalar metadata on every
+            # watchdog tick. Full-byte validation and durability are unchanged.
+            self._append_cache = (initial.st_size + len(encoded), digest_state.hexdigest(),
+                [{**row, "payload": copy.deepcopy(row["payload"])} for row in rows])
         except BaseException:
             self._append_cache = None
             raise

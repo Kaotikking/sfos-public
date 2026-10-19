@@ -1253,6 +1253,11 @@ def capture_retired_kernel_prestate(root,source,plan,expected,*,verify_path=VERI
  terminal=signed(selector+'/kernel-retirement-state.json')
  transaction=signed(selector+'/transaction-receipt.json')
  packet=outpost['kernel_retirement']
+ historical_journal_path=plan['rollback_selector']+'/phase-journal.json'
+ historical_journal_sha256=outpost['retained_transaction']['history'].get(historical_journal_path)
+ deny(not isinstance(historical_journal_sha256,str) or not HEX64.fullmatch(historical_journal_sha256),
+      'KERNEL_RETIRED_HISTORY_BINDING_DENIED')
+ read_bound(historical_journal_path,historical_journal_sha256)
  manifest=read_json(source/'release-manifest.json');layout=read_json(source/'install-layout.json')
  retirement_preservation_binding(plan,manifest,layout,packet,packet,current_boot_id=observation_boot_id)
  rows=retirement_payload_selection(plan,manifest,layout)
@@ -1296,6 +1301,7 @@ def capture_retired_kernel_prestate(root,source,plan,expected,*,verify_path=VERI
  unchanged()
  return {'state':'RETIRED_PREDECESSOR_CAPTURE_ONLY','binding':expected,
          'historical_plan_sha256':sha(canonical(plan)),'public_payload':rows,
+         'historical_journal_sha256':historical_journal_sha256,
          'preserved':observed,'units':units,'authority_effect':'NONE','admission_effect':'NONE'}
 
 
@@ -1355,7 +1361,9 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
       or plan.get('target_vm_id')!='VM4010' or plan.get('rollback_selector')!=selector
       or plan.get('current_boot_id')!=expected['current_boot_id']
       or witness.get('schema') not in {'SereinOutpostKernelInstallWitness/v1','SereinOutpostKernelInstallWitness/v2'}
-      or witness.get('target')!='VM4010' or witness.get('boot_id')!=plan['current_boot_id']
+      or witness.get('target')!='VM4010'
+      or ((retirement is None or witness.get('rollback_selector')==plan['rollback_selector'])
+          and witness.get('boot_id')!=plan['current_boot_id'])
       or witness.get('install_status') not in {'INSTALLED_INACTIVE','CONSTRUCTION_OBSERVED'}
       or witness.get('authority_effect')!='NONE'
       or witness.get('witness_digest')!=sha(canonical({k:v for k,v in witness.items() if k!='witness_digest'}))
@@ -1914,7 +1922,33 @@ def _verify_install_material(root,plan,receipt,*,source,retired_prestate=None):
    prior=preserved[row['target']]
    deny(any(prior.get(field)!=row[field] for field in ('bytes','sha256','mode','uid','gid'))
         or (prior.get('device'),prior.get('inode'),prior.get('nlink'))!=observed[5:],"KERNEL_PRESERVED_PRESTATE_CHANGED")
- journal=read_json(receipt_path.parent/"phase-journal.json");deny(journal.get("receipt_digest")!=digest or journal.get("state")!="INSTALLED_INACTIVE" or journal.get("completed")!=[row["target"] for row in replacements if row['target'] not in preserved],"KERNEL_INSTALL_JOURNAL_DENIED")
+ journal_raw=regular(receipt_path.parent/'phase-journal.json',expected_custody=(0,0,0o600))
+ journal=strict_json(journal_raw)
+ install_order=[row['target'] for row in replacements if row['target'] not in preserved]
+ deny(journal.get('receipt_digest')!=digest,'KERNEL_INSTALL_JOURNAL_DENIED')
+ if retired_prestate is not None and journal.get('state')=='INSTALLING':
+  # Completed signed Outpost retirement authenticates this exact interrupted
+  # journal. It remains historical INSTALLING evidence, never an install PASS
+  # or permission to resume its request. Ordinary verification stays strict.
+  deny(sha(journal_raw)!=retired_prestate.get('historical_journal_sha256')
+       or canonical(journal)!=journal_raw
+       or set(journal)!={'schema','receipt_digest','state','completed','ownership'}
+       or journal['schema']!='SereinKernelRollbackJournal/v1',
+       'KERNEL_RETIRED_JOURNAL_BINDING_DENIED')
+  completed=journal['completed'];ownership=journal['ownership']
+  deny(not isinstance(completed,list) or not isinstance(ownership,list)
+       or any(not isinstance(row,dict) or set(row)!={'target','device','inode','temporary'}
+              or type(row['device']) is not int or row['device']<0
+              or type(row['inode']) is not int or row['inode']<=0
+              or not re.fullmatch(r'\.kernel-[0-9a-f]{32}',str(row['temporary'])) for row in ownership),
+       'KERNEL_RETIRED_JOURNAL_OWNERSHIP_DENIED')
+  names=[row['target'] for row in ownership]
+  deny(names!=install_order[:len(names)] or completed!=names[:len(completed)]
+       or not 0<=len(names)-len(completed)<=1,
+       'KERNEL_RETIRED_JOURNAL_ORDER_DENIED')
+ else:
+  deny(journal.get('state')!='INSTALLED_INACTIVE' or journal.get('completed')!=install_order,
+       'KERNEL_INSTALL_JOURNAL_DENIED')
  return digest
 def prepare_authority_observation(plan,receipt,request,*,root=Path('/'),source=SOURCE,
                                   host_path=HOST_STATE,verify_path=VERIFY_KEY,

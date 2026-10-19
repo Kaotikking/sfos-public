@@ -174,10 +174,14 @@ def _outpost_operator_page(snapshot):
 def html_body(snapshot):
  projection=snapshot.get("projection_digest",digest(snapshot))
  return ("<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Serein Vitals</title></head><body><p id='projection-digest'>"+html.escape(projection)+"</p>"+_outpost_operator_page(snapshot)+"</body></html>").encode()
-def present(store:HostVitalityStore,method:str,path:str,accept:str,current_boot_id:str)->ReadOnlyPresentation:
+def present(store:HostVitalityStore,method:str,path:str,accept:str,current_boot_id:str,*,snapshot_timeout=None)->ReadOnlyPresentation:
  if method!="GET":return ReadOnlyPresentation(405,"application/json",canonical({"error":"READ_ONLY"}),SAFE_HEADERS)
  if path!="/v1/runtime/status":return ReadOnlyPresentation(404,"application/json",canonical({"error":"NOT_FOUND"}),SAFE_HEADERS)
- try:snapshot=store.snapshot(current_boot_id=current_boot_id) if isinstance(store,VitalsRuntimeStore) else store.snapshot()
+ try:
+  if isinstance(store,VitalsRuntimeStore):
+   snapshot=(store.snapshot(current_boot_id=current_boot_id) if snapshot_timeout is None else
+             store.snapshot_for_presentation(current_boot_id=current_boot_id,timeout=snapshot_timeout))
+  else:snapshot=store.snapshot()
  except (HostVitalityError,OSError,ValueError):return ReadOnlyPresentation(503,"application/json",canonical({"error":"VITALITY_UNAVAILABLE"}),SAFE_HEADERS)
  if snapshot.get("status")=="NO_OBSERVATION":return ReadOnlyPresentation(503,"application/json",canonical({"error":"VITALITY_UNAVAILABLE"}),SAFE_HEADERS)
  if not current_boot_id or snapshot.get("current_boot_id")!=current_boot_id:

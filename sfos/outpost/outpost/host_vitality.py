@@ -304,19 +304,32 @@ class HostVitalityStore:
         # as the canonical digest/parsed index. Rehash every byte on this one
         # descriptor, in bounded parallel native hashlib work. Chunk digests
         # never replace the canonical SHA256 or authorize a partial read.
-        prior_chunks=chunk_proof[1];position=0;lanes=[[] for _ in range(8)]
+        prior_chunks=chunk_proof[1];position=0;ordered=[]
         for index,(length,expected) in enumerate(prior_chunks):
-         lanes[index%8].append((position,length,expected));position+=length
+         ordered.append((position,length,expected));position+=length
         if position!=size:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
+        # Adjacent offsets avoid interleaved streams through the same
+        # file. Batch at most eight <=1MiB chunks per read, retaining each
+        # original chunk boundary/digest and the complete custody checks.
+        lanes=[ordered[len(ordered)*i//4:len(ordered)*(i+1)//4] for i in range(4)]
         def hash_lane(rows):
-         # Eight tasks, not one task/barrier per chunk. Each worker retains
-         # at most one <=1MiB buffer and checks every assigned exact offset.
-         for position,length,expected in rows:
-          block=os.pread(stream.fileno(),length,position)
-          if len(block)!=length:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
-          if hashlib.sha256(block).hexdigest()!=expected:return False
+         # Four bounded tasks, <=8MiB each. No historical byte is skipped,
+         # and no canonical digest or parsed-prefix condition is replaced.
+         # Reuse one mutable buffer per lane rather than allocating/releasing
+         # a new multi-megabyte bytes object for every read. preadv leaves the
+         # shared descriptor offset untouched, just like the prior pread road.
+         view=memoryview(bytearray(min(8,len(rows))*1024*1024))
+         for index in range(0,len(rows),8):
+          batch=rows[index:index+8];length=sum(row[1] for row in batch)
+          if os.preadv(stream.fileno(),[view[:length]],batch[0][0])!=length:
+           raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
+          offset=0
+          for position,chunk_length,expected in batch:
+           if position!=batch[0][0]+offset:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
+           if hashlib.sha256(view[offset:offset+chunk_length]).hexdigest()!=expected:return False
+           offset+=chunk_length
          return True
-        with ThreadPoolExecutor(max_workers=8) as pool:
+        with ThreadPoolExecutor(max_workers=4) as pool:
          matching=all(pool.map(hash_lane,lanes))
         if matching:
          if position!=size:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
@@ -424,11 +437,21 @@ class HostVitalityStore:
   if self.samples.is_symlink() or (self.samples.exists() and not self.samples.is_file()):raise HostVitalityError("HOST_VITALITY_HISTORY_DENIED")
   line=canonical(current)
   with self.samples.open("ab") as stream:stream.write(line);stream.flush();os.fsync(stream.fileno())
+  # Reuse chronology's file-then-directory durability contract. A prior
+  # interrupted attempt may have created any parent without persisting its
+  # name. The ECG must survive even if projection publication fails next.
+  for parent in (self.root,*self.root.parents):
+   directory=os.open(parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   try:os.fsync(directory)
+   finally:os.close(directory)
   value=self._projection(current,previous,1+(old["sample_count"] if old else 0))
   fd,tmp=tempfile.mkstemp(prefix=".host-vitality-",dir=self.root)
   try:
-   with os.fdopen(fd,"wb") as stream:fd=-1;stream.write(canonical(value));stream.flush();os.fsync(stream.fileno())
-   os.chmod(tmp,0o600);os.replace(tmp,self.state)
+   with os.fdopen(fd,"wb") as stream:fd=-1;os.fchmod(stream.fileno(),0o600);stream.write(canonical(value));stream.flush();os.fsync(stream.fileno())
+   os.replace(tmp,self.state)
+   directory=os.open(self.root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   try:os.fsync(directory)
+   finally:os.close(directory)
   finally:
    if fd!=-1:os.close(fd)
    if os.path.exists(tmp):os.unlink(tmp)

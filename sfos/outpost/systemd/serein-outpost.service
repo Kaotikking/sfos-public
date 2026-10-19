@@ -7,6 +7,10 @@ After=local-fs.target
 Type=notify
 NotifyAccess=main
 WatchdogSec=30s
+# Recover only this observer through the same generation-validating launcher.
+# A deliberate stop remains stopped. Restart grants no domain admission and
+# does not change the watchdog deadline, generation selector or retained state.
+Restart=on-failure
 User=serein-outpost
 Group=serein-outpost
 Environment=PYTHONDONTWRITEBYTECODE=1

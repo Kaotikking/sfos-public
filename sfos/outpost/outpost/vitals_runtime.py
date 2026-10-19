@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import stat
+import threading
 import time
 from contextlib import ExitStack
 from pathlib import Path
@@ -13,7 +15,7 @@ from typing import Any
 from .constitutional_registry import registry_snapshot
 from .host_vitality import BOOT, JOINED_SCHEMA, RECIPE_SCHEMA, HostVitalityStore, HostVitalityError, HostCollectionAttempts, host_attempt_matches
 from .reboot_vitality import VitalityChronology, validate_classification
-from .vitals_aggregation import aggregate_vitals, producer_observation, validate_producer
+from .vitals_aggregation import PERSPECTIVES, aggregate_vitals, producer_observation, validate_producer
 from .service import validate_coordinator_witness, held_domain_boot_view, _validate_generation_identity
 from install.transaction import strict_json, TransactionError, canonical
 
@@ -184,6 +186,54 @@ class VitalsRuntimeStore:
         # Only the presentation server enables cold-producer deferral after its
         # startup validation attempt. Other readers retain synchronous proof.
         self.defer_cold_chronology = False
+        self._presentation_acquisition = threading.Lock()
+
+    def snapshot_for_presentation(self, *, current_boot_id: str, timeout: float):
+        """Bound observer waiting, never verification or an install lifetime.
+
+        A request owns its result. Late results are discarded, not offered to
+        subsequent callers. One worker may finish the complete synchronous
+        reader; its ownership remains held until that reader actually exits.
+        """
+        if not isinstance(current_boot_id, str) or not BOOT.fullmatch(current_boot_id):
+            raise VitalsRuntimeError("VITALS_HOST_IDENTITY_DENIED")
+        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout < 0:
+            raise VitalsRuntimeError("VITALS_READ_BUDGET_DENIED")
+        deadline = time.monotonic() + timeout
+
+        def unavailable():
+            now = time.time()
+            return aggregate_vitals({perspective: [self._unavailable(
+                perspective, "OUTPOST_PRESENTATION_READER", "VITALS_EVIDENCE_UNAVAILABLE",
+                current_boot_id, now)] for perspective in PERSPECTIVES},
+                current_boot_id=current_boot_id, generated_at=now)
+
+        if timeout <= 0 or not self._presentation_acquisition.acquire(blocking=False):
+            return unavailable()
+        completed = threading.Event()
+        result = []
+        finished = []
+
+        def acquire():
+            try:
+                result.append(self.snapshot(current_boot_id=current_boot_id))
+            except (OSError, ValueError, TypeError):
+                pass  # No partial evidence or prior positive result is reused.
+            finally:
+                finished.append(time.monotonic())
+                self._presentation_acquisition.release()
+                completed.set()
+
+        try:
+            worker = threading.Thread(target=acquire, name="outpost-presentation-read", daemon=True)
+            worker.start()
+        except Exception:
+            self._presentation_acquisition.release()
+            return unavailable()
+        if (not completed.wait(max(0.0, deadline - time.monotonic())) or not result
+                or finished[0] > deadline):
+            return unavailable()
+        return result[0]
 
     def chronology_needs_validation(self):
         # This is not a verdict. A prefix/rejection only selects the normal
