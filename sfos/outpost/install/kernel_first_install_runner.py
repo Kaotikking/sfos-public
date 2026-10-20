@@ -4479,7 +4479,7 @@ def _read_failed_haos_gateway_endpoint(rows):
   if name==service:
    exact.update(MainPID='0',ExecMainCode='1',ExecMainStatus='1',User='serein-stage1',
        Group='serein-stage1',Restart='on-failure',NRestarts='1',Result='exit-code',
-       Slice=r'system-serein\\x2dkernel\\x2dclient\\x2dgateway.slice')
+       Slice=r'system-serein\x2dkernel\x2dclient\x2dgateway.slice')
   else:exact.update(User='',Group='',Slice='system.slice',Result='service-start-limit-hit')
   deny(set(value)!=set(properties) or any(value.get(k)!=v for k,v in {**rows[name],**exact}.items())
        or not re.fullmatch(r'[0-9a-f]{32}',value.get('InvocationID',''))
