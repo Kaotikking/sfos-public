@@ -606,6 +606,38 @@ def _verify_retained_successor_complete(root, plan, read_bound):
                 or terminal_body.get('prestate_sha256')!=retired.get('prestate_sha256')):
             raise TransactionError('PUBLIC_KERNEL_RETIREMENT_TERMINAL_DENIED')
         read_bound(selector+'/kernel-retirement-prestate.json',retired.get('prestate_sha256'))
+        descriptor=fields['kernel_retirement'].get('input_transition')
+        digest=retired.get('input_recovery_sha256')
+        if descriptor is None:
+            if digest is not None or terminal_body.get('input_recovery_sha256') is not None:
+                raise TransactionError('PUBLIC_KERNEL_INPUT_RECOVERY_DENIED')
+        else:
+            if (not isinstance(digest,str) or not re.fullmatch(r'[0-9a-f]{64}',digest)
+                    or terminal_body.get('input_recovery_sha256')!=digest):
+                raise TransactionError('PUBLIC_KERNEL_INPUT_RECOVERY_DENIED')
+            raw=read_bound(selector+'/kernel-input-recovery.json',digest)
+            record=strict_json(raw)
+            unsigned={key:value for key,value in record.items() if key not in {'state_signature','state_digest'}}
+            if (canonical(record)+b'\n'!=raw or record.get('state_digest')!=sha(canonical(
+                    {key:value for key,value in record.items() if key!='state_digest'}))):
+                raise TransactionError('PUBLIC_KERNEL_INPUT_RECOVERY_DENIED')
+            try:public.verify(base64.urlsafe_b64decode(record['state_signature']+'=='),canonical(unsigned))
+            except Exception:raise TransactionError('PUBLIC_RECOVERY_COMPLETION_SIGNATURE_DENIED') from None
+            before=unsigned.get('before',{});after=unsigned.get('after',{})
+            if (unsigned.get('schema')!='SereinOutpostKernelInputRecovery/v1'
+                    or unsigned.get('source_plan_sha256')!=sha(plan.encoded)
+                    or unsigned.get('boot_id')!=fields['current_boot_id']
+                    or unsigned.get('historical_plan_sha256')!=fields['kernel_retirement']['historical_plan_sha256']
+                    or unsigned.get('stage1')!='UNPROVEN' or unsigned.get('activation')!='NONE'
+                    or not isinstance(before,dict) or not isinstance(after,dict)
+                    or before.get('preparation_sha256')!=descriptor['preparation_sha256']
+                    or after.get('preparation_sha256')!=descriptor['preparation_sha256']
+                    or before.get('intent_sha256')!=descriptor['intent_sha256']
+                    or before.get('state_sha256')!=descriptor['state_sha256']
+                    or after.get('intent_sha256')!=descriptor['intent_sha256']
+                    or after.get('phase')!=('PREPARATION_RETAINED' if descriptor['intent_sha256'] is None else 'RESTORED')
+                    or after.get('temporary') is not None):
+                raise TransactionError('PUBLIC_KERNEL_INPUT_RECOVERY_DENIED')
 
 
 def _public_lock_process_identity(raw, pid):
@@ -822,10 +854,30 @@ def _verify_plan_bytes(plan, authority_bytes, expected_authority_sha256):
         _retained_transaction_binding(plan)
     if 'kernel_retirement' in plan:
         if (not isinstance(plan['kernel_retirement'],dict)
-                or set(plan['kernel_retirement'])!={'boot_id','historical_plan_sha256','public_payload','public_state',
-                    'preserved','enablement_links','dependencies','runtime_access'}
+                or set(plan['kernel_retirement']) not in (
+                    {'boot_id','historical_plan_sha256','public_payload','public_state',
+                     'preserved','enablement_links','dependencies','runtime_access'},
+                    {'boot_id','historical_plan_sha256','public_payload','public_state',
+                     'preserved','enablement_links','dependencies','runtime_access','input_transition'})
                 or plan['kernel_retirement']['boot_id']!=plan['current_boot_id']):
             raise TransactionError('PUBLIC_KERNEL_RETIREMENT_BINDING_DENIED')
+        if 'input_transition' in plan['kernel_retirement']:
+            descriptor=plan['kernel_retirement']['input_transition']
+            if (not isinstance(descriptor,dict) or set(descriptor)!={'preparation_path','preparation_sha256','intent_sha256','state_sha256'}
+                    or not isinstance(descriptor['preparation_path'],str)
+                    or not descriptor['preparation_path'].startswith('/var/lib/serein/rollback/')
+                    or str(Path(descriptor['preparation_path']))!=descriptor['preparation_path']
+                    or '..' in Path(descriptor['preparation_path']).parts
+                    or '\\' in descriptor['preparation_path'] or '\x00' in descriptor['preparation_path']
+                    or not isinstance(descriptor['preparation_sha256'],str)
+                    or not re.fullmatch('[0-9a-f]{64}',descriptor['preparation_sha256'])
+                    or (descriptor['intent_sha256'] is not None and
+                        (not isinstance(descriptor['intent_sha256'],str)
+                         or not re.fullmatch('[0-9a-f]{64}',descriptor['intent_sha256'])))
+                    or (descriptor['state_sha256'] is not None and
+                        (not isinstance(descriptor['state_sha256'],str)
+                         or not re.fullmatch('[0-9a-f]{64}',descriptor['state_sha256'])))):
+                raise TransactionError('PUBLIC_KERNEL_RETIREMENT_BINDING_DENIED')
     if 'host_time' in plan:
         host_time_configuration(plan['host_time'])
     if 'recovery' in plan:

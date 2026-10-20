@@ -279,7 +279,7 @@ def retirement_preservation_paths(plan):
  return files,{'/var/lib/serein/kernel/replay',str(STATE),'/var/lib/ollama/models',selector}
 
 
-def collect_retirement_preserved_state(root,plan,*,current_boot_id,paths=None):
+def collect_retirement_preserved_state(root,plan,*,current_boot_id,paths=None,details=None):
  """Read complete protected inventories without copying contents or changing state.
 
  Native no-follow descriptor traversal and before/after identity checks reject
@@ -313,7 +313,7 @@ def collect_retirement_preserved_state(root,plan,*,current_boot_id,paths=None):
   deny((not virtual and size!=before.st_size) or fingerprint(before)!=fingerprint(os.fstat(fd)),
        'KERNEL_RETIREMENT_COLLECTION_CHANGED')
   return dict(state='FILE',sha256=digest.hexdigest(),bytes=size,nlink=before.st_nlink,**common(before))
- def read_directory(fd):
+ def read_directory(fd,path):
   before=os.fstat(fd);names=sorted(os.listdir(fd));entries=[]
   deny(not stat.S_ISDIR(before.st_mode),'KERNEL_RETIREMENT_COLLECTION_KIND_DENIED')
   for name in names:
@@ -324,7 +324,9 @@ def collect_retirement_preserved_state(root,plan,*,current_boot_id,paths=None):
    try:
     deny(fingerprint(named)!=fingerprint(os.fstat(child)),
          'KERNEL_RETIREMENT_COLLECTION_CHANGED')
-    fact=read_directory(child) if stat.S_ISDIR(named.st_mode) else read_file(child)
+    child_path=str(Path(path)/name)
+    fact=read_directory(child,child_path) if stat.S_ISDIR(named.st_mode) else read_file(child)
+    if details is not None:details[child_path]=fact
     deny(fingerprint(named)!=fingerprint(os.stat(name,dir_fd=fd,follow_symlinks=False)),
          'KERNEL_RETIREMENT_COLLECTION_CHANGED')
     entries.append({'name':name,'fact':fact})
@@ -358,7 +360,8 @@ def collect_retirement_preserved_state(root,plan,*,current_boot_id,paths=None):
      return {'state':'ABSENT'}
     raise
    handles.append(fd);before=os.fstat(fd)
-   result=read_directory(fd) if directory else read_file(fd,virtual=path=='/proc/sys/kernel/random/boot_id')
+   result=read_directory(fd,path) if directory else read_file(fd,virtual=path=='/proc/sys/kernel/random/boot_id')
+   if details is not None:details[path]=result
    deny(fingerprint(before)!=fingerprint(os.stat(parts[-1],dir_fd=parent,follow_symlinks=False)),
         'KERNEL_RETIREMENT_COLLECTION_CHANGED')
    verify_chain()
@@ -444,7 +447,7 @@ def read_retirement_dependencies():
 
 
 def capture_retirement_packet(root,plan,manifest,layout,*,current_boot_id,
-                              read_dependencies,read_runtime_access):
+                              read_dependencies,read_runtime_access,input_transition=None):
  """Join native file/link observations with the owner's bounded read adapters.
 
  This does not authenticate a successor or acquire transaction ownership.
@@ -503,6 +506,7 @@ def capture_retirement_packet(root,plan,manifest,layout,*,current_boot_id,
                                              for row,fact in zip(rows,before)},
          'preserved':protected,'enablement_links':links,
          'dependencies':dependencies,'runtime_access':access}
+ if input_transition is not None:packet['input_transition']=input_transition
  retirement_preservation_binding(plan,manifest,layout,packet,packet,current_boot_id=current_boot_id)
  return strict_json(canonical(packet))
 
@@ -519,6 +523,9 @@ def retirement_preservation_binding(plan,manifest,layout,expected,observed,*,cur
  rows=retirement_payload_selection(plan,manifest,layout)
  fields={'boot_id','historical_plan_sha256','public_payload','public_state','preserved',
          'enablement_links','dependencies','runtime_access'}
+ if isinstance(expected,dict) and 'input_transition' in expected:
+  fields.add('input_transition')
+  _retirement_input_descriptor(expected['input_transition'])
  deny(not isinstance(current_boot_id,str) or not re.fullmatch(
       r'[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}',current_boot_id),
       'KERNEL_RETIREMENT_BOOT_DENIED')
@@ -607,6 +614,44 @@ def retirement_preservation_binding(plan,manifest,layout,expected,observed,*,cur
          'exclusive_ownership':'UNPROVEN','mutable_private_state':'NOT_QUIESCED'}
 
 
+def _retirement_input_descriptor(value):
+ """Closed additional evidence, not an independent recovery command."""
+ deny(not isinstance(value,dict) or set(value)!={'preparation_path','preparation_sha256','intent_sha256','state_sha256'}
+      or not isinstance(value['preparation_path'],str)
+      or not value['preparation_path'].startswith('/var/lib/serein/rollback/')
+      or str(Path(value['preparation_path']))!=value['preparation_path']
+      or '..' in Path(value['preparation_path']).parts
+      or '\\' in value['preparation_path'] or '\x00' in value['preparation_path']
+      or not isinstance(value['preparation_sha256'],str) or not HEX64.fullmatch(value['preparation_sha256'])
+      or (value['intent_sha256'] is not None and
+          (not isinstance(value['intent_sha256'],str) or not HEX64.fullmatch(value['intent_sha256'])))
+      or (value['state_sha256'] is not None and
+          (not isinstance(value['state_sha256'],str) or not HEX64.fullmatch(value['state_sha256']))),
+      'KERNEL_RETIREMENT_INPUT_BINDING_DENIED')
+ return value
+
+
+def _retirement_input_delta(before,after,*,roots,owned):
+ """Prove a closed member delta; unchanged entries retain complete facts.
+
+ Owned subtrees are independently checked by the authenticated input owner.
+ Only their ancestor directory inventory digests/counts may consequently
+ change; directory identity and custody remain exact.
+ """
+ owned={str(Path(path)) for path in owned}
+ def selected(path):return any(path==item or path.startswith(item+'/') for item in owned)
+ ancestors={str(parent) for item in owned for parent in Path(item).parents
+            if any(str(parent)==root or str(parent).startswith(root+'/') for root in roots)}
+ for path in set(before)|set(after):
+  if selected(path):continue
+  deny(path not in before or path not in after,'KERNEL_RETIREMENT_INPUT_UNRELATED_CHANGED')
+  left,right=before[path],after[path]
+  if path in ancestors:
+   left={k:v for k,v in left.items() if k not in {'inventory_sha256','entry_count'}}
+   right={k:v for k,v in right.items() if k not in {'inventory_sha256','entry_count'}}
+  deny(left!=right,'KERNEL_RETIREMENT_INPUT_UNRELATED_CHANGED')
+
+
 def prepare_kernel_retirement(root,successor):
  """Authenticate historical source and fresh preservation inside Outpost.
 
@@ -638,17 +683,75 @@ def prepare_kernel_retirement(root,successor):
       or historical.get('rollback_selector')!=str(Path(plan_path).parent)
       or sha(canonical(historical))!=expected.get('historical_plan_sha256'),
       'KERNEL_RETIREMENT_HISTORY_BINDING_DENIED')
- source=root/str(SOURCE).lstrip('/')
+ source=root/str(SOURCE).lstrip('/');input_owner=None;input_records={}
+ descriptor=expected.get('input_transition')
+ if descriptor is not None:
+  _retirement_input_descriptor(descriptor)
+  preparation_path=descriptor['preparation_path']
+  intent_path=str(Path(plan_path).parent/'canonical-input-transition-intent.json')
+  preparation_only=descriptor['intent_sha256'] is None
+  state_path=str(Path(plan_path).parent/('canonical-input-transition-preparation-state.json'
+      if preparation_only else 'canonical-input-transition-state.json'))
+  preparation_raw=regular(root/preparation_path.lstrip('/'),expected_custody=(0,0,0o600))
+  deny(sha(preparation_raw)!=descriptor['preparation_sha256'],'KERNEL_RETIREMENT_INPUT_CHANGED')
+  input_records[preparation_path]=preparation_raw
+  if preparation_only:
+   deny(os.path.lexists(root/intent_path.lstrip('/'))
+        or os.path.lexists(root/str(Path(plan_path).parent/'canonical-input-transition-state.json').lstrip('/')),
+        'KERNEL_RETIREMENT_INPUT_CHANGED')
+   intent=KernelSuccessorInputs._transition_record(preparation_raw,load_pem_public_key(anchor))
+  else:
+   intent_raw=regular(root/intent_path.lstrip('/'),expected_custody=(0,0,0o600))
+   deny(sha(intent_raw)!=descriptor['intent_sha256'],'KERNEL_RETIREMENT_INPUT_CHANGED')
+   intent=KernelSuccessorInputs._transition_record(intent_raw,load_pem_public_key(anchor))
+   input_records[intent_path]=intent_raw
+  state_target=root/state_path.lstrip('/')
+  if descriptor['state_sha256'] is None:
+   deny(os.path.lexists(state_target),'KERNEL_RETIREMENT_INPUT_CHANGED')
+  else:
+   state_raw=regular(state_target,expected_custody=(0,0,0o600))
+   deny(sha(state_raw)!=descriptor['state_sha256'],'KERNEL_RETIREMENT_INPUT_CHANGED')
+   input_records[state_path]=state_raw
+  name=intent.get('external',{}).get('source')
+  deny(not isinstance(name,str) or not name.startswith('/var/lib/serein/rollback/')
+       or str(Path(name))!=name or '..' in Path(name).parts,'KERNEL_RETIREMENT_INPUT_SOURCE_DENIED')
+  source=root/name.lstrip('/')
  inventory=safe_tree(source)
  deny('sha256:'+sha(canonical(inventory))!=historical.get('source_inventory_digest'),
       'KERNEL_RETIREMENT_SOURCE_CHANGED')
  manifest=read_json(source/'release-manifest.json');layout=read_json(source/'install-layout.json')
  retirement_payload_selection(historical,manifest,layout)
  module=load_installer(source,manifest,expected_release=historical['release_digest'])
+ input_details={};input_before=None
+ if descriptor is not None:
+  from .public_generation_transaction import load_prestate_signer
+  private,public=load_prestate_signer(successor)
+  input_owner=KernelSuccessorInputs.resume(historical,root,root/str(VERIFY_KEY).lstrip('/'),module,private,
+      preparation_path=preparation_path)
+  deny(preparation_path not in {'/'+path.relative_to(root).as_posix() for path in
+       (input_owner.preparation_path,input_owner.external_preparation_path)},
+       'KERNEL_RETIREMENT_INPUT_PATH_DENIED')
+  deny((input_owner.canonical_source,input_owner.canonical_request,input_owner.canonical_receipt)
+       !=tuple(root/str(path).lstrip('/') for path in (SOURCE,REQUEST,SOURCE_RECEIPT)),
+       'KERNEL_RETIREMENT_INPUT_PATH_DENIED')
+  input_before=input_owner.transition_evidence()
+  deny(input_before['preparation_sha256']!=descriptor['preparation_sha256']
+       or input_before['intent_sha256']!=descriptor['intent_sha256']
+       or input_before['state_sha256']!=descriptor['state_sha256'],
+       'KERNEL_RETIREMENT_INPUT_CHANGED')
+  witness=root/str(STATE/'kernel-install-witness.json').lstrip('/')
+  if os.path.lexists(witness):
+   deny(read_json(witness).get('rollback_selector')==historical['rollback_selector'],
+        'KERNEL_RETIREMENT_ACCEPTED_INPUT_DENIED')
+  detail_roots={str(STATE),historical['rollback_selector']}
+  detail_facts=collect_retirement_preserved_state(root,historical,current_boot_id=fields['current_boot_id'],
+      paths=detail_roots,details=input_details)
+  deny(detail_facts!={name:expected['preserved'][name] for name in detail_roots},
+       'KERNEL_RETIREMENT_INPUT_CHANGED')
  def observe():
   return capture_retirement_packet(root,historical,manifest,layout,
       current_boot_id=fields['current_boot_id'],read_dependencies=read_retirement_dependencies,
-      read_runtime_access=lambda:module.capture_runtime_access(root,historical))
+       read_runtime_access=lambda:module.capture_runtime_access(root,historical),input_transition=descriptor)
  observed=observe()
  retirement_preservation_binding(historical,manifest,layout,expected,observed,
                                  current_boot_id=fields['current_boot_id'])
@@ -657,9 +760,12 @@ def prepare_kernel_retirement(root,successor):
            for path,raw in history.items()) or safe_tree(source)!=inventory
        or regular(root/str(VERIFY_KEY).lstrip('/'),expected_custody=(0,0,0o644))!=anchor,
        'KERNEL_RETIREMENT_SOURCE_CHANGED')
+  if input_owner is not None:input_owner.verify()
  verify_source()
  return {'plan':historical,'manifest':manifest,'layout':layout,'expected':expected,
-         'observe':observe,'verify_source':verify_source,'runtime_access':lambda:module.capture_runtime_access(root,historical)}
+          'observe':observe,'verify_source':verify_source,'runtime_access':lambda:module.capture_runtime_access(root,historical),
+          'input_owner':input_owner,'input_before':input_before,'input_details':input_details,
+          'input_records':input_records}
 
 
 def _retirement_stop_units(names):
@@ -761,6 +867,7 @@ def retire_kernel_in_generation(root,successor,prepared,io,private,public,verify
  prestate=_effect_row(prestate_path,_signed_transition_record(record,private,public))
  io.replace(prestate_path,{'target':prestate_path,'state':'ABSENT'},prestate)
  journal={'target':journal_path,'state':'ABSENT'}
+ input_result=None;preserved_expected=expected['preserved'];input_archives={}
  def advance(phase,target=None):
   nonlocal journal
   verify_ownership();prepared['verify_source']()
@@ -768,20 +875,88 @@ def retire_kernel_in_generation(root,successor,prepared,io,private,public,verify
   body={'schema':'SereinOutpostKernelRetirementState/v1','source_plan_sha256':sha(successor.encoded),
         'boot_id':fields['current_boot_id'],'prestate_sha256':prestate['sha256'],
         'phase':phase,'target':target,'stage1':'UNPROVEN','activation':'NONE'}
+  if input_result is not None:body['input_recovery_sha256']=input_result['sha256']
   after=_effect_row(journal_path,_signed_transition_record(body,private,public))
   io.replace(journal_path,journal,after);journal=after
  advance('PREPARED')
  quiesced=quiesce_kernel_retirement(root,successor,prepared,verify_ownership)
  advance('QUIESCED')
+ owner=prepared.get('input_owner')
+ if owner is not None:
+  # Original transition bytes remain attributable even when its mutable state
+  # advances to RESTORED. These copies belong to this fresh Outpost selector.
+  for original,data in prepared['input_records'].items():
+   target=io.receipt_directory+'/kernel-input-original-'+Path(original).name
+   io.allowed.add(target);row=_effect_row(target,data)
+   io.replace(target,{'target':target,'state':'ABSENT'},row)
+   input_archives[original]={'path':target,'row':row}
+  roots={str(STATE),prepared['plan']['rollback_selector']}
+  names=('predecessor_source','predecessor_inode','candidate_stage','candidate_archive',
+         'predecessor_request','predecessor_receipt','candidate_request','candidate_receipt',
+         'predecessor_request_inode','predecessor_receipt_inode','candidate_request_stage',
+         'candidate_receipt_stage','candidate_request_inode','candidate_receipt_inode',
+         'intent_path','state_path','preparation_path','preparation_state_path')
+  owned={str(SOURCE),str(REQUEST),str(SOURCE_RECEIPT)}
+  for name in names:
+   path=getattr(owner,name)
+   deny(path.parent!=owner.selector,'KERNEL_RETIREMENT_INPUT_PATH_DENIED')
+   owned.add('/'+path.relative_to(root).as_posix())
+  def input_boundary():
+   verify_ownership();prepared['verify_source']()
+   deny(any(row['ActiveState'] not in {'inactive','failed'} for row in _retirement_quiescence().values()),
+        'KERNEL_RETIREMENT_QUIESCENCE_DENIED')
+   deny(any(io.read(item['path'])!=item['row'] for item in input_archives.values()),
+        'KERNEL_RETIREMENT_INPUT_HISTORY_CHANGED')
+   details={}
+   collect_retirement_preserved_state(root,prepared['plan'],
+       current_boot_id=fields['current_boot_id'],paths=roots,details=details)
+   permitted=set(owned)
+   temporary=getattr(owner,'_recovery_temporary',None)
+   if temporary is not None:
+    path=owner.selector/temporary['path']
+    deny(path.parent!=owner.selector,'KERNEL_RETIREMENT_INPUT_TEMPORARY_DENIED')
+    name='/'+path.relative_to(root).as_posix()
+    deny(details.get(name)!={'state':'FILE',**{k:v for k,v in temporary.items() if k!='path'}},
+         'KERNEL_RETIREMENT_INPUT_TEMPORARY_DENIED')
+    permitted.add(name)
+   _retirement_input_delta(prepared['input_details'],details,roots=roots,owned=permitted)
+  input_boundary()
+  owner.restore(input_boundary)
+  input_boundary()
+  after=owner.transition_evidence()
+  preparation_only=expected['input_transition']['intent_sha256'] is None
+  deny(after['phase']!=('PREPARATION_RETAINED' if preparation_only else 'RESTORED')
+       or after['preparation_sha256']!=expected['input_transition']['preparation_sha256']
+       or after['intent_sha256']!=expected['input_transition']['intent_sha256'],
+       'KERNEL_RETIREMENT_INPUT_TERMINAL_DENIED')
+  details={}
+  changed=collect_retirement_preserved_state(root,prepared['plan'],
+      current_boot_id=fields['current_boot_id'],paths=roots,details=details)
+  _retirement_input_delta(prepared['input_details'],details,roots=roots,owned=owned)
+  if preparation_only:
+   deny(changed[str(STATE)]!=expected['preserved'][str(STATE)],
+        'KERNEL_RETIREMENT_INPUT_UNRELATED_CHANGED')
+  preserved_expected={**expected['preserved'],**changed}
+  body={'schema':'SereinOutpostKernelInputRecovery/v1',
+        'source_plan_sha256':sha(successor.encoded),'boot_id':fields['current_boot_id'],
+        'historical_plan_sha256':expected['historical_plan_sha256'],
+        'before':prepared['input_before'],'after':after,'preserved_after':preserved_expected,
+        'original_records':{path:{'path':item['path'],'sha256':item['row']['sha256']}
+                            for path,item in input_archives.items()},
+        'stage1':'UNPROVEN','activation':'NONE'}
+  target=io.receipt_directory+'/kernel-input-recovery.json';io.allowed.add(target)
+  input_result=_effect_row(target,_signed_transition_record(body,private,public))
+  io.replace(target,{'target':target,'state':'ABSENT'},input_result)
+  advance('INPUTS_RESTORED')
  def preserved(*,full=False):
   verify_ownership();prepared['verify_source']()
   if full:
    deny(collect_retirement_preserved_state(root,prepared['plan'],current_boot_id=fields['current_boot_id'])
-        !=expected['preserved'],'KERNEL_RETIREMENT_PRESERVED_STATE_CHANGED')
+         !=preserved_expected,'KERNEL_RETIREMENT_PRESERVED_STATE_CHANGED')
   else:
    files,_=retirement_preservation_paths(prepared['plan'])
    for path in files:
-    fact=expected['preserved'][path]
+    fact=preserved_expected[path]
     observed=regular(root/path.lstrip('/'),fact=True,include_identity=True,
         expected_custody=(fact['uid'],fact['gid'],int(fact['mode'],8)))
     deny(observed!=(fact['sha256'],fact['uid'],fact['gid'],int(fact['mode'],8),
@@ -789,6 +964,10 @@ def retire_kernel_in_generation(root,successor,prepared,io,private,public,verify
          'KERNEL_RETIREMENT_PRESERVED_STATE_CHANGED')
   deny(prepared['runtime_access']()!=expected['runtime_access'],
        'KERNEL_RETIREMENT_PRESERVED_STATE_CHANGED')
+  if input_result is not None:
+   deny(io.read(input_result['target'])!=input_result
+        or any(io.read(item['path'])!=item['row'] for item in input_archives.values()),
+        'KERNEL_RETIREMENT_INPUT_HISTORY_CHANGED')
   units=_retirement_quiescence()
   deny(any(value['ActiveState'] not in {'inactive','failed'} for value in units.values()),
        'KERNEL_RETIREMENT_QUIESCENCE_DENIED')
@@ -819,13 +998,15 @@ def retire_kernel_in_generation(root,successor,prepared,io,private,public,verify
        'KERNEL_RETIREMENT_TERMINAL_DENIED')
   deny(io.read(prestate_path)!=prestate,'KERNEL_RETIREMENT_PRESTATE_CHANGED')
  terminal(full=True);advance('RETIRED')
- return {'result':'KERNEL_PROGRAM_RETIRED_PRIVATE_STATE_PRESERVED',
+ result={'result':'KERNEL_PROGRAM_RETIRED_PRIVATE_STATE_PRESERVED',
          'source_plan_sha256':sha(successor.encoded),'boot_id':fields['current_boot_id'],
          'prestate_sha256':prestate['sha256'],'journal_sha256':journal['sha256'],
          'payload_count':len(rows),'enablement_count':len(expected['enablement_links']),
          'removed_count':sum(image['state']=='PRESENT' for image in images.values()),
          'already_absent_count':sum(image['state']=='ABSENT' for image in images.values()),
-         'quiescence':quiesced['state'],'stage1':'UNPROVEN','activation':'NONE'},terminal
+          'quiescence':quiesced['state'],'stage1':'UNPROVEN','activation':'NONE'}
+ if input_result is not None:result['input_recovery_sha256']=input_result['sha256']
+ return result,terminal
 
 
 def current_host_gate(host_path,boot_id):
@@ -1254,6 +1435,109 @@ def capture_retired_kernel_prestate(root,source,plan,expected,*,verify_path=VERI
  terminal=signed(selector+'/kernel-retirement-state.json')
  transaction=signed(selector+'/transaction-receipt.json')
  packet=outpost['kernel_retirement']
+ preserved_expected=packet['preserved']
+ descriptor=packet.get('input_transition')
+ recovery_digest=terminal.get('input_recovery_sha256')
+ transaction_recovery=transaction.get('kernel_retirement',{}).get('input_recovery_sha256')
+ if descriptor is None:
+  deny(recovery_digest is not None or transaction_recovery is not None,
+       'KERNEL_RETIRED_INPUT_BINDING_DENIED')
+ else:
+  _retirement_input_descriptor(descriptor)
+  preparation_only=descriptor['intent_sha256'] is None
+  deny(not isinstance(recovery_digest,str) or not HEX64.fullmatch(recovery_digest)
+       or transaction_recovery!=recovery_digest,'KERNEL_RETIRED_INPUT_BINDING_DENIED')
+  recovery_path=selector+'/kernel-input-recovery.json'
+  read_bound(recovery_path,recovery_digest)
+  recovery=signed(recovery_path)
+  keys={'schema','source_plan_sha256','boot_id','historical_plan_sha256','before','after',
+        'preserved_after','original_records','stage1','activation'}
+  deny(set(recovery)!=keys or recovery['schema']!='SereinOutpostKernelInputRecovery/v1'
+       or recovery['source_plan_sha256']!=sha(verified.encoded)
+       or recovery['boot_id']!=observation_boot_id
+       or recovery['historical_plan_sha256']!=sha(canonical(plan))
+       or recovery['stage1']!='UNPROVEN' or recovery['activation']!='NONE',
+       'KERNEL_RETIRED_INPUT_BINDING_DENIED')
+  before,after=recovery['before'],recovery['after']
+  deny(not isinstance(before,dict) or not isinstance(after,dict)
+       or any(row.get('schema')!='SereinKernelCanonicalInputTransitionEvidence/v1'
+              or row.get('selector')!=plan['rollback_selector']
+              or row.get('preparation_sha256')!=descriptor['preparation_sha256']
+              or row.get('intent_sha256')!=descriptor['intent_sha256']
+              or row.get('temporary') is not None for row in (before,after))
+       or before.get('state_sha256')!=descriptor['state_sha256']
+       or after.get('phase')!=('PREPARATION_RETAINED' if preparation_only else 'RESTORED')
+       or not isinstance(after.get('state_sha256'),str) or not HEX64.fullmatch(after['state_sha256']),
+       'KERNEL_RETIRED_INPUT_BINDING_DENIED')
+  original_preparation=descriptor['preparation_path']
+  original_intent=plan['rollback_selector']+'/canonical-input-transition-intent.json'
+  original_state=plan['rollback_selector']+('/canonical-input-transition-preparation-state.json'
+      if preparation_only else '/canonical-input-transition-state.json')
+  records={original_preparation:descriptor['preparation_sha256']}
+  if not preparation_only:records[original_intent]=descriptor['intent_sha256']
+  if descriptor['state_sha256'] is not None:records[original_state]=descriptor['state_sha256']
+  deny(recovery['original_records']!={name:{
+       'path':selector+'/kernel-input-original-'+Path(name).name,'sha256':digest}
+       for name,digest in records.items()},'KERNEL_RETIRED_INPUT_HISTORY_DENIED')
+  for name,digest in records.items():
+   read_bound(recovery['original_records'][name]['path'],digest)
+  preparation_raw=read_bound(original_preparation,descriptor['preparation_sha256'])
+  preparation=KernelSuccessorInputs._transition_record(preparation_raw,public)
+  deny(original_preparation not in {
+      plan['rollback_selector']+'/canonical-input-transition-preparation.json',
+      preparation.get('external_owner_record')},
+      'KERNEL_RETIRED_INPUT_BINDING_DENIED')
+  deny(preparation.get('external_owner_record')!=str(Path(preparation.get('external',{}).get('root','/invalid'))/
+       'kernel-successor-input-owner.json'),'KERNEL_RETIRED_INPUT_BINDING_DENIED')
+  read_bound(preparation['external_owner_record'],descriptor['preparation_sha256'])
+  if preparation_only:
+   deny(os.path.lexists(root/original_intent.lstrip('/'))
+        or os.path.lexists(root/(plan['rollback_selector']+'/canonical-input-transition-state.json').lstrip('/')),
+        'KERNEL_RETIRED_INPUT_BINDING_DENIED')
+  intent_raw=preparation_raw if preparation_only else read_bound(original_intent,descriptor['intent_sha256'])
+  intent=KernelSuccessorInputs._transition_record(intent_raw,public)
+  state_raw=read_bound(original_state,after['state_sha256'])
+  state=KernelSuccessorInputs._transition_record(state_raw,public)
+  deny(intent.get('schema')!=('SereinKernelCanonicalInputPreparation/v1' if preparation_only
+                             else 'SereinKernelCanonicalInputTransition/v1')
+       or preparation.get('schema')!='SereinKernelCanonicalInputPreparation/v1'
+       or any(preparation.get(key)!=intent.get(key) for key in
+              ('boot_id','plan_sha256','rollback_selector','predecessor_selector',
+               'canonical','external','predecessor','candidate','authority_effect','activation'))
+       or intent.get('plan_sha256')!=sha(canonical(plan))
+       or intent.get('rollback_selector')!=plan['rollback_selector']
+       or intent.get('boot_id')!=plan['current_boot_id']
+       or intent.get('canonical')!={'source':str(SOURCE),'request':str(REQUEST),'receipt':str(SOURCE_RECEIPT)}
+       or state.get('schema')!=('SereinKernelCanonicalInputPreparationState/v1' if preparation_only
+                               else 'SereinKernelCanonicalInputTransitionState/v1')
+       or (state.get('state')!='RETAINED_UNPUBLISHED' or state.get('canonical_effect')!='NONE'
+           or state.get('activation')!='DENIED' if preparation_only else state.get('phase')!='RESTORED')
+       or state.get('plan_sha256')!=sha(canonical(plan))
+       or state.get('boot_id')!=plan['current_boot_id']
+       or state.get('preparation_sha256' if preparation_only else 'intent_sha256')
+          !=descriptor['preparation_sha256' if preparation_only else 'intent_sha256'],
+       'KERNEL_RETIRED_INPUT_BINDING_DENIED')
+  # Verify the restored old inputs independently. The failed candidate remains
+  # the separately pinned `source`, never relabelled as this old canonical tree.
+  predecessor=intent['predecessor']
+  deny('sha256:'+sha(canonical(safe_tree(root/str(SOURCE).lstrip('/'))))
+       !=predecessor['inventory_digest'],'KERNEL_RETIRED_INPUT_SOURCE_CHANGED')
+  for name,path in (('request',REQUEST),('receipt',SOURCE_RECEIPT)):
+   fact=regular(root/str(path).lstrip('/'),fact=True,include_identity=True,expected_custody=(0,0,0o600))
+   deny(list(fact)!=predecessor[name+'_fact'] or fact[0]!=predecessor[name+'_sha256'],
+        'KERNEL_RETIRED_INPUT_HISTORY_DENIED')
+  preserved_expected=recovery['preserved_after']
+  roots={str(STATE),plan['rollback_selector']}
+  deny(not isinstance(preserved_expected,dict) or set(preserved_expected)!=set(packet['preserved']),
+       'KERNEL_RETIRED_INPUT_PRESERVATION_DENIED')
+  for name,old in packet['preserved'].items():
+   new=preserved_expected[name]
+   if name in roots and not (preparation_only and name==str(STATE)):
+    deny(not isinstance(new,dict) or set(new)!=set(old)
+         or {k:v for k,v in old.items() if k not in {'inventory_sha256','entry_count'}}
+         !={k:v for k,v in new.items() if k not in {'inventory_sha256','entry_count'}},
+         'KERNEL_RETIRED_INPUT_PRESERVATION_DENIED')
+   else:deny(new!=old,'KERNEL_RETIRED_INPUT_PRESERVATION_DENIED')
  historical_journal_path=plan['rollback_selector']+'/phase-journal.json'
  historical_journal_sha256=outpost['retained_transaction']['history'].get(historical_journal_path)
  deny(not isinstance(historical_journal_sha256,str) or not HEX64.fullmatch(historical_journal_sha256),
@@ -1261,6 +1545,9 @@ def capture_retired_kernel_prestate(root,source,plan,expected,*,verify_path=VERI
  read_bound(historical_journal_path,historical_journal_sha256)
  manifest=read_json(source/'release-manifest.json');layout=read_json(source/'install-layout.json')
  retirement_preservation_binding(plan,manifest,layout,packet,packet,current_boot_id=observation_boot_id)
+ if descriptor is not None:
+  post_packet={**packet,'preserved':preserved_expected}
+  retirement_preservation_binding(plan,manifest,layout,post_packet,post_packet,current_boot_id=observation_boot_id)
  rows=retirement_payload_selection(plan,manifest,layout)
  deny(prestate.get('schema')!='SereinOutpostKernelRetirementPrestate/v1'
       or prestate.get('source_plan_sha256')!=sha(verified.encoded)
@@ -1292,7 +1579,7 @@ def capture_retired_kernel_prestate(root,source,plan,expected,*,verify_path=VERI
        or read_kernel_enablement_prestate(root), 'KERNEL_RETIRED_PAYLOAD_NOT_ABSENT')
  unchanged()
  observed=collect_retirement_preserved_state(root,plan,current_boot_id=observation_boot_id)
- deny(observed!=packet['preserved'],'KERNEL_RETIRED_PRESERVATION_CHANGED')
+ deny(observed!=preserved_expected,'KERNEL_RETIRED_PRESERVATION_CHANGED')
  module=load_installer(source,manifest,expected_release=plan['release_digest'])
  deny(module.capture_runtime_access(root,plan)!=packet['runtime_access'],
       'KERNEL_RETIRED_RUNTIME_ACCESS_CHANGED')
@@ -1300,10 +1587,17 @@ def capture_retired_kernel_prestate(root,source,plan,expected,*,verify_path=VERI
  deny(any(row['LoadState']!='not-found' or row['NeedDaemonReload']!='no' for row in units.values()),
       'KERNEL_RETIRED_UNIT_DEFINITION_CHANGED')
  unchanged()
- return {'state':'RETIRED_PREDECESSOR_CAPTURE_ONLY','binding':expected,
+ result={'state':'RETIRED_PREDECESSOR_CAPTURE_ONLY','binding':expected,
          'historical_plan_sha256':sha(canonical(plan)),'public_payload':rows,
          'historical_journal_sha256':historical_journal_sha256,
          'preserved':observed,'units':units,'authority_effect':'NONE','admission_effect':'NONE'}
+ if descriptor is not None:
+  result['input_recovery']={'path':recovery_path,'sha256':recovery_digest,
+      'preparation_path':original_preparation,'preparation_sha256':descriptor['preparation_sha256'],
+      'intent_path':None if preparation_only else original_intent,'intent_sha256':descriptor['intent_sha256'],
+      'predecessor_selector':intent['predecessor_selector'],'predecessor':intent['predecessor'],
+      'canonical':intent['canonical'],'external':intent['external']}
+ return result
 
 
 def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_KEY,witness_path=None,
@@ -4213,7 +4507,8 @@ def _read_failed_haos_gateway_endpoint(rows):
 
 @contextmanager
 def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restored,publication,
-                             predecessor_boot_id,current_boot_id,retain_prestate=None,failed_predecessor=False):
+                             predecessor_boot_id,current_boot_id,retain_prestate=None,failed_predecessor=False,
+                             keep_predecessor_inactive=False):
  """Whole-successor owner: stop only the exact installed Kernel units.
 
  No host, Outpost, runtime/model or enablement effect. On failure the old
@@ -4227,8 +4522,10 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
  deny(any(not isinstance(value,str) or not re.fullmatch(boot_pattern,value)
           for value in (predecessor_boot_id,current_boot_id)),
       'KERNEL_SUCCESSOR_BOOT_BINDING_DENIED')
- deny(type(failed_predecessor) is not bool,'KERNEL_SUCCESSOR_FAILURE_CLASS_DENIED')
- restart_predecessor=predecessor_boot_id==current_boot_id and not failed_predecessor
+ deny(type(failed_predecessor) is not bool or type(keep_predecessor_inactive) is not bool,
+      'KERNEL_SUCCESSOR_FAILURE_CLASS_DENIED')
+ restart_predecessor=(predecessor_boot_id==current_boot_id and not failed_predecessor
+                      and not keep_predecessor_inactive)
  groups=(AUTHORITY_UNITS,OPERATIONS_UNITS,INTERFACE_UNITS,RESIDENCY_UNITS)
  names=set(AUTHORITY_UNITS+OTHER_KERNEL_UNITS)
  deny(set(prestate)!=names,'KERNEL_SUCCESSOR_UNIT_SET_DENIED')
@@ -4353,6 +4650,1103 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
   raise
 
 
+class KernelSuccessorInputs:
+ """Write-ahead ownership transition for the three canonical Kernel inputs.
+
+ Capture is read-only and must precede predecessor quiescence.  ``publish``
+ is permitted only after the caller's whole inactive-install boundary passes.
+ The class never starts, stops, enables or repairs a unit and never reads or
+ writes a generated Kernel secret.  A partially published transition fails
+ closed in the live executor.  A fresh complete-generation owner may
+ authenticate its signed intent/state and exact inode map with ``resume`` and
+ restore it only under the caller's existing current-boot, inactive-domain
+ and transaction-lock boundary.
+ """
+ _PHASES=('INTENT','SOURCE_PUBLISHED','RECEIPT_PUBLISHED','PUBLISHED',
+          'RESTORE_REQUEST','RESTORE_RECEIPT','RESTORED')
+
+ def __init__(self,plan,root,source,request_path,source_receipt_path,verify_path,module,private):
+  from .public_generation_transaction import _signed_transition_record
+  self.root=Path(root);self.external_source=Path(source)
+  self.external_request=Path(request_path);self.external_receipt=Path(source_receipt_path)
+  self.verify_path=Path(verify_path);self.module=module;self.private=private
+  self._plan_reference=plan
+  self.plan=strict_json(canonical(plan));self._captured_plan=strict_json(canonical(plan));self.restored=False
+  deny(not self.root.is_absolute() or not isinstance(self.plan,dict)
+       or 'installed_predecessor' not in self.plan,'KERNEL_INPUT_TRANSITION_PLAN_DENIED')
+  def rooted(path):
+   path=Path(path);deny(not path.is_absolute() or '..' in path.parts,
+       'KERNEL_INPUT_TRANSITION_PATH_DENIED')
+   if self.root!=Path('/') and path.is_relative_to(self.root):return path
+   return self.root.joinpath(*path.parts[1:])
+  self.canonical_source=rooted(SOURCE);self.request_path=rooted(REQUEST)
+  self.receipt_path=rooted(SOURCE_RECEIPT)
+  # Stable names consumed by the complete-owner integration after publish.
+  self.canonical_request=self.request_path
+  self.canonical_receipt=self.receipt_path
+  self.selector=rooted(Path(self.plan['rollback_selector']))
+  rollback=rooted(Path('/var/lib/serein/rollback'))
+  previous=self.plan['installed_predecessor']
+  deny(not isinstance(previous,dict) or not isinstance(previous.get('rollback_selector'),str),
+       'KERNEL_INPUT_TRANSITION_PREDECESSOR_DENIED')
+  self.previous_selector=rooted(Path(previous['rollback_selector']))
+  external=(self.external_source,self.external_request,self.external_receipt)
+  for path in external:
+   deny(not path.is_absolute() or path==self.canonical_source or path==self.request_path
+        or path==self.receipt_path or not path.is_relative_to(rollback)
+        or path.is_relative_to(self.selector) or path.is_relative_to(self.previous_selector),
+        'KERNEL_INPUT_TRANSITION_EXTERNAL_PATH_DENIED')
+  common=Path(os.path.commonpath([str(path) for path in external]))
+  deny(common==rollback or not common.is_relative_to(rollback),
+       'KERNEL_INPUT_TRANSITION_EXTERNAL_ROOT_DENIED')
+  self.external_root=common
+  self.external_preparation_path=self.external_root/'kernel-successor-input-owner.json'
+  cursor=rollback
+  for part in common.relative_to(rollback).parts:
+   cursor/=part;info=cursor.lstat()
+   deny(cursor.is_symlink() or not cursor.is_dir() or info.st_uid!=0
+        or stat.S_IMODE(info.st_mode)&0o022,
+        'KERNEL_INPUT_TRANSITION_EXTERNAL_ROOT_DENIED')
+  # Authenticate both sides before any predecessor quiescence.
+  new_request=install_request(self.external_request)
+  new_receipt,new_receipt_digest=source_receipt(
+      self.external_source,self.external_receipt,self.verify_path)
+  deny(any(self.plan.get(key)!=new_receipt.get(key) for key in
+      ('source_parent','source_commit','source_tree','archive_sha256','release_digest'))
+      or self.plan.get('source_receipt_sha256')!=new_receipt_digest
+      or self.plan.get('source_inventory_digest')!=new_receipt.get('inventory_digest'),
+      'KERNEL_INPUT_TRANSITION_CANDIDATE_DENIED')
+  for key in ('source_parent','source_commit','source_tree','archive_sha256'):
+   deny(new_request.get(key)!=self.plan.get(key),'KERNEL_INPUT_TRANSITION_REQUEST_DENIED')
+  predecessor=read_json(self.previous_selector/'plan.json')
+  old_request=install_request(self.request_path)
+  old_receipt,old_receipt_digest=source_receipt(
+      self.canonical_source,self.receipt_path,self.verify_path)
+  deny(old_receipt_digest!=predecessor.get('source_receipt_sha256')
+       or old_receipt.get('inventory_digest')!=predecessor.get('source_inventory_digest')
+       or any(old_receipt.get(key)!=predecessor.get(key) for key in
+              ('source_parent','source_commit','source_tree','archive_sha256','release_digest')),
+       'KERNEL_INPUT_TRANSITION_PREDECESSOR_DENIED')
+  for key in ('source_parent','source_commit','source_tree','archive_sha256'):
+   deny(old_request.get(key)!=predecessor.get(key),'KERNEL_INPUT_TRANSITION_PREDECESSOR_DENIED')
+  self.old_request=regular(self.request_path,expected_custody=(0,0,0o600))
+  self.old_receipt=regular(self.receipt_path,expected_custody=(0,0,0o600))
+  self.new_request=regular(self.external_request,expected_custody=(0,0,0o600))
+  self.new_receipt=regular(self.external_receipt,expected_custody=(0,0,0o600))
+  deny(strict_json(self.new_request)!=new_request or strict_json(self.old_request)!=old_request,
+       'KERNEL_INPUT_TRANSITION_REQUEST_CHANGED')
+  self.old_inventory=safe_tree(self.canonical_source)
+  self.new_inventory=safe_tree(self.external_source)
+  deny('sha256:'+sha(canonical(self.old_inventory))!=predecessor['source_inventory_digest']
+       or 'sha256:'+sha(canonical(self.new_inventory))!=self.plan['source_inventory_digest'],
+       'KERNEL_INPUT_TRANSITION_INVENTORY_DENIED')
+  self.old_source_fact=self._tree_fact(self.canonical_source)
+  self.new_source_fact=self._tree_fact(self.external_source)
+  self.old_request_fact=regular(self.request_path,fact=True,include_identity=True,
+      expected_custody=(0,0,0o600))
+  self.old_receipt_fact=regular(self.receipt_path,fact=True,include_identity=True,
+      expected_custody=(0,0,0o600))
+  self.new_request_fact=regular(self.external_request,fact=True,include_identity=True,
+      expected_custody=(0,0,0o600))
+  self.new_receipt_fact=regular(self.external_receipt,fact=True,include_identity=True,
+      expected_custody=(0,0,0o600))
+  self.predecessor_source=self.selector/'predecessor-source'
+  self.predecessor_inode=self.selector/'predecessor-source-inode'
+  self.candidate_stage=self.selector/'candidate-source-staged'
+  self.candidate_archive=self.selector/'candidate-source'
+  self.predecessor_request=self.selector/'predecessor-request.json'
+  self.predecessor_receipt=self.selector/'predecessor-source-receipt.json'
+  self.candidate_request=self.selector/'candidate-request.json'
+  self.candidate_receipt=self.selector/'candidate-source-receipt.json'
+  self.predecessor_request_inode=self.selector/'predecessor-request-inode.json'
+  self.predecessor_receipt_inode=self.selector/'predecessor-receipt-inode.json'
+  self.candidate_request_stage=self.selector/'candidate-request-staged.json'
+  self.candidate_receipt_stage=self.selector/'candidate-receipt-staged.json'
+  self.candidate_request_inode=self.selector/'candidate-request-inode.json'
+  self.candidate_receipt_inode=self.selector/'candidate-receipt-inode.json'
+  self.intent_path=self.selector/'canonical-input-transition-intent.json'
+  self.state_path=self.selector/'canonical-input-transition-state.json'
+  self.preparation_path=self.selector/'canonical-input-transition-preparation.json'
+  self.preparation_state_path=self.selector/'canonical-input-transition-preparation-state.json'
+  self._signed=_signed_transition_record
+  self.intent={'schema':'SereinKernelCanonicalInputTransition/v1',
+      'boot_id':self.plan['current_boot_id'],'plan_sha256':sha(canonical(self.plan)),
+      'rollback_selector':self.plan['rollback_selector'],
+      'predecessor_selector':previous['rollback_selector'],
+      'canonical':{'source':'/'+self.canonical_source.relative_to(self.root).as_posix(),
+          'request':'/'+self.request_path.relative_to(self.root).as_posix(),
+          'receipt':'/'+self.receipt_path.relative_to(self.root).as_posix()},
+      'external':{'root':'/'+self.external_root.relative_to(self.root).as_posix(),
+          'source':'/'+self.external_source.relative_to(self.root).as_posix(),
+          'request':'/'+self.external_request.relative_to(self.root).as_posix(),
+          'receipt':'/'+self.external_receipt.relative_to(self.root).as_posix()},
+      'predecessor':{'inventory_digest':'sha256:'+sha(canonical(self.old_inventory)),
+          'source_fact':self.old_source_fact,'request_sha256':sha(self.old_request),
+          'request_fact':list(self.old_request_fact),'receipt_sha256':sha(self.old_receipt),
+          'receipt_fact':list(self.old_receipt_fact)},
+      'candidate':{'inventory_digest':'sha256:'+sha(canonical(self.new_inventory)),
+          'source_fact':self.new_source_fact,'request_sha256':sha(self.new_request),
+          'request_fact':list(self.new_request_fact),'receipt_sha256':sha(self.new_receipt),
+          'receipt_fact':list(self.new_receipt_fact)},
+      'phases':list(self._PHASES),'authority_effect':'NONE','activation':'DENIED'}
+  self.intent_raw=self._signed(self.intent,self.private,self.private.public_key())
+  self.preparation={'schema':'SereinKernelCanonicalInputPreparation/v1',
+      'boot_id':self.plan['current_boot_id'],'plan_sha256':sha(canonical(self.plan)),
+      'rollback_selector':self.plan['rollback_selector'],
+      'predecessor_selector':previous['rollback_selector'],
+      'canonical':strict_json(canonical(self.intent['canonical'])),
+      'external':strict_json(canonical(self.intent['external'])),
+      'predecessor':strict_json(canonical(self.intent['predecessor'])),
+      'candidate':strict_json(canonical(self.intent['candidate'])),
+      'external_owner_record':'/'+self.external_preparation_path.relative_to(self.root).as_posix(),
+      'allowed_members':[path.name for path in (
+          self.predecessor_source,self.candidate_stage,self.predecessor_request,
+          self.predecessor_receipt,self.candidate_request,self.candidate_receipt,
+          self.candidate_request_stage,self.candidate_receipt_stage)],
+      'authority_effect':'NONE','activation':'DENIED'}
+  self.preparation_raw=self._signed(self.preparation,self.private,self.private.public_key())
+  self._preparation_state_raw=None;self._preparation_recovery=False
+  self._prepared=False
+  self._phase=None;self._phase_raw=None;self._phase_pending=False
+  self._prior_phase_raw=None;self._uncertain=False
+  self._archive_facts=None
+  self._published_receipt_fact=None;self._published_request_fact=None
+  self._restored_receipt_fact=None;self._restored_request_fact=None
+
+ @classmethod
+ def capture(cls,plan,root,source,request_path,source_receipt_path,verify_path,module,private):
+  return cls(plan,root,source,request_path,source_receipt_path,verify_path,module,private)
+
+ @staticmethod
+ def _transition_record(raw,public):
+  from .transaction import canonical as record_canonical,sha as record_sha
+  value=strict_json(raw);deny(not isinstance(value,dict),'KERNEL_INPUT_TRANSITION_EVIDENCE_CHANGED')
+  digest=value.pop('state_digest',None)
+  deny(not isinstance(digest,str) or digest!=record_sha(record_canonical(value)),
+       'KERNEL_INPUT_TRANSITION_EVIDENCE_CHANGED')
+  signature=value.pop('state_signature',None)
+  try:public.verify(decode(signature),record_canonical(value))
+  except Exception as exc:raise RunnerDenied('KERNEL_INPUT_TRANSITION_EVIDENCE_CHANGED') from exc
+  return value
+
+ @classmethod
+ def resume(cls,plan,root,verify_path,module,private,*,preparation_path=None):
+  """Authenticate an interrupted transition; perform no lock/service/file effect."""
+  self=cls.__new__(cls);self.root=Path(root);self.module=module;self.private=private
+  self.verify_path=Path(verify_path);self.plan=strict_json(canonical(plan));self._plan_reference=plan
+  from cryptography.hazmat.primitives.serialization import Encoding,PublicFormat
+  anchor=regular(self.verify_path,expected_custody=(0,0,0o644))
+  deny(sha(anchor)!=CANONICAL_AUTHORITY_SHA256,'KERNEL_CANONICAL_ANCHOR_DENIED')
+  public=load_pem_public_key(anchor)
+  deny(public.public_bytes(Encoding.Raw,PublicFormat.Raw)!=
+       private.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw),
+       'KERNEL_INPUT_TRANSITION_SIGNER_DENIED')
+  try:public.verify(decode(self.plan['signature']),
+      canonical({key:value for key,value in self.plan.items() if key!='signature'}))
+  except Exception as exc:raise RunnerDenied('KERNEL_INPUT_TRANSITION_SIGNED_PLAN_DENIED') from exc
+  deny(current_boot()!=self.plan.get('current_boot_id'),'KERNEL_INPUT_TRANSITION_STALE_BOOT')
+  def rooted(name):
+   path=Path(name);deny(not path.is_absolute() or '..' in path.parts,
+       'KERNEL_INPUT_TRANSITION_PATH_DENIED')
+   if self.root!=Path('/') and path.is_relative_to(self.root):return path
+   return self.root.joinpath(*path.parts[1:]) if self.root!=Path('/') else path
+  self.selector=rooted(self.plan['rollback_selector'])
+  self.intent_path=self.selector/'canonical-input-transition-intent.json'
+  self.state_path=self.selector/'canonical-input-transition-state.json'
+  self.preparation_path=self.selector/'canonical-input-transition-preparation.json'
+  self.preparation_state_path=self.selector/'canonical-input-transition-preparation-state.json'
+  if os.path.lexists(self.preparation_path):self._preparation_record_path=self.preparation_path
+  else:
+   deny(preparation_path is None,'KERNEL_INPUT_TRANSITION_PREPARATION_MISSING')
+   self._preparation_record_path=rooted(preparation_path)
+  preparation_raw=regular(self._preparation_record_path,expected_custody=(0,0,0o600))
+  preparation=cls._transition_record(preparation_raw,public)
+  has_intent=os.path.lexists(self.intent_path)
+  intent_raw=(regular(self.intent_path,expected_custody=(0,0,0o600))
+              if has_intent else preparation_raw)
+  intent=(cls._transition_record(intent_raw,public) if has_intent else preparation)
+  previous=self.plan.get('installed_predecessor')
+  deny(intent.get('schema')!=('SereinKernelCanonicalInputTransition/v1' if has_intent
+                              else 'SereinKernelCanonicalInputPreparation/v1')
+       or intent.get('boot_id')!=self.plan['current_boot_id']
+       or intent.get('plan_sha256')!=sha(canonical(self.plan))
+       or preparation.get('signed_plan')!=self.plan
+       or intent.get('rollback_selector')!=self.plan['rollback_selector']
+       or not isinstance(previous,dict)
+       or not isinstance(previous.get('rollback_selector'),str)
+       or intent.get('predecessor_selector')!=previous['rollback_selector']
+       or (has_intent and intent.get('phases')!=list(cls._PHASES))
+       or intent.get('authority_effect')!='NONE' or intent.get('activation')!='DENIED',
+       'KERNEL_INPUT_TRANSITION_EVIDENCE_CHANGED')
+  self.preparation=preparation;self.preparation_raw=preparation_raw
+  self.intent=intent;self.intent_raw=intent_raw
+  if has_intent:
+   deny(preparation.get('schema')!='SereinKernelCanonicalInputPreparation/v1'
+        or any(preparation.get(key)!=intent.get(key) for key in
+               ('boot_id','plan_sha256','rollback_selector','predecessor_selector',
+                'canonical','external','predecessor','candidate','authority_effect','activation')),
+        'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+  self.canonical_source=rooted(intent['canonical']['source'])
+  self.request_path=rooted(intent['canonical']['request']);self.receipt_path=rooted(intent['canonical']['receipt'])
+  deny(self.canonical_source!=rooted(SOURCE) or self.request_path!=rooted(REQUEST)
+       or self.receipt_path!=rooted(SOURCE_RECEIPT)
+       or self.selector.parent!=rooted(Path('/var/lib/serein/rollback'))
+       or not re.fullmatch(r'kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',self.selector.name),
+       'KERNEL_INPUT_TRANSITION_PATH_DENIED')
+  self.canonical_request=self.request_path;self.canonical_receipt=self.receipt_path
+  self.external_root=rooted(intent['external']['root']);self.external_source=rooted(intent['external']['source'])
+  self.external_request=rooted(intent['external']['request']);self.external_receipt=rooted(intent['external']['receipt'])
+  self.external_preparation_path=rooted(preparation.get('external_owner_record','/invalid'))
+  rollback=rooted(Path('/var/lib/serein/rollback'))
+  deny(not all(path.is_relative_to(self.external_root) for path in
+      (self.external_source,self.external_request,self.external_receipt))
+       or self.external_preparation_path!=self.external_root/'kernel-successor-input-owner.json'
+       or self._preparation_record_path not in {self.preparation_path,self.external_preparation_path}
+       or regular(self.external_preparation_path,expected_custody=(0,0,0o600))!=preparation_raw
+       or not self.external_root.is_relative_to(rollback) or self.external_root==rollback
+       or self.external_root.is_relative_to(self.selector),
+       'KERNEL_INPUT_TRANSITION_EXTERNAL_PATH_DENIED')
+  cursor=rollback
+  for part in self.external_root.relative_to(rollback).parts:
+   cursor/=part;info=cursor.lstat()
+   deny(cursor.is_symlink() or not cursor.is_dir() or info.st_uid!=0
+        or stat.S_IMODE(info.st_mode)&0o022,'KERNEL_INPUT_TRANSITION_EXTERNAL_ROOT_DENIED')
+  self.previous_selector=rooted(intent['predecessor_selector'])
+  deny(self.previous_selector.parent!=rollback
+       or not re.fullmatch(r'kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',
+                           self.previous_selector.name)
+       or self.previous_selector==self.selector
+       or self.external_root.is_relative_to(self.previous_selector),
+       'KERNEL_INPUT_TRANSITION_PREDECESSOR_DENIED')
+  self.predecessor_source=self.selector/'predecessor-source';self.predecessor_inode=self.selector/'predecessor-source-inode'
+  self.candidate_stage=self.selector/'candidate-source-staged';self.candidate_archive=self.selector/'candidate-source'
+  self.predecessor_request=self.selector/'predecessor-request.json';self.predecessor_receipt=self.selector/'predecessor-source-receipt.json'
+  self.candidate_request=self.selector/'candidate-request.json';self.candidate_receipt=self.selector/'candidate-source-receipt.json'
+  self.predecessor_request_inode=self.selector/'predecessor-request-inode.json';self.predecessor_receipt_inode=self.selector/'predecessor-receipt-inode.json'
+  self.candidate_request_stage=self.selector/'candidate-request-staged.json';self.candidate_receipt_stage=self.selector/'candidate-receipt-staged.json'
+  self.candidate_request_inode=self.selector/'candidate-request-inode.json';self.candidate_receipt_inode=self.selector/'candidate-receipt-inode.json'
+  self.old_request=regular(self.predecessor_request if has_intent else self.request_path,
+      expected_custody=(0,0,0o600))
+  self.old_receipt=regular(self.predecessor_receipt if has_intent else self.receipt_path,
+      expected_custody=(0,0,0o600))
+  self.new_request=regular(self.candidate_request if has_intent else self.external_request,
+      expected_custody=(0,0,0o600))
+  self.new_receipt=regular(self.candidate_receipt if has_intent else self.external_receipt,
+      expected_custody=(0,0,0o600))
+  self.old_inventory=safe_tree(self.predecessor_source if has_intent else self.canonical_source)
+  self.new_inventory=safe_tree(
+      self.candidate_stage if has_intent and os.path.lexists(self.candidate_stage) else
+      self.candidate_archive if has_intent and os.path.lexists(self.candidate_archive) else
+      self.canonical_source if has_intent else self.external_source)
+  self.old_source_fact=intent['predecessor']['source_fact'];self.new_source_fact=intent['candidate']['source_fact']
+  self.old_request_fact=tuple(intent['predecessor']['request_fact']);self.old_receipt_fact=tuple(intent['predecessor']['receipt_fact'])
+  self.new_request_fact=tuple(intent['candidate']['request_fact']);self.new_receipt_fact=tuple(intent['candidate']['receipt_fact'])
+  from .public_generation_transaction import _signed_transition_record
+  self._signed=_signed_transition_record
+  if not has_intent:
+   predecessor=read_json(self.previous_selector/'plan.json')
+   predecessor_raw=regular(self.previous_selector/'plan.json',expected_custody=(0,0,0o600))
+   old_receipt,old_digest=source_receipt(self.canonical_source,self.receipt_path,self.verify_path)
+   new_receipt,new_digest=source_receipt(self.external_source,self.external_receipt,self.verify_path)
+   deny(intent['predecessor'].get('inventory_digest')!='sha256:'+sha(canonical(self.old_inventory))
+        or intent['candidate'].get('inventory_digest')!='sha256:'+sha(canonical(self.new_inventory))
+        or intent['predecessor'].get('request_sha256')!=sha(self.old_request)
+        or intent['predecessor'].get('receipt_sha256')!=sha(self.old_receipt)
+        or intent['candidate'].get('request_sha256')!=sha(self.new_request)
+        or intent['candidate'].get('receipt_sha256')!=sha(self.new_receipt)
+        or self._tree_fact(self.canonical_source)!=self.old_source_fact
+        or self._tree_fact(self.external_source)!=self.new_source_fact
+        or old_digest!=predecessor.get('source_receipt_sha256')
+        or old_receipt.get('inventory_digest')!=predecessor.get('source_inventory_digest')
+        or new_digest!=self.plan.get('source_receipt_sha256')
+        or new_receipt.get('inventory_digest')!=self.plan.get('source_inventory_digest')
+        or sha(predecessor_raw)!=self.plan['installed_predecessor'].get('plan_sha256'),
+        'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+   self._archive_facts=None;self._phase=None;self._phase_raw=None
+   self._phase_pending=False;self._prior_phase_raw=None;self._uncertain=False
+   self._recovering=False;self._preparation_recovery=True
+   self._recovery_temporary=None
+   self._preparation_state_raw=(regular(self.preparation_state_path,
+       expected_custody=(0,0,0o600)) if os.path.lexists(self.preparation_state_path) else None)
+   if self._preparation_state_raw is not None:
+    retained=cls._transition_record(self._preparation_state_raw,public)
+    deny(retained!={'schema':'SereinKernelCanonicalInputPreparationState/v1',
+         'preparation_sha256':sha(self.preparation_raw),
+         'plan_sha256':sha(canonical(self.plan)),'boot_id':self.plan['current_boot_id'],
+         'state':'RETAINED_UNPUBLISHED','canonical_effect':'NONE','activation':'DENIED'},
+         'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+   self.restored=self._preparation_state_raw is not None
+   self._published_request_fact=self._published_receipt_fact=None
+   self._restored_request_fact=self._restored_receipt_fact=None
+   self.verify();return self
+  facts=intent.get('archives');deny(not isinstance(facts,dict),'KERNEL_INPUT_TRANSITION_EVIDENCE_CHANGED')
+  self._archive_facts=facts
+  for key in ('predecessor_request','predecessor_receipt','candidate_request','candidate_receipt',
+              'predecessor_request_inode','predecessor_receipt_inode','candidate_request_stage','candidate_receipt_stage'):
+   self._archive_facts[key]=tuple(self._archive_facts[key])
+  deny(intent['predecessor'].get('inventory_digest')!='sha256:'+sha(canonical(self.old_inventory))
+       or intent['candidate'].get('inventory_digest')!='sha256:'+sha(canonical(self.new_inventory))
+       or intent['predecessor'].get('request_sha256')!=sha(self.old_request)
+       or intent['predecessor'].get('receipt_sha256')!=sha(self.old_receipt)
+       or intent['candidate'].get('request_sha256')!=sha(self.new_request)
+       or intent['candidate'].get('receipt_sha256')!=sha(self.new_receipt)
+       or self._tree_fact(self.predecessor_source)!=self._archive_facts['predecessor_source']
+       or regular(self.predecessor_request,fact=True,include_identity=True,
+          expected_custody=(0,0,0o600))!=self._archive_facts['predecessor_request']
+       or regular(self.predecessor_receipt,fact=True,include_identity=True,
+          expected_custody=(0,0,0o600))!=self._archive_facts['predecessor_receipt']
+       or regular(self.candidate_request,fact=True,include_identity=True,
+          expected_custody=(0,0,0o600))!=self._archive_facts['candidate_request']
+       or regular(self.candidate_receipt,fact=True,include_identity=True,
+          expected_custody=(0,0,0o600))!=self._archive_facts['candidate_receipt'],
+       'KERNEL_INPUT_TRANSITION_ARCHIVE_CHANGED')
+  old_receipt,old_digest=source_receipt(self.predecessor_source,self.predecessor_receipt,self.verify_path)
+  candidate_source=(self.candidate_stage if os.path.lexists(self.candidate_stage) else
+      self.candidate_archive if os.path.lexists(self.candidate_archive) else self.canonical_source)
+  new_receipt,new_digest=source_receipt(candidate_source,self.candidate_receipt,self.verify_path)
+  predecessor=read_json(self.previous_selector/'plan.json')
+  predecessor_raw=regular(self.previous_selector/'plan.json',expected_custody=(0,0,0o600))
+  deny(old_digest!=predecessor.get('source_receipt_sha256')
+       or old_receipt.get('inventory_digest')!=predecessor.get('source_inventory_digest')
+       or new_digest!=self.plan.get('source_receipt_sha256')
+       or new_receipt.get('inventory_digest')!=self.plan.get('source_inventory_digest')
+       or sha(predecessor_raw)!=self.plan['installed_predecessor'].get('plan_sha256'),
+       'KERNEL_INPUT_TRANSITION_SOURCE_RECEIPT_DENIED')
+  self._phase_raw=(regular(self.state_path,expected_custody=(0,0,0o600)) if os.path.lexists(self.state_path) else None)
+  self._phase=None
+  if self._phase_raw is not None:
+   state=cls._transition_record(self._phase_raw,public)
+   deny(state.get('schema')!='SereinKernelCanonicalInputTransitionState/v1'
+        or state.get('intent_sha256')!=sha(intent_raw) or state.get('plan_sha256')!=sha(canonical(self.plan))
+        or state.get('boot_id')!=self.plan['current_boot_id'] or state.get('phase') not in cls._PHASES,
+        'KERNEL_INPUT_TRANSITION_EVIDENCE_CHANGED')
+   self._phase=state['phase']
+  self._phase_pending=False;self._prior_phase_raw=None;self._uncertain=False;self._recovering=True
+  self._preparation_recovery=False;self._preparation_state_raw=None
+  self._recovery_temporary=None
+  self._published_request_fact=self._published_receipt_fact=None
+  self._restored_request_fact=self._restored_receipt_fact=None;self.restored=self._phase=='RESTORED'
+  self.verify();return self
+
+ def _recovery_location(self,paths,fact,*,tree=False):
+  found=[]
+  for label,path in paths.items():
+   if not os.path.lexists(path):continue
+   try:observed=self._tree_fact(path) if tree else regular(path,fact=True,include_identity=True,expected_custody=(0,0,0o600))
+   except (OSError,RunnerDenied):continue
+   if observed==fact:found.append(label)
+  deny(len(found)!=1,'KERNEL_INPUT_TRANSITION_OWNERSHIP_DENIED')
+  return found[0]
+
+ def _verify_recovery(self,boundary=None):
+  if boundary is not None:boundary()
+  deny(current_boot()!=self.plan['current_boot_id'],'KERNEL_INPUT_TRANSITION_STALE_BOOT')
+  deny(regular(self.intent_path,expected_custody=(0,0,0o600))!=self.intent_raw
+       or ((regular(self.state_path,expected_custody=(0,0,0o600)) if os.path.lexists(self.state_path) else None)
+           !=self._phase_raw),'KERNEL_INPUT_TRANSITION_EVIDENCE_CHANGED')
+  # Immutable byte archives and external delivery remain independent evidence.
+  old_inventory=safe_tree(self.predecessor_source)
+  old_request=regular(self.predecessor_request,expected_custody=(0,0,0o600))
+  old_receipt=regular(self.predecessor_receipt,expected_custody=(0,0,0o600))
+  new_request=regular(self.candidate_request,expected_custody=(0,0,0o600))
+  new_receipt=regular(self.candidate_receipt,expected_custody=(0,0,0o600))
+  deny(self._tree_fact(self.predecessor_source)!=self._archive_facts['predecessor_source']
+       or self.intent['predecessor']['inventory_digest']!='sha256:'+sha(canonical(old_inventory))
+       or self.intent['predecessor']['request_sha256']!=sha(old_request)
+       or self.intent['predecessor']['receipt_sha256']!=sha(old_receipt)
+       or self.intent['candidate']['request_sha256']!=sha(new_request)
+       or self.intent['candidate']['receipt_sha256']!=sha(new_receipt)
+       or regular(self.predecessor_request,fact=True,include_identity=True,
+           expected_custody=(0,0,0o600))!=self._archive_facts['predecessor_request']
+       or regular(self.predecessor_receipt,fact=True,include_identity=True,
+           expected_custody=(0,0,0o600))!=self._archive_facts['predecessor_receipt']
+       or regular(self.candidate_request,fact=True,include_identity=True,
+           expected_custody=(0,0,0o600))!=self._archive_facts['candidate_request']
+       or regular(self.candidate_receipt,fact=True,include_identity=True,
+           expected_custody=(0,0,0o600))!=self._archive_facts['candidate_receipt'],
+       'KERNEL_INPUT_TRANSITION_ARCHIVE_CHANGED')
+  self._external_unchanged()
+  source_paths={'canonical':self.canonical_source,'old':self.predecessor_inode,
+      'stage':self.candidate_stage,'candidate':self.candidate_archive}
+  request_paths={'canonical':self.request_path,'old':self.predecessor_request_inode,
+      'stage':self.candidate_request_stage,'candidate':self.candidate_request_inode}
+  receipt_paths={'canonical':self.receipt_path,'old':self.predecessor_receipt_inode,
+      'stage':self.candidate_receipt_stage,'candidate':self.candidate_receipt_inode}
+  def reject_foreign(paths,old_fact,new_fact,tree=False):
+   count=0
+   for path in paths.values():
+    if not os.path.lexists(path):continue
+    observed=self._tree_fact(path) if tree else regular(path,fact=True,include_identity=True,
+        expected_custody=(0,0,0o600))
+    deny(observed not in (old_fact,new_fact),'KERNEL_INPUT_TRANSITION_OWNERSHIP_DENIED')
+    count+=1
+   deny(count!=2,'KERNEL_INPUT_TRANSITION_OWNERSHIP_DENIED')
+  reject_foreign(source_paths,self.old_source_fact,self._archive_facts['candidate_source'],tree=True)
+  reject_foreign(request_paths,self.old_request_fact,self._archive_facts['candidate_request_stage'])
+  reject_foreign(receipt_paths,self.old_receipt_fact,self._archive_facts['candidate_receipt_stage'])
+  result={'source_old':self._recovery_location(source_paths,self.old_source_fact,tree=True),
+      'source_new':self._recovery_location(source_paths,self._archive_facts['candidate_source'],tree=True),
+      'request_old':self._recovery_location(request_paths,self.old_request_fact),
+      'request_new':self._recovery_location(request_paths,self._archive_facts['candidate_request_stage']),
+      'receipt_old':self._recovery_location(receipt_paths,self.old_receipt_fact),
+      'receipt_new':self._recovery_location(receipt_paths,self._archive_facts['candidate_receipt_stage'])}
+  located_old=safe_tree(source_paths[result['source_old']])
+  located_new=safe_tree(source_paths[result['source_new']])
+  deny(located_old!=self.old_inventory or located_new!=self.new_inventory
+       or self.intent['predecessor']['inventory_digest']!='sha256:'+sha(canonical(located_old))
+       or self.intent['candidate']['inventory_digest']!='sha256:'+sha(canonical(located_new)),
+       'KERNEL_INPUT_TRANSITION_SOURCE_CHANGED')
+  deny(result['source_old']==result['source_new'] or result['request_old']==result['request_new']
+       or result['receipt_old']==result['receipt_new'],'KERNEL_INPUT_TRANSITION_OWNERSHIP_DENIED')
+  if self._phase_raw is not None:
+   self._transition_record(self._phase_raw,self.private.public_key())
+  if boundary is not None:boundary()
+  return result
+
+ def _restore_interrupted(self,boundary):
+  locations=self._verify_recovery(boundary)
+  def restore_pair(kind,canonical,old,stage,candidate):
+   old_location=locations[kind+'_old'];new_location=locations[kind+'_new']
+   paths={'canonical':canonical,'old':old,'stage':stage,'candidate':candidate}
+   canonical_fd=os.open(canonical.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   selector_fd=os.open(self.selector,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   def pair(label):return (canonical_fd,paths[label].name) if label=='canonical' else (selector_fd,paths[label].name)
+   try:
+    boundary();self._verify_recovery()
+    if new_location!='candidate':
+     deny(os.path.lexists(candidate),'KERNEL_INPUT_TRANSITION_RESTORE_COLLISION')
+     src_fd,src_name=pair(new_location)
+     os.rename(src_name,candidate.name,src_dir_fd=src_fd,dst_dir_fd=selector_fd)
+     os.fsync(src_fd);os.fsync(selector_fd)
+    if old_location!='canonical':
+     deny(os.path.lexists(canonical),'KERNEL_INPUT_TRANSITION_RESTORE_COLLISION')
+     src_fd,src_name=pair(old_location)
+     os.rename(src_name,canonical.name,src_dir_fd=src_fd,dst_dir_fd=canonical_fd)
+     os.fsync(src_fd);os.fsync(canonical_fd)
+   finally:os.close(selector_fd);os.close(canonical_fd)
+   locations[kind+'_old']='canonical';locations[kind+'_new']='candidate'
+   self._verify_recovery(boundary)
+  restore_pair('request',self.request_path,self.predecessor_request_inode,
+      self.candidate_request_stage,self.candidate_request_inode)
+  restore_pair('receipt',self.receipt_path,self.predecessor_receipt_inode,
+      self.candidate_receipt_stage,self.candidate_receipt_inode)
+  restore_pair('source',self.canonical_source,self.predecessor_inode,
+      self.candidate_stage,self.candidate_archive)
+  self._restored_request_fact=self.old_request_fact;self._restored_receipt_fact=self.old_receipt_fact
+  value={'schema':'SereinKernelCanonicalInputTransitionState/v1',
+      'intent_sha256':sha(self.intent_raw),'plan_sha256':sha(canonical(self.plan)),
+      'boot_id':self.plan['current_boot_id'],'phase':'RESTORED'}
+  raw=self._signed(value,self.private,self.private.public_key())
+  def state_intent(row):
+   self._recovery_temporary={'path':(self.state_path.parent/row['temporary']).relative_to(self.selector).as_posix(),
+       'device':row['device'],'inode':row['inode'],'bytes':len(raw),'sha256':sha(raw),
+       'uid':0,'gid':0,'mode':'0600','nlink':1}
+  try:
+   self.module.atomic(self.state_path,raw,'0600',lambda:boundary(),
+       create_only=self._phase_raw is None,on_intent=state_intent)
+  finally:self._recovery_temporary=None
+  self._phase_raw=raw;self._phase='RESTORED';self.restored=True
+  self._verify_recovery(boundary)
+  # Recovery has normalized every owned inode to the ordinary RESTORED
+  # layout.  Return to the normal verifier so callers cannot remain on the
+  # location-classification code path after the effect is complete.
+  self._recovering=False
+  self.verify(boundary);return self
+
+ def transition_evidence(self):
+  """Return the exact nonsecret selector membership owned by this transition."""
+  self.verify()
+  paths=(self.predecessor_source,self.predecessor_inode,self.candidate_stage,self.candidate_archive,
+      self.predecessor_request,self.predecessor_receipt,self.candidate_request,self.candidate_receipt,
+      self.predecessor_request_inode,self.predecessor_receipt_inode,self.candidate_request_stage,
+      self.candidate_receipt_stage,self.candidate_request_inode,self.candidate_receipt_inode,
+      self.intent_path,self.state_path,self.preparation_path,self.preparation_state_path)
+  rows=[]
+  for path in paths:
+   if not os.path.lexists(path):continue
+   relative=path.relative_to(self.selector).as_posix()
+   if path.is_dir() and not path.is_symlink():
+    rows.append({'path':relative,'kind':'tree','inventory_digest':'sha256:'+sha(canonical(safe_tree(path))),
+        'root_fact':self._tree_fact(path)[0]})
+   else:
+    raw=regular(path,expected_custody=(0,0,0o600))
+    rows.append({'path':relative,'kind':'file','bytes':len(raw),'sha256':sha(raw),
+        'fact':list(regular(path,fact=True,include_identity=True,expected_custody=(0,0,0o600)))})
+  return {'schema':'SereinKernelCanonicalInputTransitionEvidence/v1',
+      'selector':self.plan['rollback_selector'],
+      'phase':('PREPARATION_RETAINED' if getattr(self,'_preparation_recovery',False) and self.restored
+               else 'PREPARING' if getattr(self,'_preparation_recovery',False)
+               else self._phase or 'INTENT_UNRECORDED'),
+      'preparation_sha256':sha(self.preparation_raw),
+      'intent_sha256':(None if getattr(self,'_preparation_recovery',False) else sha(self.intent_raw)),
+      'state_sha256':(sha(self._preparation_state_raw) if getattr(self,'_preparation_recovery',False)
+                      and self._preparation_state_raw else sha(self._phase_raw) if self._phase_raw else None),
+      'owned_members':rows,'temporary':getattr(self,'_recovery_temporary',None),
+      'mutation_effect':'NONE' if self._phase in {None,'INTENT'} else 'CANONICAL_INPUT_OWNERSHIP'}
+
+ def _tree_fact(self,path):
+  path=Path(path);info=path.lstat()
+  deny(path.is_symlink() or not path.is_dir() or info.st_uid!=0
+       or stat.S_IMODE(info.st_mode)&0o022,'KERNEL_INPUT_TRANSITION_SOURCE_CUSTODY_DENIED')
+  rows=[]
+  for item in [path,*sorted(path.rglob('*'))]:
+   value=item.lstat()
+   deny(item.is_symlink() or (not item.is_dir() and not item.is_file()),
+        'KERNEL_INPUT_TRANSITION_SOURCE_CUSTODY_DENIED')
+   deny(value.st_uid!=0 or (item.is_dir() and stat.S_IMODE(value.st_mode)&0o022),
+        'KERNEL_INPUT_TRANSITION_SOURCE_CUSTODY_DENIED')
+   rows.append({'path':item.relative_to(path).as_posix(),'device':value.st_dev,
+       'inode':value.st_ino,'uid':value.st_uid,'gid':value.st_gid,
+       'mode':format(stat.S_IMODE(value.st_mode),'04o'),'nlink':value.st_nlink,
+       'bytes':value.st_size if item.is_file() else None})
+  return rows
+
+ def _copy_tree(self,source,target,boundary):
+  deny(os.path.lexists(target),'KERNEL_INPUT_TRANSITION_ARCHIVE_COLLISION')
+  target.mkdir(mode=0o700)
+  for row in safe_tree(source):
+   original=source/row['path'];raw=regular(original)
+   deny(len(raw)!=row['bytes'] or sha(raw)!=row['sha256'],
+        'KERNEL_INPUT_TRANSITION_SOURCE_CHANGED')
+   mode=stat.S_IMODE(original.lstat().st_mode)
+   deny(mode not in {0o644,0o755},'KERNEL_INPUT_TRANSITION_SOURCE_CUSTODY_DENIED')
+   self.module.atomic(target/row['path'],raw,format(mode,'04o'),boundary,create_only=True)
+  deny(safe_tree(target)!=safe_tree(source),'KERNEL_INPUT_TRANSITION_ARCHIVE_DENIED')
+  for directory in sorted([target,*[p for p in target.rglob('*') if p.is_dir()]],
+                          key=lambda p:len(p.parts),reverse=True):
+   fd=os.open(directory,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   try:os.fsync(fd)
+   finally:os.close(fd)
+  self.module.sync_parent(target)
+
+ def _write_phase(self,phase,boundary,*,create=False):
+  deny(phase not in self._PHASES,'KERNEL_INPUT_TRANSITION_PHASE_DENIED')
+  value={'schema':'SereinKernelCanonicalInputTransitionState/v1',
+      'intent_sha256':sha(self.intent_raw),'plan_sha256':sha(canonical(self.plan)),
+      'boot_id':self.plan['current_boot_id'],'phase':phase}
+  raw=self._signed(value,self.private,self.private.public_key())
+  prior_phase,prior_raw=self._phase,self._phase_raw
+  self._phase=phase;self._phase_raw=raw;self._phase_pending=True
+  self._prior_phase_raw=prior_raw
+  try:self.module.atomic(self.state_path,raw,'0600',boundary,create_only=create)
+  except BaseException:
+   self._uncertain=True
+   raise
+  self._phase_pending=False;self._prior_phase_raw=None
+
+ def _external_unchanged(self):
+  deny(self._tree_fact(self.external_source)!=self.new_source_fact
+       or safe_tree(self.external_source)!=self.new_inventory
+       or regular(self.external_request,fact=True,include_identity=True,
+           expected_custody=(0,0,0o600))!=self.new_request_fact
+       or regular(self.external_request,expected_custody=(0,0,0o600))!=self.new_request
+       or regular(self.external_receipt,fact=True,include_identity=True,
+           expected_custody=(0,0,0o600))!=self.new_receipt_fact
+       or regular(self.external_receipt,expected_custody=(0,0,0o600))!=self.new_receipt,
+       'KERNEL_INPUT_TRANSITION_EXTERNAL_CHANGED')
+
+ def _archives_unchanged(self):
+  if self._phase is None:return
+  facts=self._archive_facts
+  deny(not isinstance(facts,dict)
+       or self._tree_fact(self.predecessor_source)!=facts['predecessor_source']
+       or safe_tree(self.predecessor_source)!=self.old_inventory
+       or regular(self.predecessor_request,expected_custody=(0,0,0o600))!=self.old_request
+       or regular(self.predecessor_request,fact=True,include_identity=True,
+           expected_custody=(0,0,0o600))!=facts['predecessor_request']
+       or regular(self.predecessor_receipt,expected_custody=(0,0,0o600))!=self.old_receipt
+       or regular(self.predecessor_receipt,fact=True,include_identity=True,
+           expected_custody=(0,0,0o600))!=facts['predecessor_receipt']
+       or regular(self.candidate_request,expected_custody=(0,0,0o600))!=self.new_request
+       or regular(self.candidate_request,fact=True,include_identity=True,
+           expected_custody=(0,0,0o600))!=facts['candidate_request']
+       or regular(self.candidate_receipt,expected_custody=(0,0,0o600))!=self.new_receipt
+       or regular(self.candidate_receipt,fact=True,include_identity=True,
+           expected_custody=(0,0,0o600))!=facts['candidate_receipt'],
+       'KERNEL_INPUT_TRANSITION_ARCHIVE_CHANGED')
+  def exact_file(path,key):
+   return (os.path.lexists(path) and
+       regular(path,fact=True,include_identity=True,expected_custody=(0,0,0o600))==facts[key])
+  receipt_published=self._phase in {'RECEIPT_PUBLISHED','PUBLISHED','RESTORE_REQUEST'}
+  receipt_restored=self._phase in {'RESTORE_RECEIPT','RESTORED'}
+  request_published=self._phase=='PUBLISHED'
+  request_restored=self._phase in {'RESTORE_REQUEST','RESTORE_RECEIPT','RESTORED'}
+  if receipt_restored:
+   deny(os.path.lexists(self.predecessor_receipt_inode)
+        or not exact_file(self.candidate_receipt_inode,'candidate_receipt_stage'),
+        'KERNEL_INPUT_TRANSITION_ARCHIVE_CHANGED')
+  elif receipt_published:
+   deny(not exact_file(self.predecessor_receipt_inode,'predecessor_receipt_inode')
+        or os.path.lexists(self.candidate_receipt_stage),'KERNEL_INPUT_TRANSITION_ARCHIVE_CHANGED')
+  else:
+   deny(os.path.lexists(self.predecessor_receipt_inode)
+        or not exact_file(self.candidate_receipt_stage,'candidate_receipt_stage'),
+        'KERNEL_INPUT_TRANSITION_ARCHIVE_CHANGED')
+  if request_restored:
+   deny(os.path.lexists(self.predecessor_request_inode)
+        or not exact_file(self.candidate_request_inode,'candidate_request_stage'),
+        'KERNEL_INPUT_TRANSITION_ARCHIVE_CHANGED')
+  elif request_published:
+   deny(not exact_file(self.predecessor_request_inode,'predecessor_request_inode')
+        or os.path.lexists(self.candidate_request_stage),'KERNEL_INPUT_TRANSITION_ARCHIVE_CHANGED')
+  else:
+   deny(os.path.lexists(self.predecessor_request_inode)
+        or not exact_file(self.candidate_request_stage,'candidate_request_stage'),
+        'KERNEL_INPUT_TRANSITION_ARCHIVE_CHANGED')
+  if self._phase=='INTENT':
+   deny(self._tree_fact(self.candidate_stage)!=facts['candidate_source']
+        or safe_tree(self.candidate_stage)!=self.new_inventory
+        or os.path.lexists(self.predecessor_inode) or os.path.lexists(self.candidate_archive),
+        'KERNEL_INPUT_TRANSITION_ARCHIVE_CHANGED')
+  elif self._phase=='RESTORED':
+   deny(os.path.lexists(self.predecessor_inode) or os.path.lexists(self.candidate_stage)
+        or self._tree_fact(self.candidate_archive)!=facts['candidate_source']
+        or safe_tree(self.candidate_archive)!=self.new_inventory,
+        'KERNEL_INPUT_TRANSITION_ARCHIVE_CHANGED')
+  else:
+   deny(os.path.lexists(self.candidate_stage) or os.path.lexists(self.candidate_archive)
+        or self._tree_fact(self.predecessor_inode)!=self.old_source_fact
+        or safe_tree(self.predecessor_inode)!=self.old_inventory,
+        'KERNEL_INPUT_TRANSITION_ARCHIVE_CHANGED')
+
+ def _canonical_old(self,*,require_metadata_identity=True):
+  deny(self._tree_fact(self.canonical_source)!=self.old_source_fact
+       or safe_tree(self.canonical_source)!=self.old_inventory
+       or regular(self.request_path,expected_custody=(0,0,0o600))!=self.old_request
+       or regular(self.receipt_path,expected_custody=(0,0,0o600))!=self.old_receipt
+       or (require_metadata_identity and
+           (regular(self.request_path,fact=True,include_identity=True,
+               expected_custody=(0,0,0o600))!=self.old_request_fact
+            or regular(self.receipt_path,fact=True,include_identity=True,
+               expected_custody=(0,0,0o600))!=self.old_receipt_fact)),
+       'KERNEL_INPUT_TRANSITION_PREDECESSOR_CHANGED')
+
+ def _canonical_new(self):
+  receipt,digest=source_receipt(self.canonical_source,self.receipt_path,self.verify_path)
+  request=install_request(self.request_path)
+  deny(self._tree_fact(self.canonical_source)!=self._archive_facts['candidate_source']
+       or safe_tree(self.canonical_source)!=self.new_inventory
+       or regular(self.request_path,expected_custody=(0,0,0o600))!=self.new_request
+       or regular(self.request_path,fact=True,include_identity=True,
+           expected_custody=(0,0,0o600))!=self._published_request_fact
+       or regular(self.receipt_path,expected_custody=(0,0,0o600))!=self.new_receipt
+       or regular(self.receipt_path,fact=True,include_identity=True,
+           expected_custody=(0,0,0o600))!=self._published_receipt_fact
+       or digest!=self.plan['source_receipt_sha256']
+       or any(receipt.get(key)!=self.plan.get(key) for key in
+              ('source_parent','source_commit','source_tree','archive_sha256','release_digest'))
+       or any(request.get(key)!=self.plan.get(key) for key in
+              ('source_parent','source_commit','source_tree','archive_sha256')),
+       'KERNEL_INPUT_TRANSITION_TERMINAL_DENIED')
+
+ def verify(self,boundary=None):
+  if getattr(self,'_preparation_recovery',False):
+   return self._verify_preparation(boundary)
+  if getattr(self,'_recovering',False):return self._verify_recovery(boundary)
+  deny(self._uncertain,'KERNEL_INPUT_TRANSITION_UNCERTAIN')
+  if boundary is not None:boundary()
+  if getattr(self,'_prepared',False):
+   deny(regular(self.external_preparation_path,expected_custody=(0,0,0o600))!=
+        self.preparation_raw,'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+  if os.path.lexists(getattr(self,'preparation_path',Path('/nonexistent'))):
+   deny(regular(self.preparation_path,expected_custody=(0,0,0o600))!=self.preparation_raw,
+        'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+  self._external_unchanged()
+  self._archives_unchanged()
+  if self._phase is None:self._canonical_old()
+  else:
+   state=(regular(self.state_path,expected_custody=(0,0,0o600))
+          if os.path.lexists(self.state_path) else None)
+   allowed={self._phase_raw}
+   if self._phase_pending:allowed.add(self._prior_phase_raw)
+   deny(regular(self.intent_path,expected_custody=(0,0,0o600))!=self.intent_raw
+        or state not in allowed,
+        'KERNEL_INPUT_TRANSITION_EVIDENCE_CHANGED')
+   if self._phase=='INTENT':self._canonical_old()
+   elif self._phase=='SOURCE_PUBLISHED':
+    deny(self._tree_fact(self.canonical_source)!=self._archive_facts['candidate_source']
+         or safe_tree(self.canonical_source)!=self.new_inventory
+         or regular(self.request_path,expected_custody=(0,0,0o600))!=self.old_request
+         or regular(self.request_path,fact=True,include_identity=True,
+             expected_custody=(0,0,0o600))!=self.old_request_fact
+         or regular(self.receipt_path,expected_custody=(0,0,0o600))!=self.old_receipt
+         or regular(self.receipt_path,fact=True,include_identity=True,
+             expected_custody=(0,0,0o600))!=self.old_receipt_fact,
+         'KERNEL_INPUT_TRANSITION_PHASE_CHANGED')
+   elif self._phase=='RECEIPT_PUBLISHED':
+    deny(self._tree_fact(self.canonical_source)!=self._archive_facts['candidate_source']
+         or safe_tree(self.canonical_source)!=self.new_inventory
+         or regular(self.request_path,expected_custody=(0,0,0o600))!=self.old_request
+         or regular(self.request_path,fact=True,include_identity=True,
+             expected_custody=(0,0,0o600))!=self.old_request_fact
+         or regular(self.receipt_path,expected_custody=(0,0,0o600))!=self.new_receipt
+         or regular(self.receipt_path,fact=True,include_identity=True,
+             expected_custody=(0,0,0o600))!=self._published_receipt_fact,
+         'KERNEL_INPUT_TRANSITION_PHASE_CHANGED')
+   elif self._phase=='PUBLISHED':self._canonical_new()
+   elif self._phase=='RESTORE_REQUEST':
+    deny(self._tree_fact(self.canonical_source)!=self._archive_facts['candidate_source']
+         or safe_tree(self.canonical_source)!=self.new_inventory
+         or regular(self.request_path,expected_custody=(0,0,0o600))!=self.old_request
+         or regular(self.request_path,fact=True,include_identity=True,
+             expected_custody=(0,0,0o600))!=self._restored_request_fact
+         or regular(self.receipt_path,expected_custody=(0,0,0o600))!=self.new_receipt
+         or regular(self.receipt_path,fact=True,include_identity=True,
+             expected_custody=(0,0,0o600))!=self._published_receipt_fact,
+         'KERNEL_INPUT_TRANSITION_PHASE_CHANGED')
+   elif self._phase=='RESTORE_RECEIPT':
+    deny(self._tree_fact(self.canonical_source)!=self._archive_facts['candidate_source']
+         or safe_tree(self.canonical_source)!=self.new_inventory
+         or regular(self.request_path,expected_custody=(0,0,0o600))!=self.old_request
+         or regular(self.request_path,fact=True,include_identity=True,
+             expected_custody=(0,0,0o600))!=self._restored_request_fact
+         or regular(self.receipt_path,expected_custody=(0,0,0o600))!=self.old_receipt
+         or regular(self.receipt_path,fact=True,include_identity=True,
+             expected_custody=(0,0,0o600))!=self._restored_receipt_fact,
+         'KERNEL_INPUT_TRANSITION_PHASE_CHANGED')
+   elif self._phase=='RESTORED':
+    self._canonical_old(require_metadata_identity=False)
+    deny(regular(self.request_path,fact=True,include_identity=True,
+             expected_custody=(0,0,0o600))!=self._restored_request_fact
+         or regular(self.receipt_path,fact=True,include_identity=True,
+             expected_custody=(0,0,0o600))!=self._restored_receipt_fact,
+         'KERNEL_INPUT_TRANSITION_PHASE_CHANGED')
+   else:raise RunnerDenied('KERNEL_INPUT_TRANSITION_UNCERTAIN')
+  if boundary is not None:boundary()
+  return {'phase':self._phase or 'CAPTURED','restored':self.restored}
+
+ def _prepare_file(self,path,data,mode,boundary):
+  """Create one signed-preparation member without an unowned temp name."""
+  path.parent.mkdir(parents=True,exist_ok=True)
+  parent=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+  fd=-1
+  try:
+   boundary();self._verify_preparation()
+   fd=os.open(path.name,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,
+       int(mode,8),dir_fd=parent)
+   written=0
+   while written<len(data):written+=os.write(fd,data[written:])
+   os.fchmod(fd,int(mode,8));os.fchown(fd,0,0);os.fsync(fd);os.close(fd);fd=-1
+   os.fsync(parent)
+  finally:
+   if fd!=-1:os.close(fd)
+   os.close(parent)
+  self._verify_preparation(boundary)
+
+ def _prepare_tree(self,source,target,boundary):
+  deny(os.path.lexists(target),'KERNEL_INPUT_TRANSITION_ARCHIVE_COLLISION')
+  target.mkdir(mode=0o700);self.module.sync_parent(target)
+  for row in safe_tree(source):
+   original=source/row['path'];raw=regular(original)
+   deny(len(raw)!=row['bytes'] or sha(raw)!=row['sha256'],
+        'KERNEL_INPUT_TRANSITION_SOURCE_CHANGED')
+   mode=stat.S_IMODE(original.lstat().st_mode)
+   deny(mode not in {0o644,0o755},'KERNEL_INPUT_TRANSITION_SOURCE_CUSTODY_DENIED')
+   self._prepare_file(target/row['path'],raw,format(mode,'04o'),boundary)
+  deny(safe_tree(target)!=safe_tree(source),'KERNEL_INPUT_TRANSITION_ARCHIVE_DENIED')
+
+ def _verify_preparation(self,boundary=None):
+  if boundary is not None:boundary()
+  deny(current_boot()!=self.plan['current_boot_id'],
+       'KERNEL_INPUT_TRANSITION_STALE_BOOT')
+  deny(regular(getattr(self,'_preparation_record_path',self.preparation_path),
+       expected_custody=(0,0,0o600))!=self.preparation_raw,
+       'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+  deny(regular(self.external_preparation_path,expected_custody=(0,0,0o600))!=
+       self.preparation_raw,'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+  self._canonical_old();self._external_unchanged()
+  expected_files={
+      self.predecessor_request:self.old_request,self.predecessor_receipt:self.old_receipt,
+      self.candidate_request:self.new_request,self.candidate_receipt:self.new_receipt,
+      self.candidate_request_stage:self.new_request,self.candidate_receipt_stage:self.new_receipt}
+  allowed={self.preparation_path,self.preparation_state_path,*expected_files,
+      self.predecessor_source,self.candidate_stage}
+  forbidden={self.predecessor_inode,self.candidate_archive,
+      self.predecessor_request_inode,self.predecessor_receipt_inode,
+      self.candidate_request_inode,self.candidate_receipt_inode,self.state_path}
+  if not os.path.lexists(self.selector):
+   deny(self._preparation_record_path!=self.external_preparation_path
+        or self._preparation_state_raw is not None,
+        'KERNEL_INPUT_TRANSITION_PREPARATION_OWNERSHIP_DENIED')
+   if boundary is not None:boundary()
+   return {'phase':'PREPARING','restored':False}
+  deny(not self.selector.is_dir() or self.selector.is_symlink(),
+       'KERNEL_INPUT_TRANSITION_PREPARATION_OWNERSHIP_DENIED')
+  for item in self.selector.iterdir():
+   if item in allowed:continue
+   if item==self.intent_path:
+    deny(regular(item,expected_custody=(0,0,0o600))!=self.intent_raw,
+         'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+    continue
+   # The signed plan and installer own their pre-existing transaction files;
+   # preparation may not create or reinterpret anything else.
+   if item.name in {'plan.json'}:continue
+   deny(item in forbidden or item.name in self.preparation['allowed_members'],
+        'KERNEL_INPUT_TRANSITION_PREPARATION_OWNERSHIP_DENIED')
+  for path,expected in expected_files.items():
+   if not os.path.lexists(path):continue
+   info=path.lstat()
+   deny(path.is_symlink() or not path.is_file() or info.st_uid!=0 or info.st_gid!=0
+        or stat.S_IMODE(info.st_mode)!=0o600 or info.st_nlink!=1,
+        'KERNEL_INPUT_TRANSITION_PREPARATION_OWNERSHIP_DENIED')
+   raw=path.read_bytes()
+   deny(len(raw)>len(expected) or raw!=expected[:len(raw)],
+        'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+  def partial_tree(path,inventory):
+   if not os.path.lexists(path):return
+   info=path.lstat();deny(path.is_symlink() or not path.is_dir() or info.st_uid!=0
+       or stat.S_IMODE(info.st_mode)&0o022,'KERNEL_INPUT_TRANSITION_PREPARATION_OWNERSHIP_DENIED')
+   rows={row['path']:row for row in inventory}
+   directories={Path(row['path']).parent.as_posix() for row in inventory}
+   directories|={parent.as_posix() for row in inventory
+       for parent in Path(row['path']).parents if parent.as_posix()!='.'}
+   for item in sorted(path.rglob('*')):
+    value=item.lstat();deny(item.is_symlink() or (not item.is_dir() and not item.is_file()),
+        'KERNEL_INPUT_TRANSITION_PREPARATION_OWNERSHIP_DENIED')
+    if item.is_dir():
+     deny(item.relative_to(path).as_posix() not in directories
+          or value.st_uid!=0 or stat.S_IMODE(value.st_mode)&0o022,
+          'KERNEL_INPUT_TRANSITION_PREPARATION_OWNERSHIP_DENIED');continue
+    relative=item.relative_to(path).as_posix();row=rows.get(relative)
+    source_root=(self.canonical_source if path==self.predecessor_source else self.external_source)
+    expected_path=source_root/relative
+    deny(row is None or value.st_uid!=0 or value.st_gid!=0 or value.st_nlink!=1
+         or stat.S_IMODE(value.st_mode)!=stat.S_IMODE(expected_path.lstat().st_mode),
+         'KERNEL_INPUT_TRANSITION_PREPARATION_OWNERSHIP_DENIED')
+    raw=item.read_bytes()
+    # An abrupt write may leave only an exact prefix. It is retained as
+    # attributable evidence but can never become a published archive.
+    expected=regular(expected_path)
+    deny(len(raw)>len(expected) or raw!=expected[:len(raw)],
+         'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+  partial_tree(self.predecessor_source,self.old_inventory)
+  partial_tree(self.candidate_stage,self.new_inventory)
+  if self._preparation_state_raw is not None:
+   deny(regular(self.preparation_state_path,expected_custody=(0,0,0o600))!=
+        self._preparation_state_raw,'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+  if boundary is not None:boundary()
+  return {'phase':'PREPARATION_RETAINED' if self.restored else 'PREPARING',
+      'restored':self.restored}
+
+ def prepare(self,boundary):
+  """Durably bind the external successor before any Kernel payload effect."""
+  deny(not callable(boundary) or self._phase is not None or self._prepared,
+       'KERNEL_INPUT_TRANSITION_PREPARATION_DENIED')
+  final_plan=strict_json(canonical(self._plan_reference))
+  captured_base={k:v for k,v in self._captured_plan.items() if k not in {'native_identity','signature'}}
+  final_base={k:v for k,v in final_plan.items() if k not in {'native_identity','signature'}}
+  deny(captured_base!=final_base or not isinstance(final_plan.get('native_identity'),dict)
+       or not isinstance(final_plan.get('signature'),str),
+       'KERNEL_INPUT_TRANSITION_SIGNED_PLAN_DENIED')
+  try:self.private.public_key().verify(decode(final_plan['signature']),
+      canonical({k:v for k,v in final_plan.items() if k!='signature'}))
+  except Exception as exc:raise RunnerDenied('KERNEL_INPUT_TRANSITION_SIGNED_PLAN_DENIED') from exc
+  self.plan=final_plan
+  self.intent['plan_sha256']=sha(canonical(self.plan))
+  self.intent_raw=self._signed(self.intent,self.private,self.private.public_key())
+  self.preparation['plan_sha256']=sha(canonical(self.plan))
+  self.preparation['signed_plan']=strict_json(canonical(self.plan))
+  self.preparation_raw=self._signed(self.preparation,self.private,self.private.public_key())
+  boundary();self.verify()
+  deny(os.path.lexists(self.external_preparation_path),
+       'KERNEL_INPUT_TRANSITION_PREPARATION_COLLISION')
+  self.module.atomic(self.external_preparation_path,self.preparation_raw,'0600',boundary,
+      create_only=True)
+  deny(regular(self.external_preparation_path,expected_custody=(0,0,0o600))!=
+       self.preparation_raw,'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+  self._prepared=True
+  boundary();self.verify();return self
+
+ def publish(self,boundary):
+  deny(not callable(boundary) or self._phase is not None,
+       'KERNEL_INPUT_TRANSITION_PUBLICATION_DENIED')
+  if not self._prepared:self.prepare(boundary)
+  deny(regular(self.external_preparation_path,expected_custody=(0,0,0o600))!=
+       self.preparation_raw,'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+  final_plan=strict_json(canonical(self._plan_reference))
+  deny(final_plan!=self.plan,'KERNEL_INPUT_TRANSITION_SIGNED_PLAN_DENIED')
+  boundary();self.verify()
+  deny(not self.selector.is_dir() or self.selector.is_symlink(),
+       'KERNEL_INPUT_TRANSITION_SELECTOR_DENIED')
+  for path in (self.predecessor_source,self.predecessor_inode,self.candidate_stage,
+      self.candidate_archive,self.predecessor_request,self.predecessor_receipt,
+      self.candidate_request,self.candidate_receipt,self.predecessor_request_inode,
+      self.predecessor_receipt_inode,self.candidate_request_stage,self.candidate_receipt_stage,
+      self.candidate_request_inode,self.candidate_receipt_inode,self.intent_path,self.state_path,
+      self.preparation_path,self.preparation_state_path):
+   deny(os.path.lexists(path),'KERNEL_INPUT_TRANSITION_ARCHIVE_COLLISION')
+  self.module.atomic(self.preparation_path,self.preparation_raw,'0600',boundary,create_only=True)
+  self._preparation_record_path=self.preparation_path
+  self._preparation_recovery=True
+  self._prepare_tree(self.canonical_source,self.predecessor_source,boundary)
+  self._prepare_tree(self.external_source,self.candidate_stage,boundary)
+  self._prepare_file(self.predecessor_request,self.old_request,'0600',boundary)
+  self._prepare_file(self.predecessor_receipt,self.old_receipt,'0600',boundary)
+  self._prepare_file(self.candidate_request,self.new_request,'0600',boundary)
+  self._prepare_file(self.candidate_receipt,self.new_receipt,'0600',boundary)
+  self._prepare_file(self.candidate_request_stage,self.new_request,'0600',boundary)
+  self._prepare_file(self.candidate_receipt_stage,self.new_receipt,'0600',boundary)
+  self._archive_facts={
+      'predecessor_source':self._tree_fact(self.predecessor_source),
+      'candidate_source':self._tree_fact(self.candidate_stage),
+      'predecessor_request_inode':self.old_request_fact,
+      'predecessor_receipt_inode':self.old_receipt_fact,
+      'predecessor_request':regular(self.predecessor_request,fact=True,include_identity=True,
+          expected_custody=(0,0,0o600)),
+      'predecessor_receipt':regular(self.predecessor_receipt,fact=True,include_identity=True,
+          expected_custody=(0,0,0o600)),
+      'candidate_request':regular(self.candidate_request,fact=True,include_identity=True,
+          expected_custody=(0,0,0o600)),
+      'candidate_receipt':regular(self.candidate_receipt,fact=True,include_identity=True,
+          expected_custody=(0,0,0o600)),
+      'candidate_request_stage':regular(self.candidate_request_stage,fact=True,include_identity=True,
+          expected_custody=(0,0,0o600)),
+      'candidate_receipt_stage':regular(self.candidate_receipt_stage,fact=True,include_identity=True,
+          expected_custody=(0,0,0o600))}
+  self.intent['archives']=strict_json(canonical(self._archive_facts))
+  self.intent_raw=self._signed(self.intent,self.private,self.private.public_key())
+  self.module.atomic(self.intent_path,self.intent_raw,'0600',boundary,create_only=True)
+  self._preparation_recovery=False
+  self._write_phase('INTENT',boundary,create=True)
+  self.verify(boundary)
+  parent_fd=os.open(self.canonical_source.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+  selector_fd=os.open(self.selector,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+  try:
+   boundary();self.verify()
+   os.rename(self.canonical_source.name,self.predecessor_inode.name,
+       src_dir_fd=parent_fd,dst_dir_fd=selector_fd)
+   os.rename(self.candidate_stage.name,self.canonical_source.name,
+       src_dir_fd=selector_fd,dst_dir_fd=parent_fd)
+   os.fsync(parent_fd);os.fsync(selector_fd)
+  except Exception as exc:
+   self._uncertain=True
+   raise WitnessPublicationUncertain('KERNEL_INPUT_TRANSITION_SOURCE_PUBLICATION_UNCERTAIN') from exc
+  finally:os.close(selector_fd);os.close(parent_fd)
+  try:
+   self._write_phase('SOURCE_PUBLISHED',boundary)
+   parent_fd=os.open(self.receipt_path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   selector_fd=os.open(self.selector,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   try:
+    boundary();self.verify()
+    os.rename(self.receipt_path.name,self.predecessor_receipt_inode.name,
+        src_dir_fd=parent_fd,dst_dir_fd=selector_fd)
+    os.rename(self.candidate_receipt_stage.name,self.receipt_path.name,
+        src_dir_fd=selector_fd,dst_dir_fd=parent_fd)
+    os.fsync(parent_fd);os.fsync(selector_fd)
+   finally:os.close(selector_fd);os.close(parent_fd)
+   self._published_receipt_fact=regular(self.receipt_path,fact=True,include_identity=True,
+       expected_custody=(0,0,0o600))
+   deny(self._published_receipt_fact!=self._archive_facts['candidate_receipt_stage'],
+        'KERNEL_INPUT_TRANSITION_PHASE_CHANGED')
+   self._write_phase('RECEIPT_PUBLISHED',boundary)
+   parent_fd=os.open(self.request_path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   selector_fd=os.open(self.selector,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   try:
+    boundary();self.verify()
+    os.rename(self.request_path.name,self.predecessor_request_inode.name,
+        src_dir_fd=parent_fd,dst_dir_fd=selector_fd)
+    os.rename(self.candidate_request_stage.name,self.request_path.name,
+        src_dir_fd=selector_fd,dst_dir_fd=parent_fd)
+    os.fsync(parent_fd);os.fsync(selector_fd)
+   finally:os.close(selector_fd);os.close(parent_fd)
+   self._published_request_fact=regular(self.request_path,fact=True,include_identity=True,
+       expected_custody=(0,0,0o600))
+   deny(self._published_request_fact!=self._archive_facts['candidate_request_stage'],
+        'KERNEL_INPUT_TRANSITION_PHASE_CHANGED')
+   self._write_phase('PUBLISHED',boundary)
+   self.verify(boundary);return self
+  except BaseException as exc:
+   self._uncertain=True
+   if isinstance(exc,WitnessPublicationUncertain):raise
+   raise WitnessPublicationUncertain('KERNEL_INPUT_TRANSITION_PUBLICATION_UNCERTAIN') from exc
+
+ def restore(self,boundary):
+  deny(not callable(boundary),'KERNEL_INPUT_TRANSITION_RESTORE_DENIED')
+  if getattr(self,'_preparation_recovery',False):
+   self._verify_preparation(boundary)
+   deny(not self.selector.is_dir() or self.selector.is_symlink(),
+        'KERNEL_INPUT_TRANSITION_PREPARATION_SELECTOR_ABSENT')
+   value={'schema':'SereinKernelCanonicalInputPreparationState/v1',
+       'preparation_sha256':sha(self.preparation_raw),
+       'plan_sha256':sha(canonical(self.plan)),
+       'boot_id':self.plan['current_boot_id'],'state':'RETAINED_UNPUBLISHED',
+       'canonical_effect':'NONE','activation':'DENIED'}
+   raw=self._signed(value,self.private,self.private.public_key())
+   if self._preparation_state_raw is None:
+    def state_intent(row):
+     self._recovery_temporary={'path':(self.preparation_state_path.parent/row['temporary']).relative_to(self.selector).as_posix(),
+         'device':row['device'],'inode':row['inode'],'bytes':len(raw),'sha256':sha(raw),
+         'uid':0,'gid':0,'mode':'0600','nlink':1}
+    try:
+     self.module.atomic(self.preparation_state_path,raw,'0600',boundary,
+         create_only=True,on_intent=state_intent)
+    finally:self._recovery_temporary=None
+   else:deny(self._preparation_state_raw!=raw,
+       'KERNEL_INPUT_TRANSITION_PREPARATION_CHANGED')
+   self._preparation_state_raw=raw;self.restored=True
+   self._verify_preparation(boundary);return self
+  if getattr(self,'_recovering',False):return self._restore_interrupted(boundary)
+  if self._phase is None:
+   # A whole-install failure before publish has made no canonical-input
+   # effect.  Prove both sides are still the captured inputs and return a
+   # preservation result without creating an intent, archive, or inode.
+   boundary();self.verify();boundary()
+   self.restored=True
+   return self
+  deny(self._phase!='PUBLISHED','KERNEL_INPUT_TRANSITION_RESTORE_DENIED')
+  boundary();self.verify()
+  try:
+   parent_fd=os.open(self.request_path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   selector_fd=os.open(self.selector,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   try:
+    os.rename(self.request_path.name,self.candidate_request_inode.name,
+        src_dir_fd=parent_fd,dst_dir_fd=selector_fd)
+    os.rename(self.predecessor_request_inode.name,self.request_path.name,
+        src_dir_fd=selector_fd,dst_dir_fd=parent_fd)
+    os.fsync(parent_fd);os.fsync(selector_fd)
+   finally:os.close(selector_fd);os.close(parent_fd)
+   self._restored_request_fact=regular(self.request_path,fact=True,include_identity=True,
+       expected_custody=(0,0,0o600))
+   deny(self._restored_request_fact!=self.old_request_fact,
+        'KERNEL_INPUT_TRANSITION_RESTORE_UNCERTAIN')
+   self._write_phase('RESTORE_REQUEST',boundary)
+   parent_fd=os.open(self.receipt_path.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   selector_fd=os.open(self.selector,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+   try:
+    os.rename(self.receipt_path.name,self.candidate_receipt_inode.name,
+        src_dir_fd=parent_fd,dst_dir_fd=selector_fd)
+    os.rename(self.predecessor_receipt_inode.name,self.receipt_path.name,
+        src_dir_fd=selector_fd,dst_dir_fd=parent_fd)
+    os.fsync(parent_fd);os.fsync(selector_fd)
+   finally:os.close(selector_fd);os.close(parent_fd)
+   self._restored_receipt_fact=regular(self.receipt_path,fact=True,include_identity=True,
+       expected_custody=(0,0,0o600))
+   deny(self._restored_receipt_fact!=self.old_receipt_fact,
+        'KERNEL_INPUT_TRANSITION_RESTORE_UNCERTAIN')
+   self._write_phase('RESTORE_RECEIPT',boundary)
+  except BaseException as exc:
+   self._uncertain=True
+   if isinstance(exc,WitnessPublicationUncertain):raise
+   raise WitnessPublicationUncertain('KERNEL_INPUT_TRANSITION_RESTORE_UNCERTAIN') from exc
+  parent_fd=os.open(self.canonical_source.parent,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+  selector_fd=os.open(self.selector,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+  try:
+   boundary();self.verify()
+   deny(os.path.lexists(self.candidate_archive) or not self.predecessor_inode.is_dir(),
+        'KERNEL_INPUT_TRANSITION_RESTORE_COLLISION')
+   os.rename(self.canonical_source.name,self.candidate_archive.name,
+       src_dir_fd=parent_fd,dst_dir_fd=selector_fd)
+   os.rename(self.predecessor_inode.name,self.canonical_source.name,
+       src_dir_fd=selector_fd,dst_dir_fd=parent_fd)
+   os.fsync(parent_fd);os.fsync(selector_fd)
+  except Exception as exc:
+   self._uncertain=True
+   raise WitnessPublicationUncertain('KERNEL_INPUT_TRANSITION_RESTORE_UNCERTAIN') from exc
+  finally:os.close(selector_fd);os.close(parent_fd)
+  self._write_phase('RESTORED',boundary);self.restored=True
+  self.verify(boundary);return self
+
+
 def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,signing_path=SIGNING_KEY,verify_path=VERIFY_KEY,source_receipt_path=SOURCE_RECEIPT,installer=None,rollback_installer=None,*,construct=False,compute_expectation=None,read_compute_expectation=None,read_public_response=None,read_public_request=None):
  # Serialize with Outpost promotion using its already-proven root-private lock.
  # Do not introduce a service-owned privileged lock or a new root service.
@@ -4451,8 +5845,11 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
     deny(sha(canonical(failed_plan))!=previous['plan_sha256'],'KERNEL_FAILED_PLAN_CHANGED')
     observe_failed_native_prestate(root,failed_plan,failed,runtime_source,expected_release=plan['release_digest'])
   retirement_guard=lambda:None
+  input_owner=None
+  external_inputs=(source,request_path,source_receipt_path)
   def material_boundary():
    check_material()
+   if input_owner is not None:input_owner.verify()
    retirement_guard()
    failed_runtime_boundary(source)
    if 'native_allocation' in request and not runtime_disposition['native_mutating']:
@@ -4464,6 +5861,15 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
   deny(sha(regular(verify_path))!=CANONICAL_AUTHORITY_SHA256,"KERNEL_CANONICAL_ANCHOR_DENIED")
   private=load_pem_private_key(regular(signing_path),password=None)
   module=load_installer(source,read_json(source/'release-manifest.json'),expected_release=plan['release_digest'])
+  if successor and not retired_request:
+   canonical_inputs=(STATE/'source/sfos/kernel',STATE/'install-request.json',STATE/'source-receipt.json')
+   if (source,request_path,source_receipt_path)!=canonical_inputs:
+    deny(any(path==expected for path,expected in zip(
+        (source,request_path,source_receipt_path),canonical_inputs)),
+        'KERNEL_SUCCESSOR_MIXED_INPUT_PATHS_DENIED')
+    input_owner=KernelSuccessorInputs(plan=plan,root=root,source=source,
+        request_path=request_path,source_receipt_path=source_receipt_path,
+        verify_path=verify_path,module=module,private=private)
   if 'installed_predecessor' in plan:
    native_material={'binding':dict(plan['native_identity']),
        'registry':regular(Path(root)/module.NATIVE_REGISTRY.lstrip('/'),expected_custody=(0,0,0o644)),
@@ -4479,6 +5885,11 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
    signed_runtime_plan['signature']=base64.urlsafe_b64encode(
        private.sign(runtime_module.signing_payload(signed_runtime_plan))).decode().rstrip('=')
   policy_evidence=module.prepare_installed_policy_evidence(root,source,plan,private,native_material=native_material)
+  if input_owner is not None:
+   # Authenticate the external source before quiescence or the first payload
+   # effect. A later complete Outpost recovery must not depend on publish()
+   # having reached its post-placement archive preparation.
+   input_owner.prepare(material_boundary)
   if successor:
    previous=request['installed_predecessor']
    def verify_predecessor():
@@ -4492,6 +5903,20 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
     # Restored runtime bytes alone cannot restart a generation against a new
     # canonical source inbox. Require its original signed provider binding.
     old=verify_predecessor()['plan']
+    if input_owner is not None:
+     # The input owner restores its exact canonical trio, never the external
+     # delivery directory. Failed generations cannot reactivate predecessor
+     # requests or hide the retained rejected candidate.
+     if not input_owner.restored:input_owner.restore(material_boundary)
+     def restored_inputs_guard():
+      material_boundary()
+      restored,digest=source_receipt(input_owner.canonical_source,
+          input_owner.canonical_receipt,verify_path)
+      deny(digest!=old['source_receipt_sha256'] or any(restored[k]!=old[k] for k in
+          ('source_parent','source_commit','source_tree','archive_sha256','release_digest')),
+          'KERNEL_SUCCESSOR_RUNTIME_SOURCE_NOT_RESTORED')
+     restored_inputs_guard()
+     return restored_inputs_guard
     parked=Path(root)/plan['rollback_selector'].lstrip('/')/'candidate-source'
     immutable_before={name:regular(Path(root)/name.lstrip('/'),fact=True) for name in IMMUTABLE_POLICY}
     retained_material=None
@@ -4529,7 +5954,8 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
              for key in rows[name]) for name in failed),'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
     evidence={'schema':'SereinKernelSuccessorQuiescence/v1','boot_id':boot,
         'predecessor_boot_id':plan['installed_predecessor']['current_boot_id'],
-        'predecessor_restart':('DENIED_FAILED_CONSTRUCTION' if 'failed_construction' in previous else
+        'predecessor_restart':('DENIED_ATOMIC_SUCCESSOR_FAILURE' if input_owner is not None else
+                              'DENIED_FAILED_CONSTRUCTION' if 'failed_construction' in previous else
                               'SAME_BOOT_ONLY' if plan['installed_predecessor']['current_boot_id']==plan['current_boot_id']
                                else 'DENIED_HISTORICAL_BOOT'),
         'request_sha256':sha(request_raw),'plan_sha256':sha(canonical(plan)),
@@ -4642,7 +6068,9 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
         verify_predecessor=verify_predecessor,verify_restored=verify_restored,publication=publication,
         predecessor_boot_id=plan['installed_predecessor']['current_boot_id'],
         current_boot_id=plan['current_boot_id'],
-        retain_prestate=retain_prestate,failed_predecessor='failed_construction' in previous))
+        retain_prestate=retain_prestate,
+        failed_predecessor='failed_construction' in previous,
+        keep_predecessor_inactive=input_owner is not None))
    successor_unit_prestate=unit_prestate
    unit_prestate=inactive_kernel_units()
   def boundary():
@@ -4696,6 +6124,17 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
    guard()
   try:
    deny(receipt.get("status")!="INSTALLED_INACTIVE" or receipt.get("receipt")!=plan["rollback_selector"]+"/receipt.json","KERNEL_INSTALL_RECEIPT_DENIED");deny("sha256:"+sha(canonical(safe_tree(source)))!=plan["source_inventory_digest"],"KERNEL_SOURCE_CHANGED_DURING_INSTALL");receipt_digest=verify_install(root,plan,receipt,source=source)
+   if input_owner is not None:
+    # One owner controls the complete inactive payload and all three source
+    # inputs. Only its all-new readback permits any Authority lifecycle.
+    input_owner.publish(boundary)
+    source=input_owner.canonical_source
+    request_path=input_owner.canonical_request
+    source_receipt_path=input_owner.canonical_receipt
+    check_material=_kernel_material_boundary(plan,host_prestate,request_raw,
+        root=root,source=source,request_path=request_path,host_path=host_path,
+        check_parent=check_parent,preserved_runtime=prepared['preserved_runtime'])
+    boundary()
    if retired_request:
     # Before any lifecycle/replay activity, prove every unchanged protected
     # root again, including complete model bytes. Only the signed policy row
@@ -4919,6 +6358,16 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
     retired_inbox_owned=False;retired_inbox_transition=False
    deny(rollback_installer is None,"KERNEL_POSTINSTALL_ROLLBACK_UNAVAILABLE")
    rollback_installer(root,canonical_receipt,boundary=compensation_boundary)
+   if input_owner is not None:
+    # During the reverse transition the canonical trio is phase-bound by
+    # input_owner; the immutable candidate remains independently verified at
+    # its original delivery path, not incorrectly required at a moving path.
+    source,request_path,source_receipt_path=external_inputs
+    check_material=_kernel_material_boundary(plan,host_prestate,request_raw,
+        root=root,source=source,request_path=request_path,host_path=host_path,
+        check_parent=check_parent,preserved_runtime=prepared['preserved_runtime'])
+    input_owner.restore(compensation_boundary)
+    compensation_boundary()
    if definitions_refresh_attempted:
     try:
      refresh_definitions(compensation_boundary)
