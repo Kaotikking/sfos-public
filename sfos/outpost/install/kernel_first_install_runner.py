@@ -43,7 +43,8 @@ OTHER_KERNEL_UNITS=('serein-observation-audit.service','serein-observation-audit
                     'serein-kernel-operations-api.service','serein-kernel-operations-api.socket')+RESIDENCY_UNITS
 OPERATIONS_SERVICES=('serein-kernel-operations-heartbeat.service','serein-observation-audit.service')
 OPERATIONS_ENDPOINT=('serein-kernel-operations-api.service','serein-kernel-operations-api.socket')
-SUCCESSOR_FAILURE_UNITS=(AUTHORITY_UNITS[0],)+OPERATIONS_SERVICES+OPERATIONS_ENDPOINT+RESIDENCY_UNITS
+HAOS_GATEWAY_ENDPOINT=('serein-kernel-client-gateway@haos.service','serein-kernel-client-gateway-haos.socket')
+SUCCESSOR_FAILURE_UNITS=(AUTHORITY_UNITS[0],)+OPERATIONS_SERVICES+OPERATIONS_ENDPOINT+RESIDENCY_UNITS+HAOS_GATEWAY_ENDPOINT
 OPERATIONS_UNITS=('serein-kernel-operations-api.socket','serein-kernel-operations-api.service',
                   'serein-kernel-operations-heartbeat.service',
                   'serein-observation-audit.socket','serein-observation-audit.service')
@@ -4150,6 +4151,66 @@ def _read_failed_authority_endpoint(rows):
          'invocation_journal_sha256':sha(journal.stdout.encode()),'cgroup':'ABSENT'}
 
 
+def _read_failed_haos_gateway_endpoint(rows):
+ """Read the exact exited Gateway/start-limited socket pair; no reset or start.
+
+ QGA284379 binds this failure shape. Full predecessor, source, current boot
+ and immutable custody verification remain the surrounding owner's gates.
+ """
+ import subprocess
+ service,socket=HAOS_GATEWAY_ENDPOINT
+ if not any(rows[name]['ActiveState']=='failed' for name in HAOS_GATEWAY_ENDPOINT):return {}
+ deny(any((rows[name]['ActiveState'],rows[name]['SubState'])!=('failed','failed')
+          for name in HAOS_GATEWAY_ENDPOINT),'KERNEL_SUCCESSOR_GATEWAY_FAILURE_DENIED')
+ captured={}
+ for name in HAOS_GATEWAY_ENDPOINT:
+  extra=('ControlPID','ControlGroup','Job','Result','InvocationID','KillMode','User','Group','Slice')
+  if name==service:extra+=('MainPID','ExecMainCode','ExecMainStatus',
+       'ExecMainStartTimestampMonotonic','Restart','NRestarts')
+  properties=tuple(rows[name])+extra
+  try:
+   response=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
+       '--property='+','.join(properties),name],capture_output=True,text=True,
+       timeout=15,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+       stdin=subprocess.DEVNULL,close_fds=True)
+  except (OSError,subprocess.SubprocessError) as exc:
+   raise RunnerDenied('KERNEL_SUCCESSOR_GATEWAY_FAILURE_DENIED') from exc
+  deny(len(response.stdout)>16384 or response.stderr,'KERNEL_SUCCESSOR_GATEWAY_FAILURE_DENIED')
+  value={}
+  for line in response.stdout.splitlines():
+   key,sep,item=line.partition('=')
+   deny(not sep or key in value,'KERNEL_SUCCESSOR_GATEWAY_FAILURE_DENIED')
+   value[key]=item
+  exact={'ControlPID':'0','ControlGroup':'','Job':'','KillMode':'control-group'}
+  if name==service:
+   exact.update(MainPID='0',ExecMainCode='1',ExecMainStatus='1',User='serein-stage1',
+       Group='serein-stage1',Restart='on-failure',NRestarts='1',Result='exit-code',
+       Slice=r'system-serein\\x2dkernel\\x2dclient\\x2dgateway.slice')
+  else:exact.update(User='',Group='',Slice='system.slice',Result='service-start-limit-hit')
+  deny(set(value)!=set(properties) or any(value.get(k)!=v for k,v in {**rows[name],**exact}.items())
+       or not re.fullmatch(r'[0-9a-f]{32}',value.get('InvocationID',''))
+       or value['InvocationID']=='0'*32,'KERNEL_SUCCESSOR_GATEWAY_FAILURE_DENIED')
+  if name==service:
+   deny(not re.fullmatch(r'[1-9][0-9]{0,19}',value.get('ExecMainStartTimestampMonotonic','')),
+        'KERNEL_SUCCESSOR_GATEWAY_FAILURE_DENIED')
+  cgroup=('/sys/fs/cgroup/system.slice/'+
+      (r'system-serein\x2dkernel\x2dclient\x2dgateway.slice/' if name==service else '')+name)
+  deny(os.path.lexists(cgroup),'KERNEL_SUCCESSOR_GATEWAY_FAILURE_DENIED')
+  captured[name]=value
+ invocation=captured[service]['InvocationID']
+ try:
+  journal=subprocess.run(['/usr/bin/journalctl','--no-pager','-b','-o','short-monotonic',
+      '_SYSTEMD_INVOCATION_ID='+invocation,'+','OBJECT_SYSTEMD_INVOCATION_ID='+invocation],
+      capture_output=True,text=True,timeout=15,check=True,
+      env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},stdin=subprocess.DEVNULL,close_fds=True)
+ except (OSError,subprocess.SubprocessError) as exc:
+  raise RunnerDenied('KERNEL_SUCCESSOR_GATEWAY_FAILURE_EVIDENCE_DENIED') from exc
+ deny(not journal.stdout or len(journal.stdout.encode())>65536 or journal.stderr,
+      'KERNEL_SUCCESSOR_GATEWAY_FAILURE_EVIDENCE_DENIED')
+ return {'controls':captured,'invocation_journal':journal.stdout,
+         'invocation_journal_sha256':sha(journal.stdout.encode()),'cgroups':'ABSENT'}
+
+
 @contextmanager
 def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restored,publication,
                              predecessor_boot_id,current_boot_id,retain_prestate=None,failed_predecessor=False):
@@ -4220,6 +4281,7 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
   deny(not callable(retain_prestate),'KERNEL_SUCCESSOR_FAILURE_EVIDENCE_REQUIRED')
  endpoint_controls=_read_failed_operations_endpoint(original)
  authority_controls=_read_failed_authority_endpoint(original)
+ gateway_controls=_read_failed_haos_gateway_endpoint(original)
  if failed or not restart_predecessor:
   retain_prestate(original)
   guard();verify_predecessor()
@@ -4227,6 +4289,8 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
   deny(_read_failed_operations_endpoint(original)!=endpoint_controls,
        'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
   deny(_read_failed_authority_endpoint(original)!=authority_controls,
+       'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
+  deny(_read_failed_haos_gateway_endpoint(original)!=gateway_controls,
        'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
  try:
   for units in reversed(groups):
@@ -4241,6 +4305,9 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
    if reset:
     deny(any((observed[name]['ActiveState'],observed[name]['SubState'])!=('failed','failed')
              for name in reset),'KERNEL_SUCCESSOR_FAILED_PRESTATE_CHANGED')
+    if any(name in HAOS_GATEWAY_ENDPOINT for name in reset):
+     deny(_read_failed_haos_gateway_endpoint(observed)!=gateway_controls,
+          'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
     command('reset-failed',reset)
     observed=read();definitions(observed)
    deny(any((observed[name]['ActiveState'],observed[name]['SubState'])!=('inactive','dead') for name in units),
@@ -4456,6 +4523,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
     controls=read_operations_service_controls()
     endpoint_controls=_read_failed_operations_endpoint(rows)
     authority_controls=_read_failed_authority_endpoint(rows)
+    gateway_controls=_read_failed_haos_gateway_endpoint(rows)
     failed=[name for name in OPERATIONS_SERVICES if rows[name]['ActiveState']=='failed']
     deny(any(controls[name]['MainPID']!='0' or any(controls[name][key]!=rows[name][key]
              for key in rows[name]) for name in failed),'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
@@ -4470,6 +4538,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
         'failed_predecessors':[name for name in SUCCESSOR_FAILURE_UNITS if rows[name]['ActiveState']=='failed'],
         'operations_endpoint_failure_controls':endpoint_controls,
         'authority_failure_controls':authority_controls,
+        'haos_gateway_failure_controls':gateway_controls,
         'failed_predecessor_compensation':'REMAIN_INACTIVE_NEVER_RESTART'}
     evidence['evidence_digest']=sha(canonical(evidence))
     def evidence_boundary():
@@ -4477,6 +4546,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
      deny(read_operations_service_controls()!=controls,'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
      deny(_read_failed_operations_endpoint(rows)!=endpoint_controls,'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
      deny(_read_failed_authority_endpoint(rows)!=authority_controls,'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
+     deny(_read_failed_haos_gateway_endpoint(rows)!=gateway_controls,'KERNEL_SUCCESSOR_FAILED_PROCESS_CHANGED')
     atomic(STATE/('kernel-successor-quiescence-'+sha(request_raw)+'.json'),
         evidence,witness_fd,evidence_boundary)
    if retired_request:

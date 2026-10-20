@@ -10,6 +10,7 @@ import hashlib
 import http.client
 import importlib.util
 import json
+import logging
 import os
 import pwd
 import signal
@@ -1544,7 +1545,22 @@ def serve(*, output_path: Path, boot_id_path: Path, descriptor_path: Path,
             # sampler. It must not advertise dispatch or complete Phase B.
             value['scheduler_decision']=selection
             value['scheduler_state']='QUEUE_SELECTION_OBSERVED_NOT_DISPATCH'
-            value['audit_observation']=record_operations_observation(value,root=installed_root)
+            try:
+                value['audit_observation']=record_operations_observation(value,root=installed_root)
+            except TimeoutError:
+                # A durable Audit append may have happened without its ACK.
+                # Keep the last acknowledged observation unchanged; collect a
+                # new sample rather than replaying this one or claiming health.
+                from .audit import operations_event
+                logging.getLogger(__name__).warning('%s',json.dumps({
+                    'schema':'SereinOperationsUnacknowledgedSample/v1',
+                    'reason':'AUDIT_ACK_TIMEOUT',
+                    'boot_id':value['boot_id'],
+                    'sequence':next_sequence,
+                    'event_sha256':hashlib.sha256(canonical(operations_event(value))).hexdigest(),
+                },sort_keys=True,separators=(',',':')))
+                next_tick()
+                continue
             # Audit is a bounded socket wait. Preserve its actual record on
             # subsequent drift, but never publish it as current latest proof.
             after_audit=queue.select_installed_conversation(root=installed_root,
