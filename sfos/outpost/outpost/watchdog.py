@@ -7,7 +7,7 @@ import socket
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .constitutional_registry import registry_snapshot
 from .host_vitality import BOOT, JOINED_SCHEMA, RECIPE_SCHEMA, HostVitalityStore, HostCollectionAttempts, host_attempt_matches, digest
@@ -48,7 +48,18 @@ def _write_atomic(path: Path, value: dict[str, Any]) -> None:
 
 def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, boot_id_path: Path = BOOT_ID_PATH, observed_at: float | None = None,
                  host_store: HostVitalityStore | None = None, host_attempts: HostCollectionAttempts | None = None,
-                 chronology: VitalityChronology | None = None) -> dict[str, Any]:
+                 chronology: VitalityChronology | None = None,
+                 durable_progress: Callable[[], None] | None = None) -> dict[str, Any]:
+    def checkpoint() -> None:
+        # Liveness follows completed durable work, never a background keepalive
+        # or an admission/READY claim. Notification failure must escape the
+        # evidence-degradation catch below and stop this iteration.
+        if durable_progress is not None:
+            try:
+                durable_progress()
+            except Exception as error:
+                raise RuntimeError("WATCHDOG_PROGRESS_NOTIFICATION_FAILED") from error
+
     now = time.time() if observed_at is None else observed_at
     try:
         boot_id = boot_id_path.read_text(encoding="ascii").strip()
@@ -91,6 +102,7 @@ def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, 
         raise WatchdogError("WATCHDOG_SOURCE_UNAVAILABLE")
     try:
         event, history = chronology.append_watchdog("watchdog:" + digest(state), now, state)
+        checkpoint()
         # Derive prior-boot evidence from the same locked, validated history.
         # Exclude this tick; a replay still retains the complete current tail.
         previous, first_post_boot_at = history["previous"], history["first_post_boot_at"]
@@ -113,6 +125,7 @@ def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, 
             }
             recovery = classify_reboot({**observation, "evidence_digest": digest(observation)})
             _write_atomic(state_root.parent / "recovery" / "current.json", recovery)
+            checkpoint()
         history_claim = "CHRONOLOGY_OBSERVED"
         history_payload = {"event_count": history["event_count"], "latest_event": history["latest_event"]}
         history_ref = "chronology:" + history["latest_event"]["event_hash"]
@@ -122,14 +135,17 @@ def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, 
         history_payload = {"status": "UNAVAILABLE"}
         history_ref = "outpost-reader:watchdog-chronology"
     _write_atomic(state_root / "current.json", state)
+    checkpoint()
     _write_atomic(producer_root / "outpost-watchdog.json", producer_observation(
         perspective="outpost", producer="OUTPOST_WATCHDOG", claim=state["watchdog_state"],
         observed_at=now, boot_id=boot_id, evidence_ref="watchdog:" + digest(state), payload=state,
     ))
+    checkpoint()
     _write_atomic(producer_root / "outpost-chronology.json", producer_observation(
         perspective="outpost", producer="OUTPOST_VITALITY_CHRONOLOGY", claim=history_claim,
         observed_at=now, boot_id=boot_id, evidence_ref=history_ref, payload=history_payload,
     ))
+    checkpoint()
     return state
 
 

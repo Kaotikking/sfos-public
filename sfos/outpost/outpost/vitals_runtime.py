@@ -9,6 +9,7 @@ import stat
 import threading
 import time
 from contextlib import ExitStack
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -326,32 +327,47 @@ class VitalsRuntimeStore:
         return observed
 
     def snapshot(self, *, current_boot_id: str | None = None) -> dict[str, Any]:
-        host_read_error = None
-        try:
-            host = self.host.snapshot()
-        except HostVitalityError as error:
-            host_read_error = str(error)
-            host = {"status": "UNAVAILABLE"}
-        except (OSError, ValueError, TypeError):
-            host = {"status": "NO_OBSERVATION"}
-        # Production presentation supplies the independently read current boot;
-        # a historical Host record cannot make its old boot current again.
-        boot_id = current_boot_id if current_boot_id is not None else host.get("current_boot_id")
-        latest = host.get("latest")
-        if not isinstance(boot_id, str) or not BOOT.fullmatch(boot_id):
-            raise VitalsRuntimeError("VITALS_HOST_IDENTITY_DENIED")
+        # Independent current-byte reads may overlap; their validation cannot
+        # be skipped or replaced with an earlier request's result. Presentation
+        # still owns one bounded acquisition and discards the whole late result.
+        with ExitStack() as readers:
+            producers = None
+            attempt_reader = None
+            if current_boot_id is not None:
+                if not isinstance(current_boot_id, str) or not BOOT.fullmatch(current_boot_id):
+                    raise VitalsRuntimeError("VITALS_HOST_IDENTITY_DENIED")
+                pool = readers.enter_context(ThreadPoolExecutor(max_workers=1))
+                producers = pool.submit(self._producers, current_boot_id, time.time())
+                attempt_reader = pool.submit(self.host_attempts.latest)
+            host_read_error = None
+            try:
+                host = self.host.snapshot()
+            except HostVitalityError as error:
+                host_read_error = str(error)
+                host = {"status": "UNAVAILABLE"}
+            except (OSError, ValueError, TypeError):
+                host = {"status": "NO_OBSERVATION"}
+            # Production presentation supplies the independently read current
+            # boot; historical Host records cannot make an old boot current.
+            boot_id = current_boot_id if current_boot_id is not None else host.get("current_boot_id")
+            latest = host.get("latest")
+            if not isinstance(boot_id, str) or not BOOT.fullmatch(boot_id):
+                raise VitalsRuntimeError("VITALS_HOST_IDENTITY_DENIED")
+            now = time.time()
+            try:
+                sources = producers.result() if producers is not None else self._producers(boot_id, now)
+            except (OSError, ValueError, TypeError):
+                sources = {"outpost": [self._unavailable("outpost", "OUTPOST_PRODUCER_READER", "PRODUCER_EVIDENCE_UNAVAILABLE", boot_id, now)]}
+            # The independent attempt journal also needs a complete fresh read.
+            # Queue it on the SAME bounded worker, overlapping Host hashing;
+            # bind the joined attempt to that Host below, never to cached state.
+            attempt = None
+            attempt_error = False
+            try:
+                attempt = attempt_reader.result() if attempt_reader is not None else self.host_attempts.latest()
+            except (OSError, ValueError, TypeError):
+                attempt_error = True
         now = time.time()
-        try:
-            sources = self._producers(boot_id, now)
-        except (OSError, ValueError, TypeError):
-            sources = {"outpost": [self._unavailable("outpost", "OUTPOST_PRODUCER_READER", "PRODUCER_EVIDENCE_UNAVAILABLE", boot_id, now)]}
-        now = time.time()
-        attempt = None
-        attempt_error = False
-        try:
-            attempt = self.host_attempts.latest()
-        except (OSError, ValueError, TypeError):
-            attempt_error = True
         terminal = attempt.get("terminal") if attempt else None
         start = attempt.get("start") if attempt else None
         current_attempt = (start is not None and start["payload"]["boot_id"] == boot_id

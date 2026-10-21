@@ -1647,6 +1647,10 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
   captured[path]=raw
  plan=strict_json(captured[directory/'plan.json']);witness=strict_json(captured[witness_path])
  failed=expected.get('failed_construction')
+ unwitnessed=(failed is None and retirement is None
+              and witness.get('rollback_selector')!=selector)
+ # Only the signed, unpublished input-preparation state below may explain a
+ # historical witness. This does not manufacture a witness for current bytes.
  anchor=regular(verify_path,expected_custody=(0,0,0o644))
  deny(sha(anchor)!=CANONICAL_AUTHORITY_SHA256 or plan.get('authority_sha256')!=sha(anchor),
       'KERNEL_SUCCESSOR_ANCHOR_DENIED')
@@ -1662,14 +1666,20 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
       or witness.get('install_status') not in {'INSTALLED_INACTIVE','CONSTRUCTION_OBSERVED'}
       or witness.get('authority_effect')!='NONE'
       or witness.get('witness_digest')!=sha(canonical({k:v for k,v in witness.items() if k!='witness_digest'}))
-      or (failed is None and retirement is None and any(witness.get(k)!=plan.get(k) for k in ('source_commit','source_tree','archive_sha256',
+      or (failed is None and retirement is None and not unwitnessed and any(witness.get(k)!=plan.get(k) for k in ('source_commit','source_tree','archive_sha256',
           'release_digest','source_receipt_sha256','rollback_selector','native_identity','host_identity','host_projection_digest'))),
       'KERNEL_SUCCESSOR_PREDECESSOR_DENIED')
  retired=None
- if retirement is not None:
+ if retirement is not None or unwitnessed:
   deny(failed is not None,'KERNEL_RETIRED_REQUEST_DENIED')
-  retired=capture_retired_kernel_prestate(root,source,plan,retirement,
-      verify_path=verify_path,observation_boot_id=observed_boot)
+  if retirement is not None:
+   retired=capture_retired_kernel_prestate(root,source,plan,retirement,
+       verify_path=verify_path,observation_boot_id=observed_boot)
+  if unwitnessed:
+   deny(plan['current_boot_id']!=observed_boot
+        or not isinstance(plan.get('installed_predecessor'),dict)
+        or plan['installed_predecessor'].get('rollback_selector')!=witness.get('rollback_selector'),
+        'KERNEL_UNWITNESSED_PREDECESSOR_DENIED')
   # The retained witness may be the successful predecessor of the failed
   # transaction Outpost retired. Keep both identities and histories literal.
   if witness['rollback_selector']!=plan['rollback_selector']:
@@ -1787,11 +1797,15 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
  manifest=read_json(source/'release-manifest.json')
  module=load_installer(source,manifest,expected_release=plan['release_digest'])
  module.verify_host_identity(root,plan)
+ unpublished=None
+ if unwitnessed:
+  unpublished=KernelSuccessorInputs.observe_unpublished(plan,root,verify_path,module)
+  deny(unpublished.external_source!=source,'KERNEL_UNWITNESSED_SOURCE_DENIED')
  receipt={'status':'INSTALLED_INACTIVE','receipt':selector+'/receipt.json'}
  digest=_verify_install_material(root,plan,receipt,source=source,retired_prestate=retired)
  deny(module.journal_read(directory,digest)!=strict_json(captured[directory/'phase-journal.json']),
       'KERNEL_SUCCESSOR_JOURNAL_CHANGED')
- if failed is None and (retired is None or witness['rollback_selector']==plan['rollback_selector']):
+ if failed is None and not unwitnessed and (retired is None or witness['rollback_selector']==plan['rollback_selector']):
   deny(witness.get('installer_receipt_sha256')!=digest,'KERNEL_SUCCESSOR_RECEIPT_DENIED')
  def public_prestate():
   if retired is None:return module.capture_successor_payload(root,plan['payload'])
@@ -1820,9 +1834,14 @@ def capture_installed_kernel_prestate(root,source,expected,*,verify_path=VERIFY_
       'KERNEL_SUCCESSOR_JOURNAL_CHANGED')
  if failed is not None:
   observe_failed_native_prestate(root,plan,failed,runtime_source,expected_release=runtime_release)
+ if unpublished is not None:
+  unpublished.verify()
+  _retirement_quiescence()
  return {'state':('RETIRED_PREDECESSOR_CAPTURE_ONLY' if retired is not None else
+                 'UNWITNESSED_PREDECESSOR_CAPTURE_ONLY' if unpublished is not None else
                  'FAILED_PREDECESSOR_CAPTURE_ONLY' if failed is not None else 'INSTALLED_PREDECESSOR_CAPTURE_ONLY'),
          'plan':plan,'receipt_digest':digest,'retired_prestate':retired,
+         'unpublished_inputs':unpublished,
          'witness':witness,'expected':expected,'public_payload':public,
          'observation_boot_id':observed_boot,
          'generated_prestate':generated,'mutable_private_state':'NOT_QUIESCED',
@@ -4665,7 +4684,7 @@ class KernelSuccessorInputs:
  _PHASES=('INTENT','SOURCE_PUBLISHED','RECEIPT_PUBLISHED','PUBLISHED',
           'RESTORE_REQUEST','RESTORE_RECEIPT','RESTORED')
 
- def __init__(self,plan,root,source,request_path,source_receipt_path,verify_path,module,private):
+ def __init__(self,plan,root,source,request_path,source_receipt_path,verify_path,module,private,*,unpublished_predecessor=None):
   from .public_generation_transaction import _signed_transition_record
   self.root=Path(root);self.external_source=Path(source)
   self.external_request=Path(request_path);self.external_receipt=Path(source_receipt_path)
@@ -4718,7 +4737,27 @@ class KernelSuccessorInputs:
       'KERNEL_INPUT_TRANSITION_CANDIDATE_DENIED')
   for key in ('source_parent','source_commit','source_tree','archive_sha256'):
    deny(new_request.get(key)!=self.plan.get(key),'KERNEL_INPUT_TRANSITION_REQUEST_DENIED')
-  predecessor=read_json(self.previous_selector/'plan.json')
+  predecessor_raw=regular(self.previous_selector/'plan.json',expected_custody=(0,0,0o600))
+  predecessor=strict_json(predecessor_raw)
+  deny(sha(predecessor_raw)!=previous.get('plan_sha256'),
+      'KERNEL_INPUT_TRANSITION_PREDECESSOR_DENIED')
+  self.retained_input_preparation=None
+  if unpublished_predecessor is not None:
+   deny(type(unpublished_predecessor) is not KernelSuccessorInputs
+        or unpublished_predecessor.private is not None
+        or unpublished_predecessor.plan!=predecessor,
+        'KERNEL_INPUT_ANCESTRY_OWNER_DENIED')
+   unpublished_predecessor.verify()
+   _retirement_quiescence()
+   self.retained_input_preparation={
+       'schema':'SereinKernelUnpublishedInputAncestry/v1',
+       'installed_selector':previous['rollback_selector'],
+       'installed_plan_sha256':previous['plan_sha256'],
+       'preparation_sha256':sha(unpublished_predecessor.preparation_raw),
+       'canonical_selector':predecessor['installed_predecessor']['rollback_selector'],
+       'canonical_plan_sha256':predecessor['installed_predecessor']['plan_sha256'],
+       'retained':self._retained_input_snapshot(unpublished_predecessor)}
+   predecessor=self._verify_input_ancestry()
   old_request=install_request(self.request_path)
   old_receipt,old_receipt_digest=source_receipt(
       self.canonical_source,self.receipt_path,self.verify_path)
@@ -4789,6 +4828,9 @@ class KernelSuccessorInputs:
           'request_fact':list(self.new_request_fact),'receipt_sha256':sha(self.new_receipt),
           'receipt_fact':list(self.new_receipt_fact)},
       'phases':list(self._PHASES),'authority_effect':'NONE','activation':'DENIED'}
+  if self.retained_input_preparation is not None:
+   self.intent['schema']='SereinKernelCanonicalInputTransition/v2'
+   self.intent['retained_input_preparation']=strict_json(canonical(self.retained_input_preparation))
   self.intent_raw=self._signed(self.intent,self.private,self.private.public_key())
   self.preparation={'schema':'SereinKernelCanonicalInputPreparation/v1',
       'boot_id':self.plan['current_boot_id'],'plan_sha256':sha(canonical(self.plan)),
@@ -4804,6 +4846,9 @@ class KernelSuccessorInputs:
           self.predecessor_receipt,self.candidate_request,self.candidate_receipt,
           self.candidate_request_stage,self.candidate_receipt_stage)],
       'authority_effect':'NONE','activation':'DENIED'}
+  if self.retained_input_preparation is not None:
+   self.preparation['schema']='SereinKernelCanonicalInputPreparation/v2'
+   self.preparation['retained_input_preparation']=strict_json(canonical(self.retained_input_preparation))
   self.preparation_raw=self._signed(self.preparation,self.private,self.private.public_key())
   self._preparation_state_raw=None;self._preparation_recovery=False
   self._prepared=False
@@ -4812,6 +4857,89 @@ class KernelSuccessorInputs:
   self._archive_facts=None
   self._published_receipt_fact=None;self._published_request_fact=None
   self._restored_receipt_fact=None;self._restored_request_fact=None
+
+ def _retained_input_snapshot(self,owner):
+  # Only retained transaction/evidence and inactive delivery roots; never the
+  # canonical trio that the fresh whole-generation transaction must replace.
+  result={}
+  for path in (owner.selector,owner.external_root):
+   result['/'+path.relative_to(self.root).as_posix()]={
+       'inventory':safe_tree(path),'facts':self._tree_fact(path)}
+  return result
+
+ def _verify_input_ancestry(self):
+  lineage=getattr(self,'retained_input_preparation',None)
+  if lineage is None:return None
+  fields={'schema','installed_selector','installed_plan_sha256','preparation_sha256',
+          'canonical_selector','canonical_plan_sha256','retained'}
+  deny(type(lineage) is not dict or set(lineage)!=fields
+       or lineage['schema']!='SereinKernelUnpublishedInputAncestry/v1'
+       or any(type(lineage[k]) is not str or not HEX64.fullmatch(lineage[k]) for k in
+          ('installed_plan_sha256','preparation_sha256','canonical_plan_sha256')),
+       'KERNEL_INPUT_ANCESTRY_DENIED')
+  previous=self.plan['installed_predecessor']
+  deny(lineage['installed_selector']!=previous['rollback_selector']
+       or lineage['installed_plan_sha256']!=previous['plan_sha256'],
+       'KERNEL_INPUT_ANCESTRY_INSTALLED_DENIED')
+  prior_raw=regular(self.previous_selector/'plan.json',expected_custody=(0,0,0o600))
+  prior=strict_json(prior_raw)
+  deny(sha(prior_raw)!=lineage['installed_plan_sha256'],
+       'KERNEL_INPUT_ANCESTRY_INSTALLED_DENIED')
+  anchor=load_pem_public_key(regular(self.verify_path,expected_custody=(0,0,0o644)))
+  try:anchor.verify(decode(prior['signature']),canonical({k:v for k,v in prior.items() if k!='signature'}))
+  except Exception as exc:raise RunnerDenied('KERNEL_INPUT_ANCESTRY_SIGNATURE_DENIED') from exc
+  raw=regular(self.previous_selector/'canonical-input-transition-preparation.json',
+      expected_custody=(0,0,0o600))
+  prepared=self._transition_record(raw,anchor)
+  ancestor=prior.get('installed_predecessor')
+  deny(sha(raw)!=lineage['preparation_sha256']
+       or prepared.get('schema')!='SereinKernelCanonicalInputPreparation/v1'
+       or prepared.get('signed_plan')!=prior or prepared.get('plan_sha256')!=sha(prior_raw)
+       or prepared.get('rollback_selector')!=lineage['installed_selector']
+       or prepared.get('boot_id')!=self.plan['current_boot_id']
+       or not isinstance(ancestor,dict)
+       or ancestor.get('rollback_selector')!=lineage['canonical_selector']
+       or ancestor.get('plan_sha256')!=lineage['canonical_plan_sha256']
+       or prepared.get('predecessor_selector')!=lineage['canonical_selector'],
+       'KERNEL_INPUT_ANCESTRY_BINDING_DENIED')
+  location=lineage['canonical_selector']
+  deny(type(location) is not str or not re.fullmatch(
+      r'/var/lib/serein/rollback/kernel-first-install-\d{8}T\d{6}Z-[0-9a-f]{12}',location)
+      or location==lineage['installed_selector'],'KERNEL_INPUT_ANCESTRY_PATH_DENIED')
+  old_raw=regular(self.root/location.lstrip('/')/'plan.json',expected_custody=(0,0,0o600))
+  old=strict_json(old_raw)
+  deny(sha(old_raw)!=lineage['canonical_plan_sha256']
+       or old.get('rollback_selector')!=location
+       or old.get('native_identity')!=prior.get('native_identity')
+       or old.get('host_identity')!=prior.get('host_identity'),
+       'KERNEL_INPUT_ANCESTRY_PLAN_DENIED')
+  try:anchor.verify(decode(old['signature']),canonical({k:v for k,v in old.items() if k!='signature'}))
+  except Exception as exc:raise RunnerDenied('KERNEL_INPUT_ANCESTRY_SIGNATURE_DENIED') from exc
+  external=prepared.get('external',{}).get('root')
+  deny(type(external) is not str or not external.startswith('/var/lib/serein/rollback/')
+       or str(Path(external))!=external or '..' in Path(external).parts,
+       'KERNEL_INPUT_ANCESTRY_PATH_DENIED')
+  external_root=self.root/external.lstrip('/')
+  deny(external_root in {self.selector,self.previous_selector}
+       or self.selector.is_relative_to(external_root)
+       or external_root.is_relative_to(self.selector)
+       or external_root.is_relative_to(self.previous_selector),
+       'KERNEL_INPUT_ANCESTRY_PATH_DENIED')
+  expected_roots={lineage['installed_selector'],external}
+  deny(type(lineage['retained']) is not dict or set(lineage['retained'])!=expected_roots,
+       'KERNEL_INPUT_ANCESTRY_RETAINED_DENIED')
+  for name,row in lineage['retained'].items():
+   path=self.root/name.lstrip('/')
+   deny(row!={'inventory':safe_tree(path),'facts':self._tree_fact(path)},
+       'KERNEL_INPUT_ANCESTRY_RETAINED_CHANGED')
+  deny(regular(external_root/'kernel-successor-input-owner.json',
+       expected_custody=(0,0,0o600))!=raw
+       or any(os.path.lexists(self.previous_selector/name) for name in (
+           'canonical-input-transition-intent.json','canonical-input-transition-state.json',
+           'canonical-input-transition-preparation-state.json','candidate-source-staged',
+           'candidate-source','predecessor-source-inode')),
+       'KERNEL_INPUT_ANCESTRY_PHASE_DENIED')
+  return old
 
  @classmethod
  def capture(cls,plan,root,source,request_path,source_receipt_path,verify_path,module,private):
@@ -4830,6 +4958,21 @@ class KernelSuccessorInputs:
   return value
 
  @classmethod
+ def observe_unpublished(cls,plan,root,verify_path,module):
+  """Read the exact interrupted input owner; never resume its execution."""
+  selector=Path(root)/plan['rollback_selector'].lstrip('/')
+  deny(any(os.path.lexists(selector/name) for name in (
+      'canonical-input-transition-intent.json','canonical-input-transition-state.json',
+      'canonical-input-transition-preparation-state.json','candidate-source-staged',
+      'candidate-source','predecessor-source-inode')),
+      'KERNEL_UNWITNESSED_PHASE_DENIED')
+  owner=cls.resume(plan,root,verify_path,module,None)
+  deny(owner.verify()!={'phase':'PREPARING','restored':False},
+      'KERNEL_UNWITNESSED_PHASE_DENIED')
+  _retirement_quiescence()
+  return owner
+
+ @classmethod
  def resume(cls,plan,root,verify_path,module,private,*,preparation_path=None):
   """Authenticate an interrupted transition; perform no lock/service/file effect."""
   self=cls.__new__(cls);self.root=Path(root);self.module=module;self.private=private
@@ -4838,7 +4981,7 @@ class KernelSuccessorInputs:
   anchor=regular(self.verify_path,expected_custody=(0,0,0o644))
   deny(sha(anchor)!=CANONICAL_AUTHORITY_SHA256,'KERNEL_CANONICAL_ANCHOR_DENIED')
   public=load_pem_public_key(anchor)
-  deny(public.public_bytes(Encoding.Raw,PublicFormat.Raw)!=
+  deny(private is not None and public.public_bytes(Encoding.Raw,PublicFormat.Raw)!=
        private.public_key().public_bytes(Encoding.Raw,PublicFormat.Raw),
        'KERNEL_INPUT_TRANSITION_SIGNER_DENIED')
   try:public.verify(decode(self.plan['signature']),
@@ -4866,8 +5009,11 @@ class KernelSuccessorInputs:
               if has_intent else preparation_raw)
   intent=(cls._transition_record(intent_raw,public) if has_intent else preparation)
   previous=self.plan.get('installed_predecessor')
-  deny(intent.get('schema')!=('SereinKernelCanonicalInputTransition/v1' if has_intent
-                              else 'SereinKernelCanonicalInputPreparation/v1')
+  self.retained_input_preparation=preparation.get('retained_input_preparation')
+  version='v2' if self.retained_input_preparation is not None else 'v1'
+  deny(intent.get('retained_input_preparation')!=self.retained_input_preparation
+       or intent.get('schema')!=('SereinKernelCanonicalInputTransition/'+version if has_intent
+                              else 'SereinKernelCanonicalInputPreparation/'+version)
        or intent.get('boot_id')!=self.plan['current_boot_id']
        or intent.get('plan_sha256')!=sha(canonical(self.plan))
        or preparation.get('signed_plan')!=self.plan
@@ -4881,7 +5027,7 @@ class KernelSuccessorInputs:
   self.preparation=preparation;self.preparation_raw=preparation_raw
   self.intent=intent;self.intent_raw=intent_raw
   if has_intent:
-   deny(preparation.get('schema')!='SereinKernelCanonicalInputPreparation/v1'
+   deny(preparation.get('schema')!='SereinKernelCanonicalInputPreparation/'+version
         or any(preparation.get(key)!=intent.get(key) for key in
                ('boot_id','plan_sha256','rollback_selector','predecessor_selector',
                 'canonical','external','predecessor','candidate','authority_effect','activation')),
@@ -4946,6 +5092,7 @@ class KernelSuccessorInputs:
   if not has_intent:
    predecessor=read_json(self.previous_selector/'plan.json')
    predecessor_raw=regular(self.previous_selector/'plan.json',expected_custody=(0,0,0o600))
+   if self.retained_input_preparation is not None:predecessor=self._verify_input_ancestry()
    old_receipt,old_digest=source_receipt(self.canonical_source,self.receipt_path,self.verify_path)
    new_receipt,new_digest=source_receipt(self.external_source,self.external_receipt,self.verify_path)
    deny(intent['predecessor'].get('inventory_digest')!='sha256:'+sha(canonical(self.old_inventory))
@@ -5006,6 +5153,7 @@ class KernelSuccessorInputs:
   new_receipt,new_digest=source_receipt(candidate_source,self.candidate_receipt,self.verify_path)
   predecessor=read_json(self.previous_selector/'plan.json')
   predecessor_raw=regular(self.previous_selector/'plan.json',expected_custody=(0,0,0o600))
+  if self.retained_input_preparation is not None:predecessor=self._verify_input_ancestry()
   deny(old_digest!=predecessor.get('source_receipt_sha256')
        or old_receipt.get('inventory_digest')!=predecessor.get('source_inventory_digest')
        or new_digest!=self.plan.get('source_receipt_sha256')
@@ -5340,6 +5488,7 @@ class KernelSuccessorInputs:
        'KERNEL_INPUT_TRANSITION_TERMINAL_DENIED')
 
  def verify(self,boundary=None):
+  self._verify_input_ancestry()
   if getattr(self,'_preparation_recovery',False):
    return self._verify_preparation(boundary)
   if getattr(self,'_recovering',False):return self._verify_recovery(boundary)
@@ -5446,6 +5595,7 @@ class KernelSuccessorInputs:
   deny(safe_tree(target)!=safe_tree(source),'KERNEL_INPUT_TRANSITION_ARCHIVE_DENIED')
 
  def _verify_preparation(self,boundary=None):
+  self._verify_input_ancestry()
   if boundary is not None:boundary()
   deny(current_boot()!=self.plan['current_boot_id'],
        'KERNEL_INPUT_TRANSITION_STALE_BOOT')
@@ -5530,6 +5680,7 @@ class KernelSuccessorInputs:
 
  def prepare(self,boundary):
   """Durably bind the external successor before any Kernel payload effect."""
+  deny(self.private is None,'KERNEL_INPUT_TRANSITION_READ_ONLY')
   deny(not callable(boundary) or self._phase is not None or self._prepared,
        'KERNEL_INPUT_TRANSITION_PREPARATION_DENIED')
   final_plan=strict_json(canonical(self._plan_reference))
@@ -5558,6 +5709,7 @@ class KernelSuccessorInputs:
   boundary();self.verify();return self
 
  def publish(self,boundary):
+  deny(self.private is None,'KERNEL_INPUT_TRANSITION_READ_ONLY')
   deny(not callable(boundary) or self._phase is not None,
        'KERNEL_INPUT_TRANSITION_PUBLICATION_DENIED')
   if not self._prepared:self.prepare(boundary)
@@ -5661,6 +5813,7 @@ class KernelSuccessorInputs:
    raise WitnessPublicationUncertain('KERNEL_INPUT_TRANSITION_PUBLICATION_UNCERTAIN') from exc
 
  def restore(self,boundary):
+  deny(self.private is None,'KERNEL_INPUT_TRANSITION_READ_ONLY')
   deny(not callable(boundary),'KERNEL_INPUT_TRANSITION_RESTORE_DENIED')
   if getattr(self,'_preparation_recovery',False):
    self._verify_preparation(boundary)
@@ -5867,9 +6020,16 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
     deny(any(path==expected for path,expected in zip(
         (source,request_path,source_receipt_path),canonical_inputs)),
         'KERNEL_SUCCESSOR_MIXED_INPUT_PATHS_DENIED')
+    previous=request['installed_predecessor']
+    captured=capture_installed_kernel_prestate(root,Path(root)/previous['source_root'].lstrip('/'),
+        {k:v for k,v in previous.items() if k not in {'source_root','source_receipt'}},
+        verify_path=verify_path,witness_path=STATE/'kernel-install-witness.json',
+        observation_boot_id=plan['current_boot_id'],runtime_source=source,
+        runtime_release=plan['release_digest'])
     input_owner=KernelSuccessorInputs(plan=plan,root=root,source=source,
         request_path=request_path,source_receipt_path=source_receipt_path,
-        verify_path=verify_path,module=module,private=private)
+        verify_path=verify_path,module=module,private=private,
+        unpublished_predecessor=captured.get('unpublished_inputs'))
   if 'installed_predecessor' in plan:
    native_material={'binding':dict(plan['native_identity']),
        'registry':regular(Path(root)/module.NATIVE_REGISTRY.lstrip('/'),expected_custody=(0,0,0o644)),
@@ -5908,11 +6068,12 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
      # delivery directory. Failed generations cannot reactivate predecessor
      # requests or hide the retained rejected candidate.
      if not input_owner.restored:input_owner.restore(material_boundary)
+     canonical_old=input_owner._verify_input_ancestry() or old
      def restored_inputs_guard():
       material_boundary()
       restored,digest=source_receipt(input_owner.canonical_source,
           input_owner.canonical_receipt,verify_path)
-      deny(digest!=old['source_receipt_sha256'] or any(restored[k]!=old[k] for k in
+      deny(digest!=canonical_old['source_receipt_sha256'] or any(restored[k]!=canonical_old[k] for k in
           ('source_parent','source_commit','source_tree','archive_sha256','release_digest')),
           'KERNEL_SUCCESSOR_RUNTIME_SOURCE_NOT_RESTORED')
      restored_inputs_guard()
