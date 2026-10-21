@@ -105,33 +105,30 @@ def _current_boot_id() -> str:
     return Path("/proc/sys/kernel/random/boot_id").read_text().strip()
 
 
-def _chronology_call(operation):
+def _chronology_call(operation, *, boot_id=None):
     """Wait for the existing log lock, never retry a committed observation.
 
     VITALITY_CHRONOLOGY_BUSY is raised by the no-write lock acquisition before
     append. Readers must not turn a valid collection into failed Host evidence.
-    Keep one monotonic deadline; all custody/digest/sequence errors still deny.
+    Wait only on pre-write contention in the same boot. Elapsed time is not
+    evidence that collection failed; all custody/digest/sequence errors deny.
     """
-    deadline = time.monotonic() + 10.0
     while True:
+        if boot_id is not None and _current_boot_id() != boot_id:
+            raise RuntimeError("HOST_RECIPE_BOOT_CHANGED")
         try:
             return operation()
         except RebootVitalityError as error:
             if str(error) != "VITALITY_CHRONOLOGY_BUSY":
                 raise
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise
-            time.sleep(min(0.1, remaining))
-            if time.monotonic() >= deadline:
-                raise
+            time.sleep(0.1)
 
 
 def run(state_root: Path) -> dict:
     state_root.mkdir(parents=True, exist_ok=True)
     boot_id = _current_boot_id()
     attempts = HostCollectionAttempts(state_root)
-    attempt_id = _chronology_call(lambda: attempts.start(boot_id, time.time()))
+    attempt_id = _chronology_call(lambda: attempts.start(boot_id, time.time()), boot_id=boot_id)
     temporary = None
     try:
         # An installed generation selects its own exact public recipe. Invalid
@@ -141,7 +138,7 @@ def run(state_root: Path) -> dict:
             if recipe['comparison']['boot_id']!=boot_id or _current_boot_id()!=boot_id:
                 raise RuntimeError('HOST_RECIPE_BOOT_CHANGED')
             state=HostVitalityStore(state_root).record(recipe_observation(recipe,time.time()))
-            _chronology_call(lambda: attempts.finish(attempt_id,time.time(),state=state))
+            _chronology_call(lambda: attempts.finish(attempt_id,time.time(),state=state), boot_id=boot_id)
             return state
         temporary = Path(tempfile.mkdtemp(prefix=".debian-witness-", dir=state_root))
         releases = {}
@@ -163,14 +160,14 @@ def run(state_root: Path) -> dict:
             package_exceptions=("serein-outpost",),
         )
         state = HostVitalityStore(state_root).record(bind_signed_debian_observation(debian))
-        _chronology_call(lambda: attempts.finish(attempt_id, time.time(), state=state))
+        _chronology_call(lambda: attempts.finish(attempt_id, time.time(), state=state), boot_id=boot_id)
         return state
     except BaseException as error:
         # Never persist arbitrary exception text (URLs, paths or secrets).
         code = str(error).split(":", 1)[0]
         if code not in FAILURE_CODES:
             code = "HOST_COLLECTION_INTERRUPTED" if not isinstance(error, Exception) else "HOST_COLLECTION_UNAVAILABLE"
-        _chronology_call(lambda: attempts.finish(attempt_id, time.time(), error_code=code))
+        _chronology_call(lambda: attempts.finish(attempt_id, time.time(), error_code=code), boot_id=boot_id)
         raise
     finally:
         if temporary is not None:

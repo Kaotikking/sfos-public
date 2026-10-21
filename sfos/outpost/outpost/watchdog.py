@@ -90,17 +90,10 @@ def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, 
     if chronology.path != state_root / "chronology.jsonl":
         raise WatchdogError("WATCHDOG_SOURCE_UNAVAILABLE")
     try:
-        event, rows = chronology.append_with_snapshot("watchdog:" + digest(state), "OUTPOST_WATCHDOG", "SEREIN_HOST", now, state)
+        event, history = chronology.append_watchdog("watchdog:" + digest(state), now, state)
         # Derive prior-boot evidence from the same locked, validated history.
         # Exclude this tick; a replay still retains the complete current tail.
-        prior_rows = [row for row in rows if row["event_id"] != event["event_id"]]
-        previous, first_post_boot_at = None, now
-        for row in reversed(prior_rows):
-            prior = row["payload"]
-            if prior["boot_id"] != boot_id:
-                previous = prior
-                break
-            first_post_boot_at = prior["observed_at"]
+        previous, first_post_boot_at = history["previous"], history["first_post_boot_at"]
         if previous and current:
             latest = host["latest"]
             # Observe the changed boot; this does not request a power action or
@@ -121,8 +114,8 @@ def witness_once(*, state_root: Path = STATE_ROOT, host_root: Path = HOST_ROOT, 
             recovery = classify_reboot({**observation, "evidence_digest": digest(observation)})
             _write_atomic(state_root.parent / "recovery" / "current.json", recovery)
         history_claim = "CHRONOLOGY_OBSERVED"
-        history_payload = {"event_count": len(rows), "latest_event": rows[-1]}
-        history_ref = "chronology:" + rows[-1]["event_hash"]
+        history_payload = {"event_count": history["event_count"], "latest_event": history["latest_event"]}
+        history_ref = "chronology:" + history["latest_event"]["event_hash"]
     except (OSError, ValueError, TypeError, AttributeError, KeyError):
         state["watchdog_state"] = "DEGRADED"
         history_claim = "CHRONOLOGY_UNAVAILABLE"

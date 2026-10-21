@@ -367,11 +367,42 @@ class VitalityChronology:
         self._check_names(fd, directories)
 
     def append(self, event_id: str, event_kind: str, subject: str, observed_at: float, payload: Mapping[str, Any]) -> dict[str, Any]:
-        event, _ = self.append_with_snapshot(event_id, event_kind, subject, observed_at, payload)
+        event, _ = self._append(event_id, event_kind, subject, observed_at, payload)
         return event
 
     def append_with_snapshot(self, event_id: str, event_kind: str, subject: str, observed_at: float, payload: Mapping[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Return the durable event and full history validated under its write lock."""
+        return self._append(event_id, event_kind, subject, observed_at, payload, snapshot=True)
+
+    def append_watchdog(self, event_id: str, observed_at: float, payload: Mapping[str, Any]):
+        """Return detached boot/history facts, never the private parsed history."""
+        if not isinstance(payload, Mapping) or not BOOT.fullmatch(str(payload.get("boot_id"))):
+            raise RebootVitalityError("VITALITY_CHRONOLOGY_INPUT_DENIED")
+        return self._append(event_id, "OUTPOST_WATCHDOG", "SEREIN_HOST", observed_at,
+                            payload, watchdog_boot=payload["boot_id"])
+
+    def _append(self, event_id, event_kind, subject, observed_at, payload, *,
+                snapshot=False, watchdog_boot=None):
+        def detached_result(event, rows):
+            event = copy.deepcopy(event)
+            if snapshot:
+                return event, copy.deepcopy(rows)
+            if watchdog_boot is None:
+                return event, None
+            previous, first_post_boot_at = None, observed_at
+            for row in reversed(rows):
+                if row["event_id"] == event_id:
+                    continue
+                prior = row["payload"]
+                if prior["boot_id"] != watchdog_boot:
+                    previous = prior
+                    break
+                first_post_boot_at = prior["observed_at"]
+            return event, {
+                "event_count": len(rows), "latest_event": copy.deepcopy(rows[-1]),
+                "previous": copy.deepcopy(previous), "first_post_boot_at": first_post_boot_at,
+            }
+
         if not all(_text(v) for v in (event_id, event_kind, subject)) or not _timestamp(observed_at) or not isinstance(payload, Mapping): raise RebootVitalityError("VITALITY_CHRONOLOGY_INPUT_DENIED")
         candidate = json.loads(canonical(dict(payload)))
         if self.path.parent.is_symlink() or any(parent.is_symlink() for parent in self.path.parents):
@@ -410,9 +441,8 @@ class VitalityChronology:
             if prior:
                 if prior["event_kind"] == event_kind and prior["subject"] == subject and prior["observed_at"] == observed_at and prior["payload"] == candidate:
                     self._sync_locked(fd, directories)
-                    self._append_cache = (initial.st_size, digest_state.hexdigest(),
-                        [{**row, "payload": copy.deepcopy(row["payload"])} for row in rows])
-                    return {**prior, "append_disposition": "IDEMPOTENT_REPLAY"}, rows
+                    self._append_cache = (initial.st_size, digest_state.hexdigest(), rows)
+                    return detached_result({**prior, "append_disposition": "IDEMPOTENT_REPLAY"}, rows)
                 raise RebootVitalityError("VITALITY_CHRONOLOGY_CONTRADICTION_HOLD")
             body = {"schema": "SereinVitalityChronologyEvent/v1", "sequence": len(rows) + 1, "event_id": event_id, "event_kind": event_kind, "subject": subject, "observed_at": observed_at, "payload": candidate, "previous_hash": rows[-1]["event_hash"] if rows else "GENESIS"}
             record = {**body, "event_hash": _digest(body)}
@@ -427,18 +457,15 @@ class VitalityChronology:
             self._sync_locked(fd, directories)
             digest_state.update(encoded)
             rows.append(record)
-            # Callers receive mutable snapshots; never let their mutations
-            # change the private parse evidence retained for the next tick.
-            # _read_locked validates every metadata field as an immutable
-            # scalar. Isolate each row dictionary and recursively isolate its
-            # payload, without re-traversing fixed scalar metadata on every
-            # watchdog tick. Full-byte validation and durability are unchanged.
-            self._append_cache = (initial.st_size + len(encoded), digest_state.hexdigest(),
-                [{**row, "payload": copy.deepcopy(row["payload"])} for row in rows])
+            # Parsed history remains private. Only callers explicitly requesting
+            # a full snapshot pay its copy cost; the watchdog receives detached
+            # facts. Every retained byte is still hashed on every append.
+            self._append_cache = (initial.st_size + len(encoded), digest_state.hexdigest(), rows)
+            result = detached_result({**record, "append_disposition": "APPENDED"}, rows)
         except BaseException:
             self._append_cache = None
             raise
         finally:
             os.close(fd)
             for directory, _, _ in reversed(directories): os.close(directory)
-        return {**record, "append_disposition": "APPENDED"}, rows
+        return result
