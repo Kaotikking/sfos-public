@@ -222,6 +222,7 @@ def run_coordinator(*, host_root: Path, state_path: Path, boot_id_path: Path,
     host_attempts = HostCollectionAttempts(host_root)
     from .reboot_vitality import VitalityChronology
     chronology = VitalityChronology(state_path.parent.parent / "watchdog" / "chronology.jsonl")
+    chronology.defer_cold_append = True
     def durable_progress() -> None:
         _notify("WATCHDOG=1\nSTATUS=DURABLE_WITNESS_PROGRESS")
 
@@ -239,7 +240,9 @@ def run_coordinator(*, host_root: Path, state_path: Path, boot_id_path: Path,
         # First finish the genuine unavailable/watchdog-history witness before
         # scheduling expensive Host parsing. Do not contend two cold histories
         # on startup or send a notification before the witness is durable.
-        try:host_store.warm_cold_history()
+        try:
+            if not chronology.warm_cold_append():
+                host_store.warm_cold_history()
         except (OSError,ValueError,TypeError):pass
         stop.wait(5.0)
 

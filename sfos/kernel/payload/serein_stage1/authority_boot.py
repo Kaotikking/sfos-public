@@ -7,6 +7,7 @@ path must still validate the result before Operations can advance.
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
 import hashlib
 import json
 import os
@@ -97,7 +98,45 @@ def directory_custody(info, relative):
     require(stat.S_ISDIR(info.st_mode) and allowed, "AUTHORITY_DIRECTORY_CUSTODY_DENIED")
 
 
-def regular(path, *, root=Path("/"), expected_custody=None, include_fact=False):
+def _close_directory_handles(handles):
+    first_error = None
+    for fd, _, _, _ in reversed(handles):
+        try:
+            os.close(fd)
+        except OSError as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise AuthorityDenied("AUTHORITY_DIRECTORY_CLOSE_FAILED") from first_error
+
+
+@contextmanager
+def regular_reader(*, root):
+    """One verification call owns its directory descriptors, never cached bytes.
+
+    Every file is reopened and read. Every ancestor is checked against both
+    its open descriptor and its current name on every read. Handles expire
+    together on success or failure; no positive evidence survives the call.
+    """
+    root = Path(root)
+    directories = {}
+    active = True
+    def read(path, *, root=root, expected_custody=None, include_fact=False):
+        require(active and Path(root) == reader_root, "AUTHORITY_READ_SCOPE_DENIED")
+        return regular(path, root=root, expected_custody=expected_custody,
+                       include_fact=include_fact, _directories=directories)
+    reader_root = root
+    try:
+        yield read
+    finally:
+        active = False
+        handles = list(directories.values())
+        directories.clear()
+        _close_directory_handles(handles)
+
+
+def regular(path, *, root=Path("/"), expected_custody=None, include_fact=False,
+            _directories=None):
     """Descriptor-bound, root-owned immutable input; no symlink/permission repair."""
     path = Path(path)
     require(path.is_absolute() and ".." not in path.parts, "AUTHORITY_PATH_DENIED")
@@ -108,20 +147,47 @@ def regular(path, *, root=Path("/"), expected_custody=None, include_fact=False):
         raise AuthorityDenied("AUTHORITY_PATH_DENIED") from exc
     handles = []
     try:
-        fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        cached = _directories.get(()) if _directories is not None else None
+        if cached is None:
+            fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            # Register ownership before fstat so failure cannot orphan fd.
+            handles.append((fd, None, None, None))
+            if _directories is not None:
+                _directories[()] = handles[-1]
+            handles[-1] = (fd, None, None, directory_identity(os.fstat(fd)))
+            if _directories is not None:
+                _directories[()] = handles[-1]
+        else:
+            handles.append(cached)
+            fd = cached[0]
         info = os.fstat(fd)
-        handles.append((fd, None, None, directory_identity(info)))
         directory_custody(info, "")
         walked = []
         for part in relative.parts[:-1]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            key = tuple(walked) + (part,)
+            cached = _directories.get(key) if _directories is not None else None
+            if cached is None:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                handles.append((child, fd, part, None))
+                if _directories is not None:
+                    _directories[key] = handles[-1]
+                handles[-1] = (child, fd, part, directory_identity(os.fstat(child)))
+                if _directories is not None:
+                    _directories[key] = handles[-1]
+            else:
+                handles.append(cached)
+                child = cached[0]
             info = os.fstat(child)
-            handles.append((child, fd, part, directory_identity(info)))
             walked.append(part)
             directory_custody(info, "/".join(walked))
             fd = child
         file_fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
-        with os.fdopen(file_fd, "rb") as stream:
+        try:
+            stream = os.fdopen(file_fd, "rb")
+        except BaseException:
+            os.close(file_fd)
+            raise
+        with stream:
             before = os.fstat(stream.fileno())
             require(stat.S_ISREG(before.st_mode) and before.st_uid == 0
                     and before.st_nlink == 1 and not stat.S_IMODE(before.st_mode) & 0o022
@@ -154,8 +220,8 @@ def regular(path, *, root=Path("/"), expected_custody=None, include_fact=False):
     except OSError as exc:
         raise AuthorityDenied("AUTHORITY_INPUT_UNAVAILABLE") from exc
     finally:
-        for fd, _, _, _ in reversed(handles):
-            os.close(fd)
+        if _directories is None:
+            _close_directory_handles(handles)
 
 
 def trust_disposition(trust):

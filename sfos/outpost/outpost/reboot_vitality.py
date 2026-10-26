@@ -138,6 +138,52 @@ class VitalityChronology:
         self._summary_failure = None
         self._summary_lock = threading.Lock()
         self._append_cache = None
+        self.defer_cold_append = False
+        self._cold_append_needed = False
+        self._cold_append_lock = threading.Lock()
+        self._cold_append_thread = None
+
+    def warm_cold_append(self):
+        """Prepare parsing evidence only; the foreground writer rehashes it.
+
+        Reuse the existing read_summary road in one bounded read-only worker.
+        No append, notification, admission or cached healthy verdict occurs here.
+        The return value indicates cold work, so the coordinator can keep its
+        existing chronology-before-Host cold-validation order.
+        """
+        if not self.defer_cold_append:
+            return False
+        if self._cold_append_lock.locked():
+            return True
+        if not self._cold_append_needed and (self._append_cache is not None
+                or self._summary_cache is not None or self._summary_failure is not None):
+            return False
+        if not self._cold_append_lock.acquire(blocking=False):
+            return True
+        def validate_history():
+            try:
+                self.read_summary()
+            except (OSError, ValueError, TypeError):
+                pass
+            finally:
+                self._cold_append_lock.release()
+        try:
+            worker = threading.Thread(target=validate_history,
+                name='outpost-chronology-history', daemon=True)
+            self._cold_append_thread = worker
+            self._cold_append_needed = False
+            worker.start()
+        except (RuntimeError, OSError) as error:
+            self._cold_append_thread = None
+            self._cold_append_needed = True
+            self._cold_append_lock.release()
+            raise RebootVitalityError('VITALITY_CHRONOLOGY_WORKER_UNAVAILABLE') from error
+        except BaseException:
+            self._cold_append_thread = None
+            self._cold_append_needed = True
+            self._cold_append_lock.release()
+            raise
+        return True
 
     def _open(self, *, writing: bool):
         if self.path.is_symlink() or any(parent.is_symlink() for parent in self.path.parents):
@@ -181,7 +227,12 @@ class VitalityChronology:
     def _read_locked(fd: int, verified_prefix=None, digest_state=None) -> list[dict[str, Any]]:
         rows = list(verified_prefix) if verified_prefix is not None else []
         previous = rows[-1]["event_hash"] if rows else "GENESIS"
-        seen = {row["event_id"] for row in rows}
+        # The caller rehashes the complete prefix before reusing these rows.
+        # Rebuild duplicate detection only when an actual suffix record exists;
+        # an unchanged history has no new IDs to compare against the prefix.
+        seen = None
+        payload_bytes = None
+        payload_prepared = False
         try:
             with os.fdopen(os.dup(fd), "rb") as stream:
                 for raw in stream:
@@ -197,7 +248,33 @@ class VitalityChronology:
                         raise RebootVitalityError("VITALITY_CHRONOLOGY_CHAIN_DENIED")
                     if not all(_text(record[key]) for key in ("event_id", "event_kind", "subject")) or not _timestamp(record["observed_at"]) or not isinstance(record["payload"], dict):
                         raise RebootVitalityError("VITALITY_CHRONOLOGY_INPUT_DENIED")
+                    if seen is None: seen = {row["event_id"] for row in rows}
                     if record["event_id"] in seen: raise RebootVitalityError("VITALITY_CHRONOLOGY_DUPLICATE_DENIED")
+                    if digest_state is not None:
+                        # Only private, verified-prefix caches share values.
+                        # Every record above has already passed its complete
+                        # chain/schema/digest/duplicate checks. Keep all rows;
+                        # do not retain repeated copies of identical metadata.
+                        record = {key: record[key] for key in (
+                            "schema", "sequence", "event_id", "event_kind",
+                            "subject", "observed_at", "payload",
+                            "previous_hash", "event_hash")}
+                        current_payload_bytes = canonical(record["payload"])
+                        if rows:
+                            prior = rows[-1]
+                            if not payload_prepared:
+                                payload_bytes = canonical(prior["payload"])
+                            for key in ("schema", "event_kind", "subject"):
+                                if record[key] == prior[key]:
+                                    record[key] = prior[key]
+                            record["previous_hash"] = prior["event_hash"]
+                            # Python equality conflates true/1, integer/float
+                            # and signed zero. Only exact canonical bytes may
+                            # share the already-validated private payload.
+                            if current_payload_bytes == payload_bytes:
+                                record["payload"] = prior["payload"]
+                        payload_bytes = current_payload_bytes
+                        payload_prepared = True
                     seen.add(record["event_id"]); rows.append(record); previous = record["event_hash"]
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise RebootVitalityError("VITALITY_CHRONOLOGY_READ_DENIED") from exc
@@ -386,7 +463,9 @@ class VitalityChronology:
         def detached_result(event, rows):
             event = copy.deepcopy(event)
             if snapshot:
-                return event, copy.deepcopy(rows)
+                # Private prefix rows may share identical payloads. Detach
+                # each public row independently as well as from the cache.
+                return event, [copy.deepcopy(row) for row in rows]
             if watchdog_boot is None:
                 return event, None
             previous, first_post_boot_at = None, observed_at
@@ -414,6 +493,38 @@ class VitalityChronology:
             # process, changed prefix or truncation still validates cold.
             initial = os.fstat(fd)
             cached = self._append_cache
+            failed = None
+            if cached is None and self.defer_cold_append:
+                # Never wait behind cold parsing. The tuple is replaced, not
+                # mutated by the reader; _read_locked copies its private list.
+                if self._summary_lock.acquire(blocking=False):
+                    try:
+                        cached = self._summary_cache
+                        failed = self._summary_failure
+                    finally:
+                        self._summary_lock.release()
+            if failed is not None and initial.st_size == failed[0]:
+                rejected_hash = hashlib.sha256()
+                remaining_bytes = initial.st_size
+                while remaining_bytes:
+                    block = os.read(fd, min(remaining_bytes, 1024 * 1024))
+                    if not block:
+                        raise RebootVitalityError('VITALITY_CHRONOLOGY_CHANGED_DURING_READ')
+                    rejected_hash.update(block)
+                    remaining_bytes -= len(block)
+                if rejected_hash.hexdigest() == failed[1]:
+                    after = os.fstat(fd)
+                    identity = lambda info: (info.st_dev, info.st_ino, info.st_mode,
+                        info.st_nlink, info.st_uid, info.st_gid, info.st_size,
+                        info.st_mtime_ns, info.st_ctime_ns)
+                    if identity(after) != identity(initial):
+                        raise RebootVitalityError('VITALITY_CHRONOLOGY_CHANGED_DURING_READ')
+                    self._check_names(fd, directories)
+                    # Stable rejected content is still denied, but is not
+                    # pending cold work that can starve independent Host proof.
+                    self._cold_append_needed = False
+                    raise RebootVitalityError(failed[2])
+                os.lseek(fd, 0, os.SEEK_SET)
             digest_state = hashlib.sha256()
             prefix = None
             if cached is not None and initial.st_size >= cached[0]:
@@ -427,6 +538,9 @@ class VitalityChronology:
                 if digest_state.hexdigest() == cached[1]:
                     prefix = cached[2]
             if prefix is None:
+                if self.defer_cold_append and initial.st_size:
+                    self._cold_append_needed = True
+                    raise RebootVitalityError('VITALITY_CHRONOLOGY_NOT_YET_VERIFIED')
                 os.lseek(fd, 0, os.SEEK_SET)
                 digest_state = hashlib.sha256()
             rows = self._read_locked(fd, prefix, digest_state)

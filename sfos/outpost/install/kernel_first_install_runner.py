@@ -79,7 +79,7 @@ def regular(path,*,fact=False,expected_custody=None,include_identity=False,expec
     uid,gid,expected_mode=expected_custody;owner={"uid":uid,"gid":gid};modes={expected_mode}
    deny(expected_nlink not in (1,2) or not stat.S_ISREG(before.st_mode) or before.st_nlink!=expected_nlink or before.st_size>MAX_FILE_BYTES or before.st_uid!=owner["uid"] or mode not in modes,"KERNEL_RUNNER_CUSTODY_DENIED")
    if path==HOST_STATE or expected_custody is not None:deny(before.st_gid!=owner["gid"],"KERNEL_RUNNER_CUSTODY_DENIED")
-   data=stream.read(MAX_FILE_BYTES+1);after=os.fstat(stream.fileno());named=os.stat(path.name,dir_fd=parent,follow_symlinks=False)
+   data=stream.read(before.st_size+1);after=os.fstat(stream.fileno());named=os.stat(path.name,dir_fd=parent,follow_symlinks=False)
    fingerprint=lambda info:(info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
    deny(len(data)!=before.st_size or fingerprint(before)!=fingerprint(after) or fingerprint(after)!=fingerprint(named),"KERNEL_RUNNER_FILE_CHANGED")
   for fd,parent_fd,name in descriptors[1:]:
@@ -3285,7 +3285,7 @@ def _operations_lifecycle(plan,receipt,authority_observation,*,boundary,owner=No
  boot=current_boot()
  deny(os.geteuid()!=0 or boot!=plan.get('current_boot_id'),
       'KERNEL_OPERATIONS_LIFECYCLE_TARGET_DENIED')
- boundary();prepare_operations_observation(plan,receipt,authority_observation)
+ boundary();prerequisite=prepare_operations_observation(plan,receipt,authority_observation)
  authority=read_authority_unit_prestate();before=read_other_kernel_unit_prestate()
  deny(set(authority)!=set(AUTHORITY_UNITS) or set(before)!=set(OTHER_KERNEL_UNITS),
       'KERNEL_UNIT_SET_DENIED')
@@ -3347,12 +3347,25 @@ def _operations_lifecycle(plan,receipt,authority_observation,*,boundary,owner=No
                 ('serein-kernel-operations-heartbeat.service',),
                 ('serein-kernel-operations-api.socket',)):
    phase_boundary();attempted=True;command('start',names);started.update(names);phase_boundary()
-  observation=observe_operations_lifecycle(plan,receipt,authority_observation,boundary=phase_boundary)
+  # Blocking native starts may outlive the entry witness. Collect a new
+  # signed Authority chain after startup, as the Interface owner already
+  # does. Original timestamps and all freshness checks remain unchanged.
+  import secrets
+  challenge={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':'AUTHORITY',
+      'request_id':'kernel-authority-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
+      'previous_evidence_digest':'GENESIS'}
+  fresh_authority=observe_installed_authority(plan,receipt,challenge)
+  deny(fresh_authority.get('result')!='AUTHORITY_PHASE_A_OBSERVED',
+       'KERNEL_OPERATIONS_AUTHORITY_UNPROVEN')
+  observation=observe_operations_lifecycle(plan,receipt,canonical(fresh_authority),boundary=phase_boundary)
   if observation.get('result')!='OPERATIONS_MINIMUM_OBSERVED':
    rejected=RunnerDenied('KERNEL_OPERATIONS_MINIMUM_UNPROVEN')
    rejected.observation=observation
    raise rejected
-  yield observation
+  deny(any(observation.get(key)!=prerequisite.get(key) for key in
+      ('source','installed_evidence_sha256')),
+      'KERNEL_OPERATIONS_PREREQUISITE_IDENTITY_CHANGED')
+  yield {'authority':fresh_authority,'operations':observation}
   # Downstream units may now be running under the enclosing transaction. The
   # owner retains the same material guard; do not reapply the entry unit gate.
   verify_owned()
@@ -3594,10 +3607,29 @@ def _interface_lifecycle(plan,receipt,authority_observation,operations,*,boundar
  if owner is not None:owner.retain(cleanup,current_boundary)
  try:
   start_owned()
+  # Starting the private consumers can outlive a valid predecessor window.
+  # Observe a new signed chain; never renew timestamps on the old evidence.
+  import secrets
+  current_boundary()
+  challenge={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':'AUTHORITY',
+      'request_id':'kernel-authority-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
+      'previous_evidence_digest':'GENESIS'}
+  fresh_authority=observe_installed_authority(plan,receipt,challenge)
+  deny(fresh_authority.get('result')!='AUTHORITY_PHASE_A_OBSERVED',
+       'KERNEL_INTERFACE_AUTHORITY_UNPROVEN')
+  fresh_operations=observe_operations_lifecycle(plan,receipt,canonical(fresh_authority),
+      boundary=current_boundary)
+  deny(fresh_operations.get('result')!='OPERATIONS_MINIMUM_OBSERVED',
+       'KERNEL_INTERFACE_OPERATIONS_UNPROVEN')
+  deny(any(fresh_operations.get(key)!=operations.get(key) for key in
+      ('source','installed_evidence_sha256','service_controls')),
+      'KERNEL_INTERFACE_PREREQUISITE_IDENTITY_CHANGED')
+  authority_observation=canonical(fresh_authority);operations=fresh_operations
+  current_boundary()
   observed=observe_installed_interface(plan,receipt,authority_observation,operations)
   deny(observed.get('result')!='PRIVATE_INTERFACE_DENIAL_CORRELATED',
        'KERNEL_INTERFACE_DENIAL_UNPROVEN')
-  # Startup/source reads do not renew the original predecessor's lifetime.
+  # The new observations must still be fresh after Interface verification.
   verified=validate_operations_lifecycle(plan,receipt,authority_observation,
       operations['observations'],operations['service_controls'],boundary=current_boundary)
   deny(verified!=operations,'KERNEL_INTERFACE_OPERATIONS_PREDECESSOR_DENIED')
@@ -3605,7 +3637,7 @@ def _interface_lifecycle(plan,receipt,authority_observation,operations,*,boundar
   yield {'result':'PRIVATE_INTERFACE_STARTED_NOT_VERIFIED','boot_id':boot,
       'source':operations['source'],'admission':'UNADMITTED','stage1':'NOT_READY',
       'public_gateway':'NOT_STARTED','compute':'NOT_PROVEN','authority_effect':'NONE',
-      'denial_observation':observed,
+      'denial_observation':observed,'authority':fresh_authority,'operations':operations,
       '_runtime_consumers':{'quiesce':quiesce,'verify_quiesced':verify_quiesced,'reopen':reopen}}
   current_boundary()
  except BaseException:
@@ -4291,8 +4323,10 @@ def _complete_kernel_lifecycle(plan,receipt,request,preparation,expectation,*,bo
    return {**result,'residency':residency}
  try:
   with _authority_lifecycle(plan,receipt,challenge,boundary=boundary,owner=owner) as authority:
-   with _operations_lifecycle(plan,receipt,canonical(authority),boundary=boundary,owner=owner) as operations:
+   with _operations_lifecycle(plan,receipt,canonical(authority),boundary=boundary,owner=owner) as operation_chain:
+    authority=operation_chain['authority'];operations=operation_chain['operations']
     with _interface_lifecycle(plan,receipt,canonical(authority),operations,boundary=boundary,owner=owner) as interface:
+     authority=interface['authority'];operations=interface['operations']
      if replacement is None:
       observations=resident_observation(authority,operations,interface['denial_observation'])
      else:

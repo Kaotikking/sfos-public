@@ -209,7 +209,13 @@ class VitalsRuntimeStore:
                 current_boot_id, now)] for perspective in PERSPECTIVES},
                 current_boot_id=current_boot_id, generated_at=now)
 
-        if timeout <= 0 or not self._presentation_acquisition.acquire(blocking=False):
+        # Concurrent observers share acquisition, never evidence. Waiting uses
+        # this request's existing deadline; it does not extend its read budget.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0 or not self._presentation_acquisition.acquire(timeout=remaining):
+            return unavailable()
+        if time.monotonic() >= deadline:
+            self._presentation_acquisition.release()
             return unavailable()
         completed = threading.Event()
         result = []

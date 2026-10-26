@@ -2,7 +2,8 @@
 
 This transport process has no Kernel imports or domain-credential startup
 dependency. Its own TLS credentials are supplied by systemd. Vitals GETs go
-only to Outpost presentation; the historical voice POST tail goes only to the
+only to Outpost presentation, with an explicitly unavailable recovery view if
+that reader cannot answer; the historical voice POST tail goes only to the
 separate private Kernel process. Neither tail calls the other. Edge/Vitals
 availability is independent of Host admission and Kernel availability.
 """
@@ -23,13 +24,14 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from .host_vitality import canonical, validate_state
-from .vitals_aggregation import aggregate_vitals
+from .host_vitality import BOOT, canonical, validate_state
+from .vitals_aggregation import PERSPECTIVES, aggregate_vitals, producer_observation
 
 
 BACKEND_ADDRESS = "192.168.40.10"
 BACKEND_PORT = 8444
 PRESENTATION_SOCKET = Path("/run/serein/outpost-presentation/status.sock")
+BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 CERTIFICATE = Path("/run/credentials/serein-https-gateway-adapter.service/serein-backend-cert.pem")
 PRIVATE_KEY = Path("/run/credentials/serein-https-gateway-adapter.service/serein-backend-key.pem")
 STATUS_PATH = "/v1/runtime/status"
@@ -163,6 +165,7 @@ def _gateway_http_response(response: bytes) -> tuple[int, bytes]:
 
 def _presentation(method: str, path: str, accept: str) -> tuple[int, str, list[list[str]], bytes]:
     request = json.dumps({"method": method, "path": path, "accept": accept}, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+    response = b""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
             client.settimeout(2.0)
@@ -175,6 +178,8 @@ def _presentation(method: str, path: str, accept: str) -> tuple[int, str, list[l
                     break
                 response += chunk
     except OSError as error:
+        if response:
+            raise VitalsEdgeError("VITALS_PRESENTATION_FRAME_DENIED") from error
         raise VitalsEdgeError("VITALS_PRESENTATION_UNAVAILABLE") from error
     if not response.endswith(b"\n") or len(response) > MAX_RESPONSE_BYTES:
         raise VitalsEdgeError("VITALS_PRESENTATION_FRAME_DENIED")
@@ -313,6 +318,30 @@ def current_host_evidence(body: bytes, *, current_boot_id: str, expected_generat
         raise VitalsEdgeError('CURRENT_HOST_EVIDENCE_DENIED') from error
 
 
+def _unavailable_presentation(accept: str):
+    """This edge observed no reader response, not a healthy subject or generation.
+
+    Use the existing Outpost schema and renderer. No previous producer data,
+    selector, credential, Kernel/Gateway call, or recovery authority is used.
+    """
+    from .http_readonly import SAFE_HEADERS, html_body, json_body
+    boot = BOOT_ID_PATH.read_text(encoding='ascii').strip()
+    if not BOOT.fullmatch(boot):
+        raise VitalsEdgeError('VITALS_BOOT_IDENTITY_UNAVAILABLE')
+    now = time.time()
+    source = {perspective: [producer_observation(
+        perspective=perspective, producer='OUTPOST_EDGE_READER',
+        claim='VITALS_EVIDENCE_UNAVAILABLE', observed_at=now, boot_id=boot,
+        evidence_ref='outpost-reader:OUTPOST_EDGE_READER',
+        payload={'status': 'UNAVAILABLE'})] for perspective in PERSPECTIVES}
+    value = aggregate_vitals(source, current_boot_id=boot, generated_at=now)
+    if BOOT_ID_PATH.read_text(encoding='ascii').strip() != boot:
+        raise VitalsEdgeError('VITALS_BOOT_IDENTITY_UNAVAILABLE')
+    if 'text/html' in accept:
+        return 200, 'text/html; charset=utf-8', list(SAFE_HEADERS), html_body(value)
+    return 200, 'application/json', list(SAFE_HEADERS), json_body(value)
+
+
 def edge_response(method: str, path: str, accept: str) -> tuple[int, str, list[tuple[str, str]], bytes]:
     headers = [("Cache-Control", "no-store"), ("X-Content-Type-Options", "nosniff")]
     if method != "GET":
@@ -321,8 +350,14 @@ def edge_response(method: str, path: str, accept: str) -> tuple[int, str, list[t
         return 404, "application/json", headers, b'{"error":"NOT_FOUND"}\n'
     try:
         status, content_type, upstream_headers, body = _presentation("GET", STATUS_PATH, accept if path == STATUS_PATH else "application/json")
-    except VitalsEdgeError:
-        return 503, "application/json", headers, b'{"error":"VITALS_UNAVAILABLE"}\n'
+    except VitalsEdgeError as error:
+        if str(error) != 'VITALS_PRESENTATION_UNAVAILABLE':
+            return 503, "application/json", headers, b'{"error":"VITALS_UNAVAILABLE"}\n'
+        try:
+            status, content_type, upstream_headers, body = _unavailable_presentation(
+                accept if path == STATUS_PATH else 'application/json')
+        except (OSError, ValueError, UnicodeError):
+            return 503, "application/json", headers, b'{"error":"VITALS_UNAVAILABLE"}\n'
     if (type(status) is not int or not 100 <= status <= 599
             or content_type not in {"application/json", "text/html; charset=utf-8"}
             or any(len(row) != 2 or not all(isinstance(item,str) and "\r" not in item and "\n" not in item and len(item) <= 8192 for item in row) for row in upstream_headers)):

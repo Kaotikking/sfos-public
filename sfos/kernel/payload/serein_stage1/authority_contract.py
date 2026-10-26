@@ -81,9 +81,15 @@ def read_consumer_installed_policy_evidence(*, root):
     hashes; it cannot grant dispatch, prove current Host health or admit a
     domain. Atomic publication belongs to the whole-domain installer only.
     """
+    from .authority_boot import regular_reader
+    with regular_reader(root=root) as reader:
+        return _read_consumer_installed_policy_evidence(root=root, regular=reader)
+
+
+def _read_consumer_installed_policy_evidence(*, root, regular):
     from pathlib import Path, PurePosixPath
     from cryptography.hazmat.primitives.serialization import load_pem_public_key, Encoding, PublicFormat
-    from .authority_boot import regular, strict_json, ANCHOR, ANCHOR_SHA256, NATIVE_REGISTRY, BOOT
+    from .authority_boot import strict_json, ANCHOR, ANCHOR_SHA256, NATIVE_REGISTRY, BOOT
     try:
         root=Path(root)
         captured={}

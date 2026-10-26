@@ -1,6 +1,7 @@
 """Persistent, observation-only Host OS/GPU first-install witness."""
 from __future__ import annotations
 import copy,hashlib,json,math,os,re,stat,tempfile,threading
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlsplit
 from pathlib import Path
@@ -21,6 +22,9 @@ HISTORICAL_PUBLIC_BASES={
  ("0dca6bd7a22b83b04ddf353df901d2c7ea15c294","8c56a80487f25150ffec90316a946ac89f64fb92"),
 }
 PUBLIC_BASES=HISTORICAL_PUBLIC_BASES|{(ADMITTED_PUBLIC_BASE_COMMIT,ADMITTED_PUBLIC_BASE_TREE)}
+# Conservative retained-byte budget, including row/container overhead. An
+# unrepresentable prefix always uses the original complete-hash reader.
+EXACT_HISTORY_MAX_BYTES=8*1024*1024
 class HostVitalityError(ValueError):pass
 def canonical(value):return (json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n").encode()
 def digest(value):return hashlib.sha256(canonical(value)).hexdigest()
@@ -118,9 +122,11 @@ class HostCollectionAttempts:
  def __init__(self,root:Path):
   from .reboot_vitality import VitalityChronology
   self.log=VitalityChronology(Path(root)/"collection-attempts.jsonl")
+  self._verified_latest=None
  def _attempts(self):
   attempts={};latest=None
-  for row in self.log.read_verified():
+  rows=self.log.read_verified()
+  for row in rows:
    value=row["payload"]
    if row["subject"]!="SEREIN_HOST" or not isinstance(value.get("attempt_id"),str) or not BOOT.fullmatch(value["attempt_id"]) or not isinstance(value.get("boot_id"),str) or not BOOT.fullmatch(value["boot_id"]):raise HostVitalityError("HOST_ATTEMPT_IDENTITY_DENIED")
    identifier=value["attempt_id"]
@@ -135,8 +141,20 @@ class HostCollectionAttempts:
     elif set(value)!={"attempt_id","boot_id","error_code"} or not re.fullmatch(r"[A-Z][A-Z0-9_]{0,95}",str(value["error_code"])):raise HostVitalityError("HOST_ATTEMPT_RESULT_DENIED")
     prior["terminal"]=row
    else:raise HostVitalityError("HOST_ATTEMPT_KIND_DENIED")
+  # Only a fully validated attempt sequence can populate this projection.
+  # The chain tip commits every event, not merely the newest attempt.
+  self._verified_latest=((len(rows),rows[-1]['event_hash'] if rows else None),
+                         copy.deepcopy(attempts[latest]) if latest else None)
   return attempts,latest
  def latest(self):
+  # Rehash the complete current history and verify custody on EVERY read.
+  # An unchanged verified chain needs no full-history JSON round-trip or
+  # reconstruction of all prior attempt pairs. This caches parsing only,
+  # never a Host verdict; callers still bind the attempt to fresh Host data.
+  summary=self.log.read_summary()
+  key=(summary['event_count'],summary['latest_event']['event_hash'] if summary['latest_event'] else None)
+  cached=self._verified_latest
+  if cached is not None and key==cached[0]:return copy.deepcopy(cached[1])
   attempts,latest=self._attempts()
   return attempts[latest] if latest else None
  def start(self,boot_id:str,observed_at:float)->str:
@@ -163,8 +181,12 @@ class HostCollectionAttempts:
 def host_attempt_matches(host,attempt,boot_id,observed_at):
  """One read-only completion predicate shared by all Outpost observers."""
  try:
-  checked=validate_state(host,active=True)
   start=attempt["start"];terminal=attempt["terminal"]
+  # A non-successful collection cannot satisfy this completion predicate.
+  # Reject it before redundant active-source/Host validation; every possible
+  # success still traverses the exact validation and binding below.
+  if terminal is None or terminal["event_kind"]!="HOST_COLLECTION_SUCCEEDED":return False
+  checked=validate_state(host,active=True)
   return (type(observed_at) in (int,float) and math.isfinite(observed_at)
    and start["payload"]["boot_id"]==boot_id==checked["current_boot_id"]
    and terminal is not None and terminal["event_kind"]=="HOST_COLLECTION_SUCCEEDED"
@@ -243,15 +265,25 @@ class HostVitalityStore:
   self.root=Path(root);self.state=self.root/"state.json";self.samples=self.root/"ecg.jsonl"
   self._history_cache=None;self._history_lock=threading.Lock()
   self._history_chunk_proof=None
+  self._history_exact_proof=None
   self._history_read_slots=threading.BoundedSemaphore(max_readers)
   self.defer_cold_validation=False
   self.auto_warm_cold=True;self._cold_validation_needed=False
+  self._cold_validation_requested_cache=None
   self._cold_validation_lock=threading.Lock();self._cold_validation_thread=None
  def warm_cold_history(self):
   """One bounded parsing worker, never a cached Host verdict or journal writer."""
   if not self._cold_validation_needed or not self._cold_validation_lock.acquire(blocking=False):return
   def validate_history():
-   try:self._read_state()
+   try:
+    self._read_state()
+    with self._history_lock:
+     # Requests against the old prefix were satisfied by this completed
+     # validation. Preserve a request against the newly validated prefix:
+     # it can represent an append/invalidation after this worker's read.
+     # This is scheduling only; every foreground read still verifies bytes.
+     if self._cold_validation_requested_cache is not self._history_cache:
+      self._cold_validation_needed=False
    except (OSError,ValueError,TypeError):pass
    finally:self._cold_validation_lock.release()
   try:
@@ -267,7 +299,7 @@ class HostVitalityStore:
    self._cold_validation_lock.release()
    raise
  def _read_history(self,*,allow_cold=True):
-  """Rehash every historical byte; reuse parsing only for an exact prefix.
+  """Verify every historical byte; reuse parsing only for an exact prefix.
 
   ADAPT the existing VitalityChronology verified-prefix reader. No stat-only
   cache, discarded history, cached Host verdict, or freshness relaxation.
@@ -276,10 +308,11 @@ class HostVitalityStore:
    return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,
            info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns)
   # The lock protects only the immutable verified-prefix cache reference.
-  # Each reader independently reads and hashes all bytes and checks custody;
+  # Each reader independently verifies all current bytes and checks custody;
   # expensive IO/hash must not serialize concurrent Vitals/Host consumers.
   with self._history_lock:
    cached=self._history_cache;chunk_proof=self._history_chunk_proof
+   exact_proof=self._history_exact_proof
   # As with chronology's nonblocking reader, overload is unavailable evidence,
   # never a reused positive verdict. Keep the independent recovery page able
   # to report that state instead of queuing unbounded full-history work.
@@ -292,13 +325,42 @@ class HostVitalityStore:
      if not stat.S_ISREG(before.st_mode) or before.st_nlink!=1:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
      rows=[];offset=0;terminated=False
      complete_hash=hashlib.sha256();chunks=[]
+     exact_rows=[];exact_budget=1024;exact_template=None
      if cached is not None:
       size,hashed,validated,cached_terminated=cached
       if before.st_size>=size and (cached_terminated or before.st_size==size):
        # Reuse chronology's bounded full-prefix hashing road. Never allocate
        # or copy the entire validated history for each concurrent reader.
        matching=False
-       if (size>=8*1024*1024 and chunk_proof is not None
+       if (size>=8*1024*1024 and exact_proof is not None
+           and exact_proof[0] is cached and chunk_proof is not None
+           and chunk_proof[0] is cached):
+        # Exact byte equality with the SAME validated prefix is stronger
+        # than its chunk-digest equality. Read every current byte; reuse the
+        # canonical SHA state only after the complete lossless comparison.
+        # Each reader owns its stream/cursor. No verdict or mtime cache.
+        parts=iter(part for row in exact_proof[1] for part in row)
+        part=memoryview(next(parts,b''));part_offset=0;remaining=size
+        matching=True
+        while remaining:
+         block=stream.read(min(remaining,4*1024*1024))
+         if not block:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
+         remaining-=len(block);position=0
+         while position<len(block):
+          while part_offset==len(part):
+           value=next(parts,None)
+           if value is None:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
+           part=memoryview(value);part_offset=0
+          count=min(len(block)-position,len(part)-part_offset)
+          if not block.startswith(part[part_offset:part_offset+count],position):
+           matching=False;break
+          position+=count;part_offset+=count
+         if not matching:break
+        if matching:
+         if part_offset!=len(part) or next(parts,None) is not None:
+          raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
+         complete_hash=chunk_proof[2].copy();chunks=list(chunk_proof[1])
+       elif (size>=8*1024*1024 and chunk_proof is not None
            and chunk_proof[0] is cached):
         # Each ordered chunk was bound to the SAME completely validated read
         # as the canonical digest/parsed index. Rehash every byte on this one
@@ -309,18 +371,20 @@ class HostVitalityStore:
          ordered.append((position,length,expected));position+=length
         if position!=size:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
         # Adjacent offsets avoid interleaved streams through the same
-        # file. Batch at most eight <=1MiB chunks per read, retaining each
-        # original chunk boundary/digest and the complete custody checks.
-        lanes=[ordered[len(ordered)*i//4:len(ordered)*(i+1)//4] for i in range(4)]
+        # file. Native G55 readback showed hashing dominates the 2GiB
+        # presentation read. Eight lanes with four <=1MiB chunks retain the
+        # existing 32MiB total buffer bound, every original chunk/digest and
+        # all custody checks; no deadline or evidence requirement changes.
+        lanes=[ordered[len(ordered)*i//8:len(ordered)*(i+1)//8] for i in range(8)]
         def hash_lane(rows):
-         # Four bounded tasks, <=8MiB each. No historical byte is skipped,
+         # Eight bounded tasks, <=4MiB each. No historical byte is skipped,
          # and no canonical digest or parsed-prefix condition is replaced.
          # Reuse one mutable buffer per lane rather than allocating/releasing
          # a new multi-megabyte bytes object for every read. preadv leaves the
          # shared descriptor offset untouched, just like the prior pread road.
-         view=memoryview(bytearray(min(8,len(rows))*1024*1024))
-         for index in range(0,len(rows),8):
-          batch=rows[index:index+8];length=sum(row[1] for row in batch)
+         view=memoryview(bytearray(min(4,len(rows))*1024*1024))
+         for index in range(0,len(rows),4):
+          batch=rows[index:index+4];length=sum(row[1] for row in batch)
           if os.preadv(stream.fileno(),[view[:length]],batch[0][0])!=length:
            raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
           offset=0
@@ -329,7 +393,7 @@ class HostVitalityStore:
            if hashlib.sha256(view[offset:offset+chunk_length]).hexdigest()!=expected:return False
            offset+=chunk_length
          return True
-        with ThreadPoolExecutor(max_workers=4) as pool:
+        with ThreadPoolExecutor(max_workers=8) as pool:
          matching=all(pool.map(hash_lane,lanes))
         if matching:
          if position!=size:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
@@ -348,17 +412,96 @@ class HostVitalityStore:
        if matching:
         rows=list(validated);offset=size
         terminated=cached_terminated
+        if exact_proof is not None and exact_proof[0] is cached:
+         exact_rows=list(exact_proof[1]);exact_budget=exact_proof[2]
+        else:exact_rows=None
        else:
         stream.seek(0)
      # Keep the complete verified sample index, not every historical package
      # dictionary. Only the last two observations are needed to reconstruct
      # current state; older entries retain their validated digest and boot.
      # This changes no on-disk history or per-read full-byte verification.
+     validated_static=None;raw_template=None;deferred_rows=deque(maxlen=2)
      def retain(line):
-      rows.append(validate(json.loads(line)))
+      nonlocal validated_static,raw_template
+      # Canonical rows with the same already-validated static fields need no
+      # repeated full JSON parse/serialization. Match every static byte, parse
+      # only the changing scalar, and still hash the entire unsigned row.
+      # Noncanonical JSON always takes the original validating reader below.
+      if raw_template is not None:
+       prefix,middle,suffix,unsigned_prefix,boot=raw_template
+       digest_start=len(prefix);digest_end=digest_start+64
+       number_start=digest_end+len(middle);number_end=len(line)-len(suffix)
+       if (0<number_end-number_start<=64 and line.startswith(prefix)
+           and line.startswith(middle,digest_end) and line.endswith(suffix)):
+        token=line[number_start:number_end];row_digest=line[digest_start:digest_end]
+        try:observed_at=json.loads(token)
+        except (ValueError,UnicodeError):observed_at=None
+        if (type(observed_at) in (int,float) and math.isfinite(observed_at)
+            and observed_at>=0 and canonical(observed_at)[:-1]==token):
+         current_hash=hashlib.sha256(unsigned_prefix)
+         # Skip only this template's outer digest closing quote and comma.
+         current_hash.update(memoryview(line)[digest_end+2:]);current_hash.update(b'\n')
+         if (not re.fullmatch(b'[0-9a-f]{64}',row_digest)
+             or current_hash.hexdigest().encode('ascii')!=row_digest):
+          raise HostVitalityError('HOST_VITALITY_DIGEST_DENIED')
+         deferred_rows.append((len(rows),line))
+         rows.append({'boot_id':boot,'evidence_digest':row_digest.decode('ascii')})
+         if len(rows)>2:
+          older=rows[-3];rows[-3]={key:older[key] for key in ('boot_id','evidence_digest')}
+         return
+      current=json.loads(line)
+      # Repeated historical recipes are not new schemas. Reuse validation
+      # only for the exact canonical static bytes from this read's preceding
+      # fully validated row. Python equality alone would confuse bool/int,
+      # int/float and signed zero, potentially hiding a stale nested digest.
+      static_body=(canonical({k:v for k,v in current.items()
+                              if k not in ('observed_at','evidence_digest')})
+                   if isinstance(current,dict) else None)
+      if static_body is not None and static_body==validated_static:
+       observed_at=current.get('observed_at')
+       if (type(observed_at) not in (int,float) or not math.isfinite(observed_at)
+           or observed_at<0):raise HostVitalityError('HOST_VITALITY_IDENTITY_DENIED')
+       if (not HEX64.fullmatch(str(current.get('evidence_digest')))
+           or current['evidence_digest']!=digest({k:v for k,v in current.items() if k!='evidence_digest'})):
+        raise HostVitalityError('HOST_VITALITY_DIGEST_DENIED')
+       checked=dict(current)
+      else:
+       checked=validate(current)
+      if static_body!=validated_static:
+       # Construct boundaries from validated TOP-LEVEL members, never key
+       # searches in raw JSON (nested recipes contain identically named keys).
+       keys=sorted(checked);parts=[canonical({key:checked[key]})[1:-2] for key in keys]
+       first=keys.index('evidence_digest');second=keys.index('observed_at')
+       unsigned_prefix=b'{'+b','.join(parts[:first])+b','
+       raw_template=(unsigned_prefix+b'"evidence_digest":"',
+                     b'",'+b','.join(parts[first+1:second])+b',"observed_at":',
+                     b','+b','.join(parts[second+1:])+b'}',unsigned_prefix,checked['boot_id'])
+      validated_static=static_body
+      rows.append(checked)
       if len(rows)>2:
        older=rows[-3]
        rows[-3]={key:older[key] for key in ('boot_id','evidence_digest')}
+     def remember_exact(line,has_newline):
+      nonlocal exact_rows,exact_budget,exact_template
+      if exact_rows is None:return
+      if raw_template is None:exact_rows=None;return
+      prefix,middle,suffix=raw_template[:3]
+      a=len(prefix);b=a+64;c=b+len(middle);d=len(line)-len(suffix)
+      # Noncanonical JSON may validate semantically but cannot populate a
+      # canonical byte representation. Disable this optimization, not proof.
+      if (not 0<d-c<=64 or not line.startswith(prefix)
+          or not line.startswith(middle,b) or not line.endswith(suffix)):
+       exact_rows=None;return
+      budget=exact_budget+1024
+      if exact_template is not raw_template:
+       budget+=len(prefix)+len(middle)+len(suffix)+1024
+      # Check before allocating owned tokens or extending the row index.
+      # 1KiB/row conservatively covers tokens, tuple and index/copy overhead.
+      if budget>EXACT_HISTORY_MAX_BYTES:exact_rows=None;return
+      tokens=(prefix,line[a:b],middle,line[c:d],suffix)
+      if has_newline:tokens+= (b'\n',)
+      exact_rows.append(tokens);exact_budget=budget;exact_template=raw_template
      remaining=before.st_size-offset;pending=b'';read_bytes=0
      if not allow_cold and remaining>=8*1024*1024:
       raise HostVitalityError('HOST_VITALITY_HISTORY_UNVALIDATED')
@@ -370,15 +513,23 @@ class HostVitalityStore:
        chunks.append((len(block),hashlib.sha256(block).hexdigest()))
       pending+=block
       lines=pending.split(b'\n');pending=lines.pop()
-      for line in lines:retain(line)
+      for line in lines:
+       retain(line);remember_exact(line,True)
       terminated=block.endswith(b'\n')
-     if pending:retain(pending)
+     if pending:
+      retain(pending);remember_exact(pending,False)
+     # Only the final two full observations are retained. Decode each one's
+     # independently verified bytes; do not share mutable nested dictionaries.
+     for index,line in deferred_rows:
+      if index>=len(rows)-2:rows[index]=json.loads(line)
      if (identity(before)!=identity(os.fstat(stream.fileno()))
          or identity(before)!=identity(self.samples.lstat()) or offset+read_bytes!=before.st_size):
       raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
      with self._history_lock:
       self._history_cache=(offset+read_bytes,complete_hash.hexdigest(),rows,terminated)
       self._history_chunk_proof=(self._history_cache,tuple(chunks),complete_hash.copy())
+      self._history_exact_proof=((self._history_cache,tuple(exact_rows),exact_budget)
+                                if exact_rows is not None and before.st_size>=8*1024*1024 else None)
      return rows
   except HostVitalityError as error:
    if str(error)=='HOST_VITALITY_HISTORY_UNVALIDATED':raise
@@ -423,7 +574,9 @@ class HostVitalityStore:
   try:value=self._read_state(allow_cold=False) if self.defer_cold_validation else self._read_state()
   except HostVitalityError as error:
    if self.defer_cold_validation and str(error)=='HOST_VITALITY_HISTORY_UNVALIDATED':
-    self._cold_validation_needed=True
+    with self._history_lock:
+     self._cold_validation_requested_cache=self._history_cache
+     self._cold_validation_needed=True
     if self.auto_warm_cold:self.warm_cold_history()
    raise
   if value is None:return {"schema":"SereinOutpostHostVitalityState/v1","status":"NO_OBSERVATION","authority_effect":"NONE","mutation_effect":"NONE"}

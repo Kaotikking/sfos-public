@@ -104,8 +104,8 @@ def aggregate_vitals(sources: Mapping[str, Sequence[Mapping[str, Any]]], *, curr
         separate_roles = perspective == "outpost" and all(item["producer"] in _OUTPOST_RESPONSIBILITIES for item in current)
         for item in current:
             groups.setdefault(item["producer"] if separate_roles else perspective, []).append(item)
-        disagreement = any(len({item["claim"] for item in group}) != 1
-                           or len({_canonical(item["payload"]) for item in group}) != 1
+        disagreement = any(len(group) > 1 and (len({item["claim"] for item in group}) != 1
+                           or len({_canonical(item["payload"]) for item in group}) != 1)
                            for group in groups.values())
         state = "UNKNOWN" if not current else "DISAGREEMENT" if disagreement else "OBSERVED"
         # OBSERVED is evidence availability, never health or admission. Keep
