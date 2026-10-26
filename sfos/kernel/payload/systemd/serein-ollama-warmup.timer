@@ -5,7 +5,9 @@ Requisite=ollama.service serein-kernel-operations-api.service
 After=ollama.service serein-kernel-operations-api.service
 
 [Timer]
-# The complete owner performs the first preload; no elapsed boot trigger races it.
+# The owner preloads first. Anchor refresh to timer activation even if systemd
+# has already collected the completed oneshot's inactive timestamp.
+OnActiveSec=4min
 OnUnitInactiveSec=4min
 AccuracySec=10s
 Unit=serein-ollama-warmup.service

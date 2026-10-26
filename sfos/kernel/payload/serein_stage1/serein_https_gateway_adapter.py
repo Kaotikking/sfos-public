@@ -79,7 +79,8 @@ def gateway_request(payload, *, root=Path('/')):
     Transport retains custody/peer/frame/deadline checks from the existing
     private exchange. Actual listener/startup/Authority ownership is separate.
     """
-    return exchange_private_service('HAOS_GATEWAY', payload, timeout_seconds=30, root=root)
+    return exchange_private_service('HAOS_GATEWAY', payload,
+                                    timeout_seconds=MAX_AGE_SECONDS, root=root)
 
 
 def build_tls_context(credentials_directory):

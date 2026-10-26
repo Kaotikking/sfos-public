@@ -599,7 +599,8 @@ def dispatch_installed_conversation(payload, *, authenticated_caller, root, repl
     attempt=reserve_installed_conversation(payload,authenticated_caller=authenticated_caller,
         root=root,replay_store=replay_store,clock=clock)
     evidence={'chain_id':attempt['chain_id'],'reservation':attempt['reservation'],
-              'forward_attempted':False,'result_sha256':None}
+              'forward_attempted':False,'result_sha256':None,
+              'failure_phase':'PRE_FORWARD_REVALIDATION'}
     try:
         if canonical(attempt['matched'])!=canonical(matched):
             raise OperationsDenied('CONVERSATION_INSTALLED_SCOPE_CHANGED')
@@ -616,8 +617,10 @@ def dispatch_installed_conversation(payload, *, authenticated_caller, root, repl
             from .conversation_runtime import MAX_AGE_SECONDS
             return exchange_private_service('CONVERSATION',value,
                 timeout_seconds=min(remaining,MAX_AGE_SECONDS),root=root)
+        evidence['failure_phase']='RUNTIME_EXCHANGE_AND_RESPONSE'
         result=call_expected(runtime_payload,runtime_call=forward,clock=clock)
         evidence['result_sha256']=hashlib.sha256(result).hexdigest()
+        evidence['failure_phase']='RETURN_POLICY'
         returned=json.loads(result)
         if (returned['status']=='ANSWERED'
                 and matched['runtime_request']['requested_operation']=='conversation_tools'):
@@ -634,7 +637,9 @@ def dispatch_installed_conversation(payload, *, authenticated_caller, root, repl
             raise OperationsDenied('CONVERSATION_COMPUTE_BOOT_DENIED')
         # An unknown outcome or changed gate never becomes a retry. Preserve
         # the reservation/result digest and let the owning recovery observe it.
+        evidence['failure_phase']='POST_FORWARD_BOUNDARY'
         current()
+        evidence['failure_phase']='POST_FORWARD_HOST'
         host=read_current_host_evidence(root=root)
         prior=attempt['host_after']
         if (any(host[key]!=prior[key] for key in ('state','boot_id','installed_evidence_sha256',
@@ -643,6 +648,7 @@ def dispatch_installed_conversation(payload, *, authenticated_caller, root, repl
                 or host['claim'] not in {prior['claim'],'CURRENT_BOOT_STABLE'}):
             raise OperationsDenied('CONVERSATION_HOST_CHANGED_AFTER_FORWARD')
         completed=clock().astimezone(timezone.utc).isoformat().replace('+00:00','Z')
+        evidence['failure_phase']='REPLAY_CONSUMPTION'
         consumption=replay_store.consume_request(request_id=matched['request_id'],
             expected_hash=replay_store.contract.receipt_hash(attempt['reservation']),
             at=completed,current_time=completed,result_sha256=evidence['result_sha256'])

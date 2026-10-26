@@ -405,7 +405,7 @@ def exchange_private_service(channel, payload, *, timeout_seconds, root=Path('/'
     if (not isinstance(channel,str) or channel not in roads
             or type(timeout_seconds) not in (int,float) or not math.isfinite(timeout_seconds)
             or not 0 < timeout_seconds <= (MAX_AGE_SECONDS
-                if channel=='CONVERSATION' else 30)):
+                if channel in ('CONVERSATION','HAOS_GATEWAY') else 30)):
         raise ValueError('private_service_configuration_denied')
     absolute, mode, maximum_request, maximum_response, owner = roads[channel]
     if not isinstance(payload,bytes) or not payload:
@@ -646,6 +646,22 @@ def handle_installed_companion(payload: bytes, *, client, root, replay_store,
         if (not hasattr(exc,'evidence') and len(exc.args)==1
                 and type(exc.args[0]) is str and exc.args[0] in preflight_reasons):
             denial_evidence={'reason':exc.args[0]}
+        # Private audit only: fixed execution phase and booleans distinguish
+        # transport failure from rejection of a validated return. Never retain
+        # exception text, reservations, prompts, answers or credentials here.
+        if (isinstance(evidence,dict)
+                and evidence.get('failure_phase') in {
+                    'PRE_FORWARD_REVALIDATION','RUNTIME_EXCHANGE_AND_RESPONSE',
+                    'RETURN_POLICY','POST_FORWARD_BOUNDARY','POST_FORWARD_HOST','REPLAY_CONSUMPTION'}
+                and type(evidence.get('forward_attempted')) is bool):
+            digest=evidence.get('result_sha256')
+            valid_digest=(isinstance(digest,str) and len(digest)==64
+                and all(c in '0123456789abcdef' for c in digest))
+            if digest is None or valid_digest:
+                denial_evidence={'reason':'CONVERSATION_RESERVED_EVIDENCE_PRESERVED',
+                    'phase':evidence['failure_phase'],
+                    'forward_attempted':evidence['forward_attempted'],
+                    'runtime_response_observed':valid_digest}
         if (isinstance(evidence,dict)
                 and evidence.get('policy_denial')=='CONVERSATION_RETURNED_TOOL_SCOPE_DENIED'):
             digest=evidence.get('result_sha256')

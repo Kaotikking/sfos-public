@@ -3018,10 +3018,11 @@ def _unit_active(name,row):
      {'waiting','running','elapsed'} if name==RESIDENCY_UNITS[0] else {'running'})
 
 
-def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,retirement_controls=False,retirement_prestate=False):
+def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,retirement_controls=False,retirement_prestate=False,residency_schedule=False):
  import subprocess
  deny(type(service_controls) is not bool or type(allow_transitional) is not bool
       or type(retirement_controls) is not bool or type(retirement_prestate) is not bool
+      or type(residency_schedule) is not bool or (residency_schedule and names!=RESIDENCY_UNITS)
       or (service_controls and (retirement_controls or retirement_prestate))
       or (service_controls and allow_transitional) or
       (names not in (OPERATIONS_SERVICES,OPERATIONS_ENDPOINT[:1]) if service_controls else names not in (AUTHORITY_UNITS,OTHER_KERNEL_UNITS,RESIDENCY_UNITS)),
@@ -3034,6 +3035,8 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,r
  captured={}
  for name in names:
   selected_properties=properties
+  if residency_schedule and name==RESIDENCY_UNITS[0]:
+   selected_properties+=('NextElapseUSecMonotonic',)
   if retirement_controls or retirement_prestate:
    selected_properties+=('Job',)
    if name.endswith('.service'):selected_properties+=('MainPID','ControlPID','ControlGroup')
@@ -4160,9 +4163,19 @@ def _companion_residency_lifecycle(plan,*,boundary,owner):
            for row in stopped.values()),'KERNEL_RESIDENCY_STOP_UNPROVEN')
  def verify_owned():
   boundary();deny(current_boot()!=boot,'KERNEL_RESIDENCY_BOOT_CHANGED')
-  rows=_read_kernel_units(RESIDENCY_UNITS);definitions(rows)
-  deny(not _unit_active(RESIDENCY_UNITS[0],rows[RESIDENCY_UNITS[0]])
-       or rows[RESIDENCY_UNITS[1]]['ActiveState']=='failed','KERNEL_RESIDENCY_UNPROVEN')
+  rows=_read_kernel_units(RESIDENCY_UNITS,residency_schedule=True);definitions(rows)
+  timer=rows[RESIDENCY_UNITS[0]];service=rows[RESIDENCY_UNITS[1]]
+  next_elapse=timer.get('NextElapseUSecMonotonic','')
+  # Active/elapsed with infinity is not a scheduled refresh. A running timer
+  # may temporarily have no next deadline only while its owned oneshot runs.
+  scheduled=(timer['SubState']=='waiting' and isinstance(next_elapse,str)
+      and next_elapse not in ('','0','0us','infinity')
+      and re.fullmatch(r'(?:[0-9]+(?:\.[0-9]+)?(?:us|ms|s|min|h|d|w|month|y)?\s*)+',next_elapse)
+      and any(c in '123456789' for c in next_elapse))
+  refreshing=(timer['SubState']=='running'
+      and (service['ActiveState'],service['SubState'])==('activating','start'))
+  deny(timer['ActiveState']!='active' or not (scheduled or refreshing)
+       or service['ActiveState']=='failed','KERNEL_RESIDENCY_UNPROVEN')
  owner.retain(stop_owned,verify_owned)
  try:
   boundary();deny(current_boot()!=boot or _read_kernel_units(RESIDENCY_UNITS)!=before,
