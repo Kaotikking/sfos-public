@@ -29,6 +29,40 @@ class HostVitalityError(ValueError):pass
 def canonical(value):return (json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=False)+"\n").encode()
 def digest(value):return hashlib.sha256(canonical(value)).hexdigest()
 
+
+def _exact_history_parts(rows):
+ """Flatten immutable proof fragments without dropping or reordering bytes."""
+ for row in rows:
+  for part in row:
+   if isinstance(part,tuple):
+    yield from part
+   else:yield part
+
+def _history_static_fragments(checked):
+ """Canonical member fragments, split only for lossless storage sharing.
+
+ This is called after normal observation validation. Fragment boundaries
+ carry no authority: every byte is still compared on each subsequent read.
+ """
+ groups=[[b'{']]
+ for index,key in enumerate(sorted(checked)):
+  group=groups[-1]
+  if index:group.append(b',')
+  group.append(canonical(key)[:-1]+b':')
+  if key=='evidence_digest':
+   group.append(b'"');groups.append([b'"'])
+  elif key=='observed_at':groups.append([])
+  elif isinstance(checked[key],dict):
+   group.append(b'{')
+   for child_index,child in enumerate(sorted(checked[key])):
+    if child_index:group.append(b',')
+    group.append(canonical({child:checked[key][child]})[1:-2])
+   group.append(b'}')
+  else:group.append(canonical(checked[key])[:-1])
+ groups[-1].append(b'}')
+ if len(groups)!=3:raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
+ return tuple(tuple(group) for group in groups)
+
 def _recipe_projection(recipe):
  """Validate the nested read-only witness and project its actual evidence."""
  if (not isinstance(recipe,Mapping) or set(recipe)!={"schema","source","manifest_path","manifest_sha256","manifest_git_blob","comparison","admission_effect","downstream_activation","evidence_digest"}
@@ -326,6 +360,7 @@ class HostVitalityStore:
      rows=[];offset=0;terminated=False
      complete_hash=hashlib.sha256();chunks=[]
      exact_rows=[];exact_budget=1024;exact_template=None
+     exact_intern=None;exact_groups=None
      if cached is not None:
       size,hashed,validated,cached_terminated=cached
       if before.st_size>=size and (cached_terminated or before.st_size==size):
@@ -339,7 +374,7 @@ class HostVitalityStore:
         # than its chunk-digest equality. Read every current byte; reuse the
         # canonical SHA state only after the complete lossless comparison.
         # Each reader owns its stream/cursor. No verdict or mtime cache.
-        parts=iter(part for row in exact_proof[1] for part in row)
+        parts=iter(_exact_history_parts(exact_proof[1]))
         part=memoryview(next(parts,b''));part_offset=0;remaining=size
         matching=True
         while remaining:
@@ -421,9 +456,9 @@ class HostVitalityStore:
      # dictionary. Only the last two observations are needed to reconstruct
      # current state; older entries retain their validated digest and boot.
      # This changes no on-disk history or per-read full-byte verification.
-     validated_static=None;raw_template=None;deferred_rows=deque(maxlen=2)
+     validated_static=None;raw_template=None;raw_fragments=None;deferred_rows=deque(maxlen=2)
      def retain(line):
-      nonlocal validated_static,raw_template
+      nonlocal validated_static,raw_template,raw_fragments
       # Canonical rows with the same already-validated static fields need no
       # repeated full JSON parse/serialization. Match every static byte, parse
       # only the changing scalar, and still hash the entire unsigned row.
@@ -477,13 +512,16 @@ class HostVitalityStore:
        raw_template=(unsigned_prefix+b'"evidence_digest":"',
                      b'",'+b','.join(parts[first+1:second])+b',"observed_at":',
                      b','+b','.join(parts[second+1:])+b'}',unsigned_prefix,checked['boot_id'])
+       raw_fragments=_history_static_fragments(checked)
+       if tuple(b''.join(group) for group in raw_fragments)!=raw_template[:3]:
+        raise HostVitalityError('HOST_VITALITY_HISTORY_DENIED')
       validated_static=static_body
       rows.append(checked)
       if len(rows)>2:
        older=rows[-3]
        rows[-3]={key:older[key] for key in ('boot_id','evidence_digest')}
      def remember_exact(line,has_newline):
-      nonlocal exact_rows,exact_budget,exact_template
+      nonlocal exact_rows,exact_budget,exact_template,exact_intern,exact_groups
       if exact_rows is None:return
       if raw_template is None:exact_rows=None;return
       prefix,middle,suffix=raw_template[:3]
@@ -493,14 +531,39 @@ class HostVitalityStore:
       if (not 0<d-c<=64 or not line.startswith(prefix)
           or not line.startswith(middle,b) or not line.endswith(suffix)):
        exact_rows=None;return
-      budget=exact_budget+1024
+      # A row owns only two <=64-byte tokens, a small tuple and index
+      # references. 512 bytes also covers both permitted readers' temporary
+      # list/tuple index copies. Static fragments are charged separately.
+      budget=exact_budget+512
       if exact_template is not raw_template:
-       budget+=len(prefix)+len(middle)+len(suffix)+1024
-      # Check before allocating owned tokens or extending the row index.
-      # 1KiB/row conservatively covers tokens, tuple and index/copy overhead.
-      if budget>EXACT_HISTORY_MAX_BYTES:exact_rows=None;return
-      tokens=(prefix,line[a:b],middle,line[c:d],suffix)
-      if has_newline:tokens+= (b'\n',)
+       if exact_intern is None:
+        exact_intern={}
+        # Rebuild only on actual append/template work, never an unchanged
+        # warm read. Values and groups in the retained proof are immutable.
+        for row in exact_rows:
+         for group in row:
+          if isinstance(group,tuple):
+           for part in group:exact_intern.setdefault(part,part)
+       groups=[]
+       for group in raw_fragments:
+        shared=[]
+        budget+=len(group)*8+256
+        for part in group:
+         found=exact_intern.get(part)
+         if found is None:
+          # Include bytes headers and conservative interner/index capacity
+          # for two concurrent readers; equal bytes alone share storage.
+          budget+=len(part)+512
+          if budget>EXACT_HISTORY_MAX_BYTES:
+           exact_rows=None;exact_intern=None;return
+          exact_intern[part]=part;found=part
+         shared.append(found)
+        groups.append(tuple(shared))
+       exact_groups=tuple(groups)
+      if budget>EXACT_HISTORY_MAX_BYTES:
+       exact_rows=None;exact_intern=None;return
+      tokens=(exact_groups[0],line[a:b],exact_groups[1],line[c:d],exact_groups[2])
+      if has_newline:tokens+=(b'\n',)
       exact_rows.append(tokens);exact_budget=budget;exact_template=raw_template
      remaining=before.st_size-offset;pending=b'';read_bytes=0
      if not allow_cold and remaining>=8*1024*1024:
