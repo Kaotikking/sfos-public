@@ -14,6 +14,7 @@ optional post-install compute input is not authentication or an install gate.
 from __future__ import annotations
 import base64,hashlib,hmac,json,os,pwd,grp,re,stat,tempfile
 from contextlib import contextmanager,ExitStack
+from contextvars import ContextVar
 from pathlib import Path
 from cryptography.hazmat.primitives.serialization import load_pem_private_key,load_pem_public_key
 from .transaction import strict_json,TransactionError
@@ -1009,14 +1010,38 @@ def retire_kernel_in_generation(root,successor,prepared,io,private,public,verify
  return result,terminal
 
 
+# Preserve only the existing fully byte-rehashed chronology parser inside one
+# observer transaction. No Host verdict, timestamp, source or file check is cached.
+_HOST_ATTEMPT_READERS=ContextVar("outpost_stage1_host_attempt_readers",default=None)
+
+@contextmanager
+def _host_attempt_reader_scope():
+ import threading
+ token=_HOST_ATTEMPT_READERS.set((os.getpid(),threading.get_ident(),{}))
+ try:yield
+ finally:_HOST_ATTEMPT_READERS.reset(token)
+
+def _host_attempt_reader(host_path):
+ import threading
+ from outpost.host_vitality import HostCollectionAttempts
+ path=Path(host_path)
+ deny(not path.is_absolute() or ".." in path.parts,"KERNEL_RUNNER_PATH_DENIED")
+ scope=_HOST_ATTEMPT_READERS.get()
+ if scope is None or scope[:2]!=(os.getpid(),threading.get_ident()):
+  return HostCollectionAttempts(path.parent)
+ # Do not resolve symlinks: every latest() reopens and checks named custody.
+ key=str(path.parent)
+ if key not in scope[2]:scope[2][key]=HostCollectionAttempts(path.parent)
+ return scope[2][key]
+
 def current_host_gate(host_path,boot_id):
  """Consume the canonical data-derived Host witness, not verdict labels."""
  import time
- from outpost.host_vitality import HostCollectionAttempts,host_attempt_matches
+ from outpost.host_vitality import host_attempt_matches
  try:
   host=validate_state(read_json(host_path),active=True)
   deny(host["current_boot_id"]!=boot_id or host["classification"] not in {"CURRENT_BOOT_STABLE","FIRST_BOOT_OBSERVED","RECOVERED_AFTER_BOOT_CHANGE"},"KERNEL_HOST_GATE_DENIED")
-  attempts=HostCollectionAttempts(Path(host_path).parent)
+  attempts=_host_attempt_reader(host_path)
   latest=attempts.latest()
   deny(not host_attempt_matches(host,latest,boot_id,time.time()),'KERNEL_HOST_ATTEMPT_DENIED')
   # A successful old state cannot override a newer pending/failed collection.
@@ -1037,7 +1062,6 @@ def _settled_host_gate(host_path,boot_id):
  remain denials. No service action, old-sample fallback or timestamp rewrite.
  """
  import time
- from outpost.host_vitality import HostCollectionAttempts
  from outpost.reboot_vitality import RebootVitalityError
  from .public_generation_transaction import read_bootstrap_unit
  native_static=None
@@ -1077,7 +1101,7 @@ def _settled_host_gate(host_path,boot_id):
  try:return read_unlocked(lambda:current_host_gate(host_path,boot_id))
  except RunnerDenied as exc:
   if str(exc)!='KERNEL_HOST_ATTEMPT_DENIED':raise
-  attempts=HostCollectionAttempts(Path(host_path).parent)
+  attempts=_host_attempt_reader(host_path)
   latest=read_unlocked(attempts.latest)
   if not latest:raise
   pinned=latest['start']
@@ -6817,7 +6841,7 @@ def observe_installed_stage1(plan,receipt,expectation,*,preserved_runtime,
  deny((stage1_evidence is None)!=(evidence_verifier is None)
       or (stage1_evidence is not None and gateway_expectation is None),
       'STAGE1_EXTERNAL_EVIDENCE_REQUIRED')
- with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')):
+ with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')), _host_attempt_reader_scope():
   observation=_read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,
       read_public_request=read_public_request,read_public_response=read_public_response,
       **({'gateway_expectation':gateway_expectation} if gateway_expectation is not None else {}))
@@ -6925,7 +6949,7 @@ def publish_installed_stage1_vitals(plan,receipt,expectation,*,preserved_runtime
  deny((stage1_evidence is None)!=(evidence_verifier is None)
       or (stage1_evidence is not None and gateway_expectation is None),
       'STAGE1_EXTERNAL_EVIDENCE_REQUIRED')
- with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')):
+ with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')), _host_attempt_reader_scope():
   observation=_read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,
       read_public_request=read_public_request,read_public_response=read_public_response,
       **({'gateway_expectation':gateway_expectation} if gateway_expectation is not None else {}))
