@@ -3815,6 +3815,33 @@ def _offline_companion_lifecycle(plan,receipt,authority_observation,operations,
   raise
 
 
+_OBSERVER_FAILURE_CODES=frozenset({
+ 'KERNEL_INTERFACE_SIZE_DENIED','KERNEL_INTERFACE_EXPECTATION_DENIED',
+ 'KERNEL_INTERFACE_REQUEST_DENIED','KERNEL_INTERFACE_BINDING_DENIED',
+ 'KERNEL_INTERFACE_FACTS_DENIED','KERNEL_INTERFACE_PROBE_DENIED',
+ 'KERNEL_INTERFACE_REJECTION_DENIED','KERNEL_INTERFACE_STALE',
+ 'KERNEL_INTERFACE_RESPONSE_DENIED','KERNEL_RESPONSE_DEADLINE_DENIED',
+ 'KERNEL_RESPONSE_FRAMING_DENIED','KERNEL_TRANSPORT_UNAVAILABLE',
+ 'KERNEL_AUTHORITY_PREDECESSOR_DENIED','KERNEL_OBSERVATION_CHANGED',
+ 'KERNEL_FRAME_IDENTITY_CHANGED','KERNEL_HOST_ATTEMPT_DENIED',
+ 'KERNEL_HOST_GATE_DENIED','KERNEL_HOST_UNAVAILABLE',
+ 'KERNEL_AUTHORITY_STALE','KERNEL_OPERATIONS_STALE',
+ 'KERNEL_SOCKET_CUSTODY_DENIED','KERNEL_SOCKET_CHANGED',
+ 'KERNEL_RUNNER_FILE_DENIED','KERNEL_HOST_OBSERVATION_CHANGED',
+ 'KERNEL_SERVER_IDENTITY_DENIED','OUTPOST_OBSERVER_IDENTITY_DENIED',
+})
+
+def _observer_failure_code(raw):
+ # Diagnostic text is not evidence of acceptance and cannot change a verdict.
+ if not isinstance(raw,bytes) or len(raw)>8192:return 'UNKNOWN_CHILD_FAILURE'
+ last=raw.rstrip(b'\r\n').split(b'\n')[-1] if raw else b''
+ parts=last.split(b': ',1)
+ if len(parts)==2 and parts[0].split(b'.')[-1] in (b'KernelWitnessError',b'RunnerDenied'):
+  try:code=parts[1].decode('ascii')
+  except UnicodeDecodeError:return 'UNKNOWN_CHILD_FAILURE'
+  if code in _OBSERVER_FAILURE_CODES:return code
+ return 'UNKNOWN_CHILD_FAILURE'
+
 def _observe_installed_branch(plan,receipt,prior,*,branch):
  import selectors,subprocess,time
  from .generation_launcher import read_selector
@@ -3857,17 +3884,20 @@ def _observe_installed_branch(plan,receipt,prior,*,branch):
  # shell, inherited secret environment, inherited descriptors or root observer.
  deadline=time.monotonic()+10.0
  raw=bytearray()
+ diagnostic=bytearray()
  process=None
  try:
   process=subprocess.Popen([str(launcher),'outpost/kernel_direct_witness.py',
       '-' if branch in {'COMPUTE','GATEWAY'} else encoded.decode('utf-8')],
       stdin=subprocess.PIPE if branch in {'COMPUTE','GATEWAY'} else subprocess.DEVNULL,
-      stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,
+      stdout=subprocess.PIPE,stderr=subprocess.PIPE,
       cwd='/',env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','PYTHONDONTWRITEBYTECODE':'1'},
       shell=False,close_fds=True,user=account['uid'],group=account['gid'],extra_groups=(),umask=0o077)
   with selectors.DefaultSelector() as pending:
    os.set_blocking(process.stdout.fileno(),False)
    pending.register(process.stdout,selectors.EVENT_READ)
+   os.set_blocking(process.stderr.fileno(),False)
+   pending.register(process.stderr,selectors.EVENT_READ)
    sent=0
    if process.stdin is not None:
     os.set_blocking(process.stdin.fileno(),False)
@@ -3881,14 +3911,24 @@ def _observe_installed_branch(plan,receipt,prior,*,branch):
       if sent==len(encoded):
        pending.unregister(key.fileobj);process.stdin.close()
       continue
-     chunk=os.read(key.fd,min(4096,65537-len(raw)))
+     is_error=key.fileobj is process.stderr
+     target=diagnostic if is_error else raw
+     limit=8192 if is_error else 65536
+     chunk=os.read(key.fd,min(4096,limit+1-len(target)))
      if not chunk:pending.unregister(key.fileobj)
      else:
-      raw.extend(chunk)
-      deny(len(raw)>65536,'KERNEL_OBSERVER_OUTPUT_BOUND_DENIED')
+      target.extend(chunk)
+      deny(len(target)>limit,'KERNEL_OBSERVER_DIAGNOSTIC_BOUND_DENIED'
+           if is_error else 'KERNEL_OBSERVER_OUTPUT_BOUND_DENIED')
   remaining=deadline-time.monotonic()
   deny(remaining<=0,'KERNEL_OBSERVER_DEADLINE_DENIED')
-  deny(process.wait(timeout=remaining)!=0,'KERNEL_OBSERVER_EXECUTION_DENIED')
+  returncode=process.wait(timeout=remaining)
+  if returncode!=0:
+   # Retain only an explicitly enumerated reason. Tracebacks, paths, payloads
+   # and arbitrary exception text never leave this bounded private buffer.
+   reason=_observer_failure_code(bytes(diagnostic))
+   raise RunnerDenied('KERNEL_OBSERVER_EXECUTION_DENIED:'+reason)
+  deny(bool(diagnostic),'KERNEL_OBSERVER_UNEXPECTED_DIAGNOSTIC')
  except subprocess.TimeoutExpired as exc:
   raise RunnerDenied('KERNEL_OBSERVER_DEADLINE_DENIED') from exc
  except OSError as exc:
@@ -3902,6 +3942,7 @@ def _observe_installed_branch(plan,receipt,prior,*,branch):
    finally:
     if process.stdin is not None:process.stdin.close()
     if process.stdout is not None:process.stdout.close()
+    if process.stderr is not None:process.stderr.close()
  raw=bytes(raw)
  deny(not raw or not raw.endswith(b'\n'),'KERNEL_OBSERVER_OUTPUT_DENIED')
  value=strict_json(raw)

@@ -26,7 +26,9 @@ from uuid import UUID
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.serialization import load_pem_public_key
 from install.transaction import strict_json, TransactionError
-from install.kernel_first_install_runner import regular, current_host_gate, HOST_STATE
+from install.kernel_first_install_runner import (
+    regular, current_host_gate, HOST_STATE, _host_attempt_reader_scope,
+)
 from install.public_generation_transaction import CANONICAL_AUTHORITY_SHA256
 
 SOCKET = Path("/run/serein/stage1/kernel-authority-v1.sock")
@@ -1579,10 +1581,15 @@ def main():
             common|{'interface_predecessor','gateway_expectation'}):
         require(not {'compute_expectation','gateway_expectation'}&set(envelope)
                 or sys.argv[1]=='-', 'KERNEL_PRIVATE_COMPUTE_INPUT_REQUIRED')
-        result=observe_operations(source=envelope['source'],identity=envelope['identity'],
-            installed_evidence_sha256=envelope['installed_evidence_sha256'],
-            authority_observation=record_bytes(envelope['authority_observation']),
-            **{key:envelope[key] for key in ('interface_predecessor','compute_expectation','gateway_expectation') if key in envelope})
+        # The observer is a separate process, so the complete transaction must
+        # enter its own exact-history reader scope.  Both Host boundaries below
+        # still revalidate state/latest evidence; only the fully byte-rehashed
+        # append-only chronology parse is shared inside this one attempt.
+        with _host_attempt_reader_scope():
+            result=observe_operations(source=envelope['source'],identity=envelope['identity'],
+                installed_evidence_sha256=envelope['installed_evidence_sha256'],
+                authority_observation=record_bytes(envelope['authority_observation']),
+                **{key:envelope[key] for key in ('interface_predecessor','compute_expectation','gateway_expectation') if key in envelope})
     else:
         require(set(envelope)=={'source','request','identity'}, 'KERNEL_EXPECTED_SOURCE_DENIED')
         result = observe_authority(source=envelope["source"], request=envelope["request"],
