@@ -54,6 +54,33 @@ def require(value, reason):
         raise AuthorityDenied(reason)
 
 
+def _construction_observations(targets, observations, expected_results, boot):
+    """Bind the terminal witness shape to the signed complete-Kernel payload."""
+    if not isinstance(observations, dict):
+        return False
+    residency_targets = {
+        '/usr/libexec/serein/serein-ollama-warmup',
+        '/etc/systemd/system/serein-ollama-warmup.service',
+        '/etc/systemd/system/serein-ollama-warmup.timer'}
+    require(isinstance(targets, set) and all(isinstance(value, str) for value in targets),
+            'AUTHORITY_INSTALL_WITNESS_DENIED')
+    owned = residency_targets & targets
+    require(not owned or owned == residency_targets, 'AUTHORITY_INSTALL_WITNESS_DENIED')
+    fields = set(expected_results) | {'compute', 'gpu', 'public_response'}
+    if not owned:
+        return set(observations) == fields
+    expected = {
+        'result': 'LOCAL_MODEL_PRELOAD_COMPLETED_REFRESH_STARTED',
+        'boot_id': boot,
+        'model': 'qwen3:4b-instruct',
+        'context': 8192,
+        'refresh_seconds': 240,
+        'source': 'COMPLETE_KERNEL_PAYLOAD',
+        'stage1': 'NOT_READY',
+        'admission_effect': 'NONE'}
+    return set(observations) == fields | {'residency'} and observations['residency'] == expected
+
+
 def canonical(value):
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
@@ -713,7 +740,7 @@ def collect_authority_facts(root=Path("/")):
                 and witness.get('public_acceptance') == 'UNPROVEN'
                 and witness.get('temporal_scope') == 'HISTORICAL_CONSTRUCTION_OBSERVATION'
                 and isinstance(observations, dict)
-                and set(observations) == set(expected_results) | {'compute','gpu','public_response'}
+                and _construction_observations(targets, observations, expected_results, boot)
                 and (pending or measured)
                 and all(isinstance(observations[name], dict)
                         and observations[name].get('result') == result
