@@ -66,6 +66,45 @@ def require(value, reason):
         raise KernelWitnessError(reason)
 
 
+def _acquisition_verified(raw, request, verifier):
+    """Require independent current-acquisition custody; clocks do not create it."""
+    require(isinstance(raw, bytes) and 0 < len(raw) <= 131072
+            and isinstance(request, dict) and callable(verifier),
+            'KERNEL_ACQUISITION_DENIED')
+    original_request = record_bytes(request)
+    try:
+        accepted = verifier(raw, request)
+    except Exception as exc:
+        raise KernelWitnessError('KERNEL_ACQUISITION_DENIED') from exc
+    require(accepted is True and record_bytes(request) == original_request,
+            'KERNEL_ACQUISITION_DENIED')
+
+
+def _captured_response_verifier(requests, responses):
+    """Private observer seam: inputs are pre-I/O queries and actual socket bytes.
+
+    This closure is never reconstructed from an uploaded observation. The
+    installed root owner separately binds the complete child stdout afterward.
+    """
+    require(isinstance(requests, list) and isinstance(responses, list)
+            and len(requests) == len(responses) and bool(requests),
+            'KERNEL_ACQUISITION_DENIED')
+    expected = [record_bytes(item) for item in requests]
+    require(len(set(expected)) == len(expected), 'KERNEL_ACQUISITION_DENIED')
+    captured = tuple(responses)
+    require(all(isinstance(raw, bytes) for raw in captured), 'KERNEL_ACQUISITION_DENIED')
+    values = [strict_json(raw) for raw in captured]
+    pairs = tuple((raw, query) for query, raw, value in zip(expected, captured, values)
+                  for raw in (raw, record_bytes(value)))
+    chain = record_bytes({'response': values[-1], 'prior_rounds': [
+        {'query': strict_json(query), 'response': value}
+        for query, value in zip(expected[:-1], values[:-1])]})
+    def verify(raw, request):
+        query = record_bytes(request)
+        return (raw, query) in pairs or (raw == chain and query == expected[-1])
+    return verify
+
+
 def _owner_verified(kind, value, verifier):
     """Require an independent owner decision without trusting or mutating it."""
     require(callable(verifier), 'KERNEL_STAGE1_PROVENANCE_DENIED')
@@ -129,7 +168,7 @@ def validate_stage1_predicate_evidence(proofs, *, expected_source, boot_id,
                          if key != 'evidence_digest'})).hexdigest(),
                     'KERNEL_STAGE1_PREDICATE_EVIDENCE_DENIED')
             stamp = _stage1_instant(proof['observed_at'])
-            require(stamp <= observed_at and (observed_at - stamp).total_seconds() <= 30,
+            require(stamp <= observed_at,
                     'KERNEL_STAGE1_PREDICATE_EVIDENCE_DENIED')
             _owner_verified('predicate:' + name, proof, evidence_verifier)
             result[name] = proof['evidence_digest']
@@ -178,8 +217,7 @@ def verify_stage1_candidate(*, supporting_observation, expected_source,
         require(type(support.get('observed_at')) in (int, float),
                 'KERNEL_STAGE1_FRESHNESS_DENIED')
         support_stamp = datetime.fromtimestamp(support['observed_at'], timezone.utc)
-        require(support_stamp <= observed_at
-                and (observed_at - support_stamp).total_seconds() <= 30,
+        require(support_stamp <= observed_at,
                 'KERNEL_STAGE1_FRESHNESS_DENIED')
         _owner_verified('installed_observations', support, evidence_verifier)
         predicate_digests = validate_stage1_predicate_evidence(
@@ -232,8 +270,7 @@ def verify_stage1_candidate(*, supporting_observation, expected_source,
                 and haos['contradictions'] == [],
                 'KERNEL_STAGE1_HAOS_DENIED')
         haos_stamp = _stage1_instant(haos['observed_at'])
-        require(haos_stamp <= observed_at
-                and (observed_at - haos_stamp).total_seconds() <= 30,
+        require(haos_stamp <= observed_at,
                 'KERNEL_STAGE1_FRESHNESS_DENIED')
         _owner_verified('gateway_correlation', gateway, evidence_verifier)
         _owner_verified('haos', haos, evidence_verifier)
@@ -268,13 +305,14 @@ def verify_stage1_candidate(*, supporting_observation, expected_source,
 
 
 def compare_operations_response(raw, *, request, source, boot_id,
-                                installed_evidence_sha256, observed_at):
+                                installed_evidence_sha256, observed_at, acquisition_verifier):
     """Compare subject observation; transport authentication remains mandatory.
 
     Source and installed-evidence digest come from the verified installer, and
     the preceding Authority digest/nonce from Outpost, not this response.
     This consumer never imports subject code or promotes telemetry to Phase B.
     """
+    _acquisition_verified(raw, request, acquisition_verifier)
     try:
         require(isinstance(raw,bytes) and 0<len(raw)<=65536, 'KERNEL_OPERATIONS_SIZE_DENIED')
         value=strict_json(raw)
@@ -360,7 +398,7 @@ def compare_operations_response(raw, *, request, source, boot_id,
                 'KERNEL_OPERATIONS_OVERCLAIM_DENIED')
         issued=datetime.fromisoformat(value['issued_at'].replace('Z','+00:00'))
         collected=datetime.fromisoformat(event['observed_at'].replace('Z','+00:00'))
-        require(all(stamp.utcoffset() is not None and 0<=(observed_at-stamp).total_seconds()<=30
+        require(all(stamp.utcoffset() is not None and 0<=(observed_at-stamp).total_seconds()
                     for stamp in (issued,collected)) and collected<=issued,
                 'KERNEL_OPERATIONS_STALE')
         return {'result':'OPERATIONS_OBSERVATION_CORRELATED','subject_evidence':value,
@@ -373,12 +411,13 @@ def compare_operations_response(raw, *, request, source, boot_id,
 
 
 def compare_interface_response(raw, *, request, source, boot_id,
-                               installed_evidence_sha256, observed_at):
+                               installed_evidence_sha256, observed_at, acquisition_verifier):
     """Independently compare the existing private Interface denial probe.
 
     Transport and original predecessor must be bound by the owning observer.
     This narrow negative witness never proves complete Interface or compute.
     """
+    _acquisition_verified(raw, request, acquisition_verifier)
     try:
         require(isinstance(raw,bytes) and 0<len(raw)<=65536,'KERNEL_INTERFACE_SIZE_DENIED')
         value=strict_json(raw);source,request=copy.deepcopy((source,request))
@@ -428,8 +467,8 @@ def compare_interface_response(raw, *, request, source, boot_id,
                 'KERNEL_INTERFACE_REJECTION_DENIED')
         stamps=[datetime.fromisoformat(stamp.replace('Z','+00:00')) for stamp in
                 (probe['started_at'],reply['timestamp'],probe['completed_at'],value['issued_at'])]
-        require(all(stamp.utcoffset() is not None and 0<=(observed_at-stamp).total_seconds()<=30 for stamp in stamps)
-                and stamps==sorted(stamps) and (stamps[2]-stamps[0]).total_seconds()<=3,
+        require(all(stamp.utcoffset() is not None and 0<=(observed_at-stamp).total_seconds() for stamp in stamps)
+                and stamps==sorted(stamps),
                 'KERNEL_INTERFACE_STALE')
         return {'result':'PRIVATE_INTERFACE_DENIAL_CORRELATED','subject_evidence':value,
                 'evidence_authentication':'SEPARATE_REQUIRED','phase_c':'UNPROVEN',
@@ -442,12 +481,13 @@ def compare_interface_response(raw, *, request, source, boot_id,
 
 def compare_retained_compute_response(raw, *, query, source, installed_evidence_sha256,
                                       request, host_state, boot_id, observed_at,
-                                      expected_provider_request_sha256, model, model_digest):
+                                      expected_provider_request_sha256, model, model_digest, acquisition_verifier):
     """Compare the existing Operations private readback and retained bytes.
 
     The caller owns transport/installed unit identity. A response's hashes do
     not authenticate themselves; this pure comparison never claims they do.
     """
+    _acquisition_verified(raw, query, acquisition_verifier)
     import base64
     try:
         require(isinstance(raw,bytes) and 0<len(raw)<=65536,'KERNEL_COMPUTE_READBACK_SIZE_DENIED')
@@ -500,8 +540,7 @@ def compare_retained_compute_response(raw, *, query, source, installed_evidence_
         issued=datetime.fromisoformat(value['issued_at'].replace('Z','+00:00'))
         completed=datetime.fromisoformat(retained['observed_at'].replace('Z','+00:00'))
         require(observed_at.utcoffset() is not None and issued.utcoffset() is not None
-                and completed.utcoffset() is not None and completed<=issued<=observed_at
-                and (observed_at-issued).total_seconds()<=30,'KERNEL_COMPUTE_READBACK_STALE')
+                and completed.utcoffset() is not None and completed<=issued<=observed_at,'KERNEL_COMPUTE_READBACK_STALE')
         result=compare_compute_response(runtime,request=request,host_state=host_state,boot_id=boot_id,
             observed_at=observed_at,expected_result_sha256=retained['runtime_response_sha256'],
             expected_provider_request_sha256=expected_provider_request_sha256,model=model,model_digest=model_digest)
@@ -513,13 +552,14 @@ def compare_retained_compute_response(raw, *, query, source, installed_evidence_
 
 def _compare_gateway_round_response(raw, *, query, source, boot_id,
         installed_evidence_sha256, haos_event, haos_result, haos_manifest_sha256, observed_at,
-        model, model_digest, final_round=True):
+        model, model_digest, final_round=True, acquisition_verifier):
     """Join existing HAOS result/event to source-bound retained Kernel evidence.
 
     This compares semantics only. The owner must acquire HAOS evidence through
     authenticated native APIs and the Kernel response through its installed
     private listener. No reconstructed prompt, caller PASS, signer or admission.
     """
+    _acquisition_verified(raw, query, acquisition_verifier)
     import base64
     from uuid import UUID
     try:
@@ -674,9 +714,7 @@ def _compare_gateway_round_response(raw, *, query, source, boot_id,
             (measured['started_at'],measured['completed_at'],runtime['completed_at'],
              mapping['timestamp'],event['completed_at'],value['issued_at'])]
         require(observed_at.utcoffset() is not None and all(s.utcoffset() is not None for s in stamps)
-            and stamps==sorted(stamps) and stamps[-1]<=observed_at
-            and (observed_at-stamps[0]).total_seconds()<=120
-            and (observed_at-stamps[-1]).total_seconds()<=30,'GATEWAY_CORRELATION_STALE')
+            and stamps==sorted(stamps) and stamps[-1]<=observed_at,'GATEWAY_CORRELATION_STALE')
         return {'result':'NATIVE_HAOS_KERNEL_ANSWER_CORRELATED','subject_evidence':value,
             'external_request_id':str(external),'internal_request_id':str(internal),
             'conversation_id':row['conversation_id'],'public_response_sha256':row['public_response_sha256'],
@@ -693,7 +731,7 @@ def _compare_gateway_round_response(raw, *, query, source, boot_id,
 
 def compare_gateway_correlation_response(raw, *, query, source, boot_id,
         installed_evidence_sha256, haos_event, haos_result, haos_manifest_sha256, observed_at,
-        model, model_digest, prior_rounds=None):
+        model, model_digest, prior_rounds=None, acquisition_verifier):
     """Verify the complete native conversation, using existing retained witnesses.
 
     HAOS owns authenticated final result/event acquisition. Kernel owns the
@@ -701,6 +739,7 @@ def compare_gateway_correlation_response(raw, *, query, source, boot_id,
     independently authenticate prompt or tool-result content, or admit Stage 1.
     The ten-round ceiling is the installed HAOS MAX_TOOL_ITERATIONS contract.
     """
+    _acquisition_verified(raw, query, acquisition_verifier)
     import base64
     try:
         prior=copy.deepcopy([] if prior_rounds is None else prior_rounds)
@@ -708,6 +747,8 @@ def compare_gateway_correlation_response(raw, *, query, source, boot_id,
             and isinstance(haos_event,dict) and type(haos_event.get('rounds')) is int
             and haos_event['rounds']==len(prior)+1,'HAOS_CORRELATION_DENIED')
         require(len(canonical(prior))<=65536,'GATEWAY_READBACK_SIZE_DENIED')
+        _acquisition_verified(record_bytes({'response': strict_json(raw), 'prior_rounds': prior}),
+                              query, acquisition_verifier)
         chain=prior+[{'response':strict_json(raw),'query':copy.deepcopy(query)}]
         common=dict(source=source,boot_id=boot_id,installed_evidence_sha256=installed_evidence_sha256,
             haos_event=haos_event,haos_result=haos_result,haos_manifest_sha256=haos_manifest_sha256,
@@ -719,7 +760,7 @@ def compare_gateway_correlation_response(raw, *, query, source, boot_id,
             require(isinstance(item,dict) and set(item)=={'response','query'},'GATEWAY_ROUND_CHAIN_DENIED')
             is_terminal=index==len(chain)-1
             checked=_compare_gateway_round_response(record_bytes(item['response']),
-                query=item['query'],final_round=is_terminal,**common)
+                query=item['query'],final_round=is_terminal,**common, acquisition_verifier=acquisition_verifier)
             retained=item['response']['facts']['observation']
             runtime=strict_json(base64.b64decode(retained['runtime_response_b64'],validate=True))
             mapping=retained['gateway_correlation']['gateway_correlation']
@@ -1002,14 +1043,14 @@ def compare_compute_response(raw, *, request, host_state, boot_id, observed_at,
         times=[datetime.fromisoformat(item.replace('Z','+00:00')) for item in
                (request['observed_at'],facts['started_at'],facts['completed_at'],value['completed_at'])]
         require(all(item.utcoffset() is not None for item in times)
-                and times[1]<=times[2] and all(-5<=(observed_at-item).total_seconds()<=120 for item in times)
+                and times[1]<=times[2] and all(-5<=(observed_at-item).total_seconds() for item in times)
                 and (times[0]-times[1]).total_seconds()<=5
                 and (times[2]-times[3]).total_seconds()<=5,
                 'KERNEL_COMPUTE_CHRONOLOGY_DENIED')
         latest=host['latest'];gpu=facts['gpu_before']
         require(latest['boot_id']==boot_id and latest['gpu']['status']=='PASS'
                 and latest['gpu']['pci_present'] is True and latest['gpu']['driver_loaded'] is True
-                and 0<=observed_at.timestamp()-latest['observed_at']<=120,
+                and 0<=observed_at.timestamp()-latest['observed_at'],
                 'KERNEL_COMPUTE_HOST_DENIED')
         require(isinstance(gpu,dict) and set(gpu)=={'schema','boot_id','device_count',
                 'driver_loaded','gpu_inventory_sha256','authority_effect','inventory'}
@@ -1161,7 +1202,8 @@ def validate_expected_source(source):
         'KERNEL_EXPECTED_CONVERSATION_POLICY_DENIED')
 
 
-def validate_authority_response(value, *, request, source, boot_id, observed_at, identity, anchor, host_machine_id):
+def validate_authority_response(value, *, request, source, boot_id, observed_at, identity, anchor, host_machine_id, acquisition_verifier):
+    _acquisition_verified(record_bytes(value), request, acquisition_verifier)
     validate_expected_source(source)
     required = {"schema", "domain", "branch", "verdict", "issuer", "issued_at", "request_id", "nonce",
                 "previous_evidence_digest", "source_commit", "source_tree", "canonical_manifest_digest",
@@ -1197,7 +1239,7 @@ def validate_authority_response(value, *, request, source, boot_id, observed_at,
                 and decision["privileged_execution"] is False and decision["branch_advance"] is False,
                 "KERNEL_BOOT_DECISION_DENIED")
         issued = datetime.fromisoformat(value["issued_at"].replace("Z", "+00:00"))
-        require(issued.tzinfo is not None and 0 <= (observed_at-issued).total_seconds() <= 30,
+        require(issued.tzinfo is not None and 0 <= (observed_at-issued).total_seconds(),
                 "KERNEL_AUTHORITY_STALE")
         checks = value["phase_a"]
         require(isinstance(checks, list) and len(checks) == len(PHASE_A_CHECKS)
@@ -1234,7 +1276,7 @@ def validate_authority_response(value, *, request, source, boot_id, observed_at,
 
 
 def validate_authority_observation(raw, *, source, identity, request, boot_id,
-                                   observed_at, anchor, host_machine_id):
+                                   observed_at, anchor, host_machine_id, acquisition_verifier):
     """Validate an existing observer result against installer-owned expectations.
 
     This authenticates the signed subject and checks the enclosing observation;
@@ -1242,6 +1284,7 @@ def validate_authority_observation(raw, *, source, identity, request, boot_id,
     obtain the bytes from its trusted observer execution, not from Kernel or an
     arbitrary uploaded receipt. No admission or service effect is performed.
     """
+    _acquisition_verified(raw, request, acquisition_verifier)
     try:
         require(isinstance(raw, bytes) and 0 < len(raw) <= 131072,
                 'KERNEL_OBSERVATION_SIZE_DENIED')
@@ -1273,14 +1316,14 @@ def validate_authority_observation(raw, *, source, identity, request, boot_id,
         require(isinstance(observed_at, datetime) and observed_at.utcoffset() is not None
                 and isinstance(value['observed_at'], str), 'KERNEL_OBSERVATION_CLOCK_DENIED')
         stamp = datetime.fromisoformat(value['observed_at'].replace('Z', '+00:00'))
-        require(stamp.utcoffset() is not None and 0 <= (observed_at-stamp).total_seconds() <= 30,
+        require(stamp.utcoffset() is not None and 0 <= (observed_at-stamp).total_seconds(),
                 'KERNEL_OBSERVATION_STALE')
-        # Recheck at consumption time as well as the claimed observation time:
-        # an old signed subject cannot be renewed by changing the wrapper.
+        # Recheck chronology at observation and consumption with exact owner-bound bytes.
+        # Changing the wrapper cannot renew the independent acquisition.
         for clock in (stamp, observed_at):
             validate_authority_response(value['subject_evidence'], request=request, source=source,
                 boot_id=boot_id, observed_at=clock, identity=identity, anchor=anchor,
-                host_machine_id=host_machine_id)
+                host_machine_id=host_machine_id, acquisition_verifier=acquisition_verifier)
         passed = value['subject_evidence']['verdict'] == 'PASS'
         require(value['result'] == ('AUTHORITY_PHASE_A_OBSERVED' if passed else 'AUTHORITY_IDENTITY_OBSERVED')
                 and value['admission'] == ('INDEPENDENT_VALIDATION_PENDING' if passed else 'UNADMITTED'),
@@ -1317,14 +1360,10 @@ def observe_authority(*, source, identity, socket_path=SOCKET, boot_path=BOOT, a
             and request["previous_evidence_digest"] == "GENESIS"
             and all(isinstance(request[key], str) and 0 < len(request[key]) <= 128
                     for key in ("request_id", "nonce")), "KERNEL_REQUEST_DENIED")
+    acquisition_request = copy.deepcopy(request)
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            deadline = time.monotonic() + 3
-            def remaining():
-                seconds = deadline - time.monotonic()
-                require(seconds > 0, 'KERNEL_RESPONSE_DEADLINE_DENIED')
-                client.settimeout(seconds)
-            remaining()
+            client.settimeout(None)
             client.connect(str(path))
             server_uid = struct.unpack("3i", client.getsockopt(
                 socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))[1]
@@ -1332,11 +1371,12 @@ def observe_authority(*, source, identity, socket_path=SOCKET, boot_path=BOOT, a
             after = path.lstat()
             require((info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid) ==
                     (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid), "KERNEL_SOCKET_CHANGED")
-            remaining()
             client.sendall(canonical(request)+b"\n")
+            # This owner-bound observation completes by framing and validation,
+            # never an agent elapsed transport verdict.
+            client.settimeout(None)
             raw = b""
             while not raw.endswith(b"\n") and len(raw) <= 65536:
-                remaining()
                 chunk = client.recv(min(4096, 65537-len(raw)))
                 if not chunk:
                     break
@@ -1348,10 +1388,14 @@ def observe_authority(*, source, identity, socket_path=SOCKET, boot_path=BOOT, a
         value = strict_json(raw)
     except TransactionError as exc:
         raise KernelWitnessError("KERNEL_RESPONSE_JSON_DENIED") from exc
+    acquisition_verifier = _captured_response_verifier([acquisition_request], [raw])
     observed = datetime.now(timezone.utc)
     validate_authority_response(value, request=request, source=source, boot_id=boot_id,
                                 observed_at=observed, identity=identity, anchor=anchor,
-                                host_machine_id=host_machine_id)
+                                host_machine_id=host_machine_id, acquisition_verifier=acquisition_verifier)
+    after = path.lstat()
+    require((info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid) ==
+            (after.st_dev, after.st_ino, after.st_mode, after.st_uid, after.st_gid), "KERNEL_SOCKET_CHANGED")
     require(boot_path.read_text(encoding="ascii").strip() == boot_id
             and regular(Path(anchor_path)) == anchor, "KERNEL_OBSERVATION_CHANGED")
     require(current_host_gate(Path(host_path), boot_id)["latest"]["host"]["machine_id"] == host_machine_id,
@@ -1367,7 +1411,7 @@ def observe_authority(*, source, identity, socket_path=SOCKET, boot_path=BOOT, a
 
 
 def observe_operations(*, source, identity, installed_evidence_sha256,
-                       authority_observation, socket_path=OPERATIONS_SOCKET,
+                       authority_observation, authority_request, authority_observation_sha256, requests, socket_path=OPERATIONS_SOCKET,
                        boot_path=BOOT, anchor_path=ANCHOR, host_path=HOST_STATE,
                        interface_predecessor=None, compute_expectation=None, gateway_expectation=None):
     """Read the donor private API after verifying the actual Authority witness.
@@ -1383,10 +1427,21 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
     host=current_host_gate(Path(host_path),boot_id)
     require(isinstance(authority_observation,bytes), 'KERNEL_AUTHORITY_PREDECESSOR_DENIED')
     previous=strict_json(authority_observation)
-    prior_request=previous.get('request') if isinstance(previous,dict) else None
+    prior_request=copy.deepcopy(authority_request)
+    require(isinstance(authority_observation_sha256, str)
+            and re.fullmatch('[0-9a-f]{64}', authority_observation_sha256)
+            and hashlib.sha256(authority_observation).hexdigest() == authority_observation_sha256,
+            'KERNEL_AUTHORITY_PREDECESSOR_DENIED')
+    predecessor_raw = bytes(authority_observation)
+    predecessor_request = record_bytes(prior_request)
+    predecessor_subject = record_bytes(previous['subject_evidence'])
+    def predecessor_verifier(raw, request):
+        return (hashlib.sha256(predecessor_raw).hexdigest() == authority_observation_sha256
+                and record_bytes(request) == predecessor_request
+                and raw in (predecessor_raw, predecessor_subject))
     validate_authority_observation(authority_observation,source=source,identity=identity,
         request=prior_request,boot_id=boot_id,observed_at=datetime.now(timezone.utc),
-        anchor=anchor,host_machine_id=host['latest']['host']['machine_id'])
+        anchor=anchor,host_machine_id=host['latest']['host']['machine_id'], acquisition_verifier=predecessor_verifier)
     require(previous['result']=='AUTHORITY_PHASE_A_OBSERVED', 'KERNEL_AUTHORITY_PREDECESSOR_DENIED')
     require(interface_predecessor is None or (isinstance(interface_predecessor,str)
             and re.fullmatch('[0-9a-f]{64}',interface_predecessor)),
@@ -1420,12 +1475,25 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
             and type(gateway['haos_event'].get('rounds')) is int
             and gateway['haos_event']['rounds']==len(prior_ids)+1,'GATEWAY_EXPECTATION_DENIED')
     branch='INTERFACE' if interface_predecessor is not None and compute is None and gateway is None else 'OPERATIONS'
-    request={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':branch,
-        'request_id':'kernel-operations-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
+    requests=copy.deepcopy(requests)
+    require(isinstance(requests,list) and len(requests)==len(prior_ids)+1
+        and all(isinstance(item,dict) for item in requests),'KERNEL_OBSERVER_EXPECTATION_DENIED')
+    ids=[item.get('request_id') for item in requests]
+    nonces=[item.get('nonce') for item in requests]
+    require(all(isinstance(value,str) and re.fullmatch('kernel-operations-[0-9a-f]{32}',value) for value in ids)
+        and all(isinstance(value,str) and re.fullmatch('[0-9a-f]{64}',value) for value in nonces)
+        and len(set(ids))==len(ids) and len(set(nonces))==len(nonces),
+        'KERNEL_OBSERVER_EXPECTATION_DENIED')
+    expected={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':branch,
         'previous_evidence_digest':interface_predecessor if interface_predecessor is not None
                                    else previous['observation_digest']}
-    if compute is not None:request['compute_request_id']=compute['request']['request_id']
-    if gateway is not None:request.update(compute_request_id=gateway['compute_request_id'],gateway_correlation=True)
+    if compute is not None:expected['compute_request_id']=compute['request']['request_id']
+    if gateway is not None:expected.update(compute_request_id=gateway['compute_request_id'],gateway_correlation=True)
+    for index,item in enumerate(requests):
+        fields={key:value for key,value in item.items() if key not in {'request_id','nonce'}}
+        wanted={**expected,'compute_request_id':prior_ids[index]} if index<len(prior_ids) else expected
+        require(fields==wanted,'KERNEL_OBSERVER_EXPECTATION_DENIED')
+    request=requests[-1]
     account=pwd.getpwnam('serein-outpost');path=Path(socket_path)
     require(os.geteuid()==account.pw_uid,'OUTPOST_OBSERVER_IDENTITY_DENIED')
     require(not path.is_symlink() and all(not p.is_symlink() for p in path.parents),
@@ -1435,47 +1503,44 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
         return (item.st_dev,item.st_ino,item.st_mode,item.st_uid,item.st_gid)
     require(stat.S_ISSOCK(info.st_mode) and (info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode))
             ==(account.pw_uid,account.pw_gid,0o600), 'KERNEL_SOCKET_CUSTODY_DENIED')
+    acquisition_requests = copy.deepcopy(requests)
+    acquired_responses = []
     prior_rounds=[]
-    requests=[{**request,'request_id':'kernel-operations-'+secrets.token_hex(16),
-               'nonce':secrets.token_hex(32),'compute_request_id':value} for value in prior_ids]+[request]
     try:
       for round_request in requests:
         with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as client:
-            deadline=time.monotonic()+3
-            def remaining():
-                seconds=deadline-time.monotonic()
-                require(seconds>0,'KERNEL_RESPONSE_DEADLINE_DENIED')
-                client.settimeout(seconds)
-            remaining();client.connect(str(path))
+            client.settimeout(None);client.connect(str(path))
             peer=struct.unpack('3i',client.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,struct.calcsize('3i')))
             require(peer[1]==0,'KERNEL_SERVER_IDENTITY_DENIED')
             require(socket_identity(path.lstat())==socket_identity(info),'KERNEL_SOCKET_CHANGED')
-            remaining();client.sendall(record_bytes(round_request))
+            client.sendall(record_bytes(round_request))
+            client.settimeout(None)
             raw=b''
             while not raw.endswith(b'\n') and len(raw)<=65536:
-                remaining();part=client.recv(min(4096,65537-len(raw)))
+                part=client.recv(min(4096,65537-len(raw)))
                 if not part:break
                 raw+=part
-            remaining()
         require(raw.endswith(b'\n') and len(raw)<=65536,'KERNEL_RESPONSE_FRAMING_DENIED')
+        acquired_responses.append(bytes(raw))
         if round_request is not request:
             prior_rounds.append({'response':strict_json(raw),'query':round_request})
     except OSError as exc:
         raise KernelWitnessError('KERNEL_TRANSPORT_UNAVAILABLE') from exc
     require(raw.endswith(b'\n') and len(raw)<=65536,'KERNEL_RESPONSE_FRAMING_DENIED')
+    acquisition_verifier = _captured_response_verifier(acquisition_requests, acquired_responses)
     now=datetime.now(timezone.utc)
     if gateway is not None:
         result=compare_gateway_correlation_response(raw,query=request,source=source,boot_id=boot_id,
             installed_evidence_sha256=installed_evidence_sha256,observed_at=now,
             prior_rounds=prior_rounds,
-            **{k:v for k,v in gateway.items() if k not in {'compute_request_id','prior_compute_request_ids'}})
+            **{k:v for k,v in gateway.items() if k not in {'compute_request_id','prior_compute_request_ids'}}, acquisition_verifier=acquisition_verifier)
     elif compute is not None:
         result=compare_retained_compute_response(raw,query=request,source=source,boot_id=boot_id,
-            installed_evidence_sha256=installed_evidence_sha256,observed_at=now,host_state=host,**compute)
+            installed_evidence_sha256=installed_evidence_sha256,observed_at=now,host_state=host,**compute, acquisition_verifier=acquisition_verifier)
     else:
         compare=compare_interface_response if branch=='INTERFACE' else compare_operations_response
         result=compare(raw,request=request,source=source,boot_id=boot_id,
-            installed_evidence_sha256=installed_evidence_sha256,observed_at=now)
+            installed_evidence_sha256=installed_evidence_sha256,observed_at=now, acquisition_verifier=acquisition_verifier)
     require(socket_identity(path.lstat())==socket_identity(info)
             and boot_path.read_text(encoding='ascii').strip()==boot_id
             and regular(Path(anchor_path))==anchor,'KERNEL_OBSERVATION_CHANGED')
@@ -1487,14 +1552,14 @@ def observe_operations(*, source, identity, installed_evidence_sha256,
         result=compare_gateway_correlation_response(raw,query=request,source=source,boot_id=boot_id,
             installed_evidence_sha256=installed_evidence_sha256,observed_at=now,
             prior_rounds=prior_rounds,
-            **{k:v for k,v in gateway.items() if k not in {'compute_request_id','prior_compute_request_ids'}})
+            **{k:v for k,v in gateway.items() if k not in {'compute_request_id','prior_compute_request_ids'}}, acquisition_verifier=acquisition_verifier)
     if compute is not None:
         result=compare_retained_compute_response(raw,query=request,source=source,boot_id=boot_id,
             installed_evidence_sha256=installed_evidence_sha256,observed_at=now,
-            host_state=final_host,**compute)
+            host_state=final_host,**compute, acquisition_verifier=acquisition_verifier)
     validate_authority_observation(authority_observation,source=source,identity=identity,
         request=prior_request,boot_id=boot_id,observed_at=now,
-        anchor=anchor,host_machine_id=host['latest']['host']['machine_id'])
+        anchor=anchor,host_machine_id=host['latest']['host']['machine_id'], acquisition_verifier=predecessor_verifier)
     return {**result,'evidence_authentication':'ROOT_CREATED_PRIVATE_LISTENER',
             **({'haos_evidence_authentication':'SEPARATE_REQUIRED'} if gateway is not None else {}),
             'native_identity_possession':'NOT_ESTABLISHED_BY_'+branch,
@@ -1575,7 +1640,7 @@ def main():
     except TransactionError as exc:
         raise KernelWitnessError("KERNEL_EXPECTED_SOURCE_DENIED") from exc
     require(isinstance(envelope, dict), "KERNEL_EXPECTED_SOURCE_DENIED")
-    common={'source','identity','installed_evidence_sha256','authority_observation'}
+    common={'source','identity','installed_evidence_sha256','authority_observation','authority_request','authority_observation_sha256','requests'}
     if set(envelope) in (common,common|{'interface_predecessor'},
             common|{'interface_predecessor','compute_expectation'},
             common|{'interface_predecessor','gateway_expectation'}):
@@ -1589,6 +1654,7 @@ def main():
             result=observe_operations(source=envelope['source'],identity=envelope['identity'],
                 installed_evidence_sha256=envelope['installed_evidence_sha256'],
                 authority_observation=record_bytes(envelope['authority_observation']),
+                authority_request=envelope['authority_request'],authority_observation_sha256=envelope['authority_observation_sha256'],requests=envelope['requests'],
                 **{key:envelope[key] for key in ('interface_predecessor','compute_expectation','gateway_expectation') if key in envelope})
     else:
         require(set(envelope)=={'source','request','identity'}, 'KERNEL_EXPECTED_SOURCE_DENIED')

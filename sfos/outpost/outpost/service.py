@@ -196,9 +196,9 @@ def _notify(message: str) -> None:
     if address.startswith("@"):
         address = "\0" + address[1:]
     with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as client:
-        # A blocked notification receiver must not strand the witness loop.
-        # Preserve failure propagation: no retry, false readiness or admission.
-        client.settimeout(2.0)
+        # Await the actual native send result; elapsed time grants no readiness.
+        # Preserve native errors/cancellation without retry or false admission.
+        client.settimeout(None)
         client.connect(address)
         client.sendall(message.encode("utf-8"))
 

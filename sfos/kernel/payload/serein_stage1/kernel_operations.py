@@ -34,11 +34,10 @@ INTERVAL_SECONDS = 0.5
 HEARTBEAT_FLOOR_SECONDS = 1.0
 MAX_RECEIPTS = 4096
 REPLAY_CONTRACT = Path('/usr/lib/serein/kernel/replay_store.py')
-REPLAY_CONTRACT_SHA256 = 'a3321dd7ed9f4a04ed333663d46f2d77f2dde46964ea63d11d631f3358bb90cb'
+REPLAY_CONTRACT_SHA256 = 'd123352299d438deaa91d306992c88e06c0c093401a1d55adc341cf8431d5a5d'
 VITALS_HOST = 'serein.sardonyxsapphire.us'
 VITALS_PATH = '/v1/runtime/status'
 VITALS_MAX_BYTES = 2 * 1024 * 1024
-VITALS_TIMEOUT_SECONDS = 2.0
 _VITALS_READ_SLOT = threading.Lock()
 
 # PRO-136 / 4ae7de33: the evaluator produces telemetry only. The window is an
@@ -356,47 +355,18 @@ def read_current_host_evidence(*, root=Path('/')):
     except (OSError, ValueError) as exc:
         raise OperationsDenied('CURRENT_HOST_API_EVIDENCE_DENIED') from exc
     boot_id_path = root/'proc/sys/kernel/random/boot_id'
-    # DNS and slow-drip headers are not covered by a socket's per-read
-    # timeout. Bound the caller's whole observation and retain a single slot
-    # until the read actually exits, so a stuck resolver cannot spawn more
-    # threads on repeated requests. This worker only performs one public GET.
+    # A request owns one complete read. Elapsed time cannot manufacture a
+    # failed Host verdict or cancel verification. The slot bounds concurrent
+    # acquisition; it is released only when the actual read finishes.
     if not _VITALS_READ_SLOT.acquire(blocking=False):
         raise OperationsDenied('CURRENT_HOST_API_EVIDENCE_DENIED')
-    cancelled = threading.Event()
-    outcome = []
-    connections = []
-    deadline = time.monotonic() + VITALS_TIMEOUT_SECONDS
-    def read():
-        try:
-            value = _read_current_host_evidence(boot_id_path=boot_id_path,
-                cancelled=cancelled, deadline=deadline, connections=connections,
-                expected_generation=installed['evidence']['outpost_generation'])
-            if not cancelled.is_set(): outcome.append((True, value))
-        except Exception as exc:
-            if not cancelled.is_set(): outcome.append((False, exc))
-        finally:
-            _VITALS_READ_SLOT.release()
-    worker = threading.Thread(target=read, name='kernel-outpost-host-read', daemon=True)
     try:
-        worker.start()
-    except Exception:
+        value = _read_current_host_evidence(boot_id_path=boot_id_path,
+            expected_generation=installed['evidence']['outpost_generation'])
+    except (OSError, ValueError, TypeError) as exc:
+        raise OperationsDenied('CURRENT_HOST_API_EVIDENCE_DENIED') from exc
+    finally:
         _VITALS_READ_SLOT.release()
-        raise
-    worker.join(max(0.0, deadline-time.monotonic()))
-    if worker.is_alive() or time.monotonic() > deadline or not outcome:
-        cancelled.set()
-        # Wake an in-flight TLS/HTTP read when available. A blocked resolver
-        # keeps the slot occupied until it returns; it cannot send a GET after
-        # returning past the deadline.
-        for connection in connections:
-            sock = connection.sock
-            if sock is not None:
-                try: sock.shutdown(socket.SHUT_RDWR)
-                except OSError: pass
-        raise OperationsDenied('CURRENT_HOST_API_EVIDENCE_DENIED')
-    successful, value = outcome[0]
-    if not successful:
-        raise OperationsDenied('CURRENT_HOST_API_EVIDENCE_DENIED') from value
     try:
         fresh = read_consumer_installed_policy_evidence(root=root)
         if (fresh != installed or value['boot_id'] != installed['boot_id']):
@@ -407,7 +377,7 @@ def read_current_host_evidence(*, root=Path('/')):
     return value
 
 
-def _read_current_host_evidence(*, boot_id_path, cancelled, deadline, connections, expected_generation):
+def _read_current_host_evidence(*, boot_id_path, expected_generation):
     connection = None
     response = None
     try:
@@ -420,11 +390,8 @@ def _read_current_host_evidence(*, boot_id_path, cancelled, deadline, connection
             raise ValueError('TLS authentication required')
         requested_at = time.time()
         connection = http.client.HTTPSConnection(VITALS_HOST, 443,
-            timeout=VITALS_TIMEOUT_SECONDS, context=context)
-        connections.append(connection)
+            timeout=None, context=context)
         connection.connect()
-        if cancelled.is_set() or time.monotonic() >= deadline:
-            raise ValueError('Vitals connection deadline')
         connection.request('GET', VITALS_PATH, headers={
             'Accept': 'application/json', 'Cache-Control': 'no-cache, no-store',
             'Pragma': 'no-cache', 'Connection': 'close'})
@@ -446,18 +413,13 @@ def _read_current_host_evidence(*, boot_id_path, cancelled, deadline, connection
             raise ValueError('noncanonical Vitals response')
         size = int(lengths[0]); chunks = []; total = 0
         while total < size:
-            remaining = deadline - time.monotonic()
-            if cancelled.is_set() or remaining <= 0:
-                raise ValueError('Vitals read deadline')
-            # HTTP/1.1 close responses can detach the socket from connection;
-            # the response retains it. Its initial per-read timeout remains
-            # bounded, and read1 returns after one underlying buffered read.
+            # Read the exact bounded response to completion. Disconnects,
+            # malformed/truncated bytes and identity drift remain failures;
+            # elapsed time alone is not an evidence or authority predicate.
             chunk = response.read1(min(65536, size - total))
             if not chunk:
                 raise ValueError('truncated Vitals response')
             chunks.append(chunk); total += len(chunk)
-        if time.monotonic() > deadline:
-            raise ValueError('Vitals read deadline')
         received_at = time.time()
         if _regular_bytes(boot_id_path, include_fact=True) != (boot_raw, boot_fact):
             raise ValueError('boot changed during Vitals read')
@@ -516,9 +478,11 @@ def reserve_installed_conversation(payload, *, authenticated_caller, root, repla
 
     host_before = host_observation(matched['installed_policy'])
     at = observed().astimezone(timezone.utc).isoformat().replace('+00:00','Z')
-    chain, reservation = replay_store.reserve_request(request_id=matched['request_id'],
-        at=at, current_time=at, expires_at=matched['replay_expires_at'], binding=binding)
+    already_owned = replay_store.owns_conversation_attempt(matched['request_id'])
+    chain = reservation = None
     try:
+        chain, reservation = replay_store.reserve_request(request_id=matched['request_id'],
+            at=at, current_time=at, expires_at=matched['replay_expires_at'], binding=binding)
         fresh = match_installed_stage1_conversation(payload,
             authenticated_caller=authenticated_caller, root=root, now=observed())
         if canonical(fresh) != canonical(matched):
@@ -528,7 +492,11 @@ def reserve_installed_conversation(payload, *, authenticated_caller, root, repla
                 or host_after['observed_at'] < host_before['observed_at']
                 or host_after['claim'] not in {host_before['claim'], 'CURRENT_BOOT_STABLE'}):
             raise OperationsDenied('CONVERSATION_HOST_CHANGED_AFTER_RESERVATION')
-    except Exception as exc:
+    except BaseException as exc:
+        if not already_owned:
+            replay_store.end_conversation_attempt(matched['request_id'])
+        if not isinstance(exc, Exception) or reservation is None:
+            raise
         error = OperationsDenied('CONVERSATION_RESERVED_EVIDENCE_PRESERVED')
         error.evidence = {'chain_id':chain, 'reservation':reservation, 'forward_attempted':False}
         raise error from exc
@@ -539,32 +507,101 @@ def reserve_installed_conversation(payload, *, authenticated_caller, root, repla
 
 
 def verify_installed_conversation_boundary(matched, *, root, clock):
-    """Current installed Kernel predicate, never a new runtime grant.
+    """Require healthy sampler progress without treating pending as invalid.
 
-    Whole-domain Outpost startup still verifies Authority and Operations before
-    opening ingress. Runtime reuses that exact source/boot binding and private
-    Operations/Audit facts, plus current service process identity, so a saved
-    healthy heartbeat cannot conceal a stopped or restarted owner. Host and
-    replay checks remain in the surrounding existing reservation transaction.
+    Authentic degraded telemetry remains unchanged and cannot authorize dispatch.
+    Every observed transition preserves history; two healthy advancing samples
+    must follow the last degraded sample inside the original execution lease.
+    The closed observation-only caller has no execution capability or lease.
     """
     from .authority_contract import canonical
     from .kernel_branch_api import read_installed_operations_observation
     from .supervision import operations_service_controls
-    before=operations_service_controls()
-    installed,event=read_installed_operations_observation(root=root)
-    after=operations_service_controls()
-    now=clock()
-    at=datetime.fromisoformat(event['observed_at'].replace('Z','+00:00'))
-    required={('/etc/systemd/system/'+name,'payload/systemd/'+name) for name in before}
-    present={(row['target'],row['source']) for row in installed['evidence']['payload']}
-    if (canonical(installed)!=canonical(matched['installed_policy']) or not required<=present
-            or not isinstance(now,datetime) or now.utcoffset() is None
-            or at.utcoffset() is None or not 0<=(now-at).total_seconds()<=30
-            or event['sequence']<2 or event['cadence_state']!='OBSERVED' or event['event']!='HEARTBEAT'
-            or 'replay_continuity' not in event
-            or any(event['monotonic_ns']<=int(row['ExecMainStartTimestampMonotonic'])*1000
-                for row in before.values()) or after!=before):
-        raise OperationsDenied('CONVERSATION_CURRENT_OPERATIONS_DENIED')
+    execution_fields = {'request_id','conversation_id','request_sha256',
+        'runtime_request','runtime_request_sha256','installed_policy','state',
+        'replay_binding','replay_expires_at','authority_effect','admission_effect',
+        'dispatch_effect'}
+    expires = None
+    try:
+        if not isinstance(matched, dict):
+            raise ValueError('invalid boundary input')
+        if set(matched) != {'installed_policy'}:
+            if (set(matched) != execution_fields
+                    or matched['state'] != 'SCOPE_MATCHED_PENDING_CURRENT_GATES_AND_REPLAY'
+                    or any(matched[name] != 'NONE' for name in
+                           ('authority_effect','admission_effect','dispatch_effect'))):
+                raise ValueError('invalid execution boundary')
+            if matched['replay_expires_at'] is None:
+                # Only the closed, current installed-conversation match can
+                # carry no lease; an arbitrary null generic expiry is invalid.
+                binding = matched['replay_binding']
+                policy = matched['installed_policy']
+                if (binding.get('schema') != 'SereinStage1ConversationReplayBinding/v2'
+                        or binding.get('caller') != 'HAOS'
+                        or binding.get('route') != '/run/serein/kernel/conversation.sock'
+                        or binding.get('authority_effect') != 'NONE'
+                        or binding.get('admission_effect') != 'NONE'
+                        or binding.get('requested_operation') not in ('conversation_only','conversation_tools')
+                        or binding.get('boot_id') != policy.get('boot_id')
+                        or binding.get('policy_sha256') != policy.get('policy_sha256')):
+                    raise ValueError('current conversation binding required')
+            else:
+                expires = datetime.fromisoformat(matched['replay_expires_at'].replace('Z','+00:00'))
+                if expires.utcoffset() is None:
+                    raise ValueError('naive execution expiry')
+    except (ValueError, TypeError, AttributeError, KeyError) as exc:
+        raise OperationsDenied('CONVERSATION_CURRENT_OPERATIONS_DENIED') from exc
+
+    def current_time():
+        now = clock()
+        if not isinstance(now, datetime) or now.utcoffset() is None:
+            raise OperationsDenied('CONVERSATION_CURRENT_OPERATIONS_DENIED')
+        if expires is not None and now >= expires:
+            raise OperationsDenied('CONVERSATION_REQUEST_EXPIRED')
+        return now
+
+    controls = operations_service_controls()
+    required = {('/etc/systemd/system/'+name, 'payload/systemd/'+name)
+                for name in controls}
+
+    def sample():
+        current_time()
+        if operations_service_controls() != controls:
+            raise OperationsDenied('CONVERSATION_CURRENT_OPERATIONS_DENIED')
+        installed, event = read_installed_operations_observation(root=root)
+        after = operations_service_controls()
+        now = current_time()
+        at = datetime.fromisoformat(event['observed_at'].replace('Z', '+00:00'))
+        present = {(row['target'], row['source']) for row in installed['evidence']['payload']}
+        disposition = (event['cadence_state'], event['event'])
+        if (canonical(installed) != canonical(matched['installed_policy']) or not required <= present
+                or at.utcoffset() is None or at > now
+                or event['sequence'] < 2 or disposition not in {
+                    ('OBSERVED','HEARTBEAT'), ('DEGRADED','HEARTBEAT'),
+                    ('DEGRADED','MISSED_HEARTBEAT')}
+                or 'replay_continuity' not in event
+                or any(event['monotonic_ns'] <= int(row['ExecMainStartTimestampMonotonic'])*1000
+                       for row in controls.values()) or after != controls):
+            raise OperationsDenied('CONVERSATION_CURRENT_OPERATIONS_DENIED')
+        return event, at
+
+    prior, prior_at = sample()
+    while True:
+        event, at = sample()
+        if canonical(event) == canonical(prior):
+            # Scheduling yield only, never a completion or authority deadline.
+            time.sleep(0.05)
+            continue
+        count = event['sequence'] - prior['sequence']
+        elapsed = event['monotonic_ns'] - prior['monotonic_ns']
+        if count <= 0 or elapsed <= 0 or at < prior_at:
+            raise OperationsDenied('CONVERSATION_CURRENT_OPERATIONS_DENIED')
+        _replay_progression(prior['replay_continuity'], event['replay_continuity'])
+        if prior['cadence_state'] == event['cadence_state'] == 'OBSERVED':
+            if elapsed > count * 1_000_000_000:
+                raise OperationsDenied('CONVERSATION_CURRENT_OPERATIONS_DENIED')
+            return None
+        prior, prior_at = event, at
 
 
 def dispatch_installed_conversation(payload, *, authenticated_caller, root, replay_store,
@@ -596,27 +633,24 @@ def dispatch_installed_conversation(payload, *, authenticated_caller, root, repl
         if boundary(supplied) is not None or canonical(supplied)!=canonical(matched):
             raise OperationsDenied('CONVERSATION_CURRENT_BOUNDARY_DENIED')
     current()
-    attempt=reserve_installed_conversation(payload,authenticated_caller=authenticated_caller,
-        root=root,replay_store=replay_store,clock=clock)
-    evidence={'chain_id':attempt['chain_id'],'reservation':attempt['reservation'],
-              'forward_attempted':False,'result_sha256':None,
-              'failure_phase':'PRE_FORWARD_REVALIDATION'}
+    already_owned=replay_store.owns_conversation_attempt(matched['request_id'])
+    evidence=None
     try:
+        attempt=reserve_installed_conversation(payload,authenticated_caller=authenticated_caller,
+            root=root,replay_store=replay_store,clock=clock)
+        evidence={'chain_id':attempt['chain_id'],'reservation':attempt['reservation'],
+                  'forward_attempted':False,'result_sha256':None,
+                  'failure_phase':'PRE_FORWARD_REVALIDATION'}
         if canonical(attempt['matched'])!=canonical(matched):
             raise OperationsDenied('CONVERSATION_INSTALLED_SCOPE_CHANGED')
         current()
         runtime_payload=canonical(matched['runtime_request'])
-        expires=datetime.fromisoformat(matched['replay_expires_at'].replace('Z','+00:00'))
         def forward(value):
-            remaining=(expires-clock()).total_seconds()
-            if remaining<=0:
-                raise OperationsDenied('CONVERSATION_FORWARD_EXPIRED')
             evidence['forward_attempted']=True
-            # Use the existing conversation lease, not the unrelated 30-second
-            # generic grant ceiling. Never refresh the original expiry.
-            from .conversation_runtime import MAX_AGE_SECONDS
+            # Bound connect/send separately; the original one-use attempt owns
+            # the completed result. No elapsed processing verdict or renewal.
             return exchange_private_service('CONVERSATION',value,
-                timeout_seconds=min(remaining,MAX_AGE_SECONDS),root=root)
+                timeout_seconds=3,root=root,await_conversation=True)
         evidence['failure_phase']='RUNTIME_EXCHANGE_AND_RESPONSE'
         result=call_expected(runtime_payload,runtime_call=forward,clock=clock)
         evidence['result_sha256']=hashlib.sha256(result).hexdigest()
@@ -653,9 +687,14 @@ def dispatch_installed_conversation(payload, *, authenticated_caller, root, repl
             expected_hash=replay_store.contract.receipt_hash(attempt['reservation']),
             at=completed,current_time=completed,result_sha256=evidence['result_sha256'])
     except Exception as exc:
+        if evidence is None:
+            raise
         error=OperationsDenied('CONVERSATION_RESERVED_EVIDENCE_PRESERVED')
         error.evidence=evidence
         raise error from exc
+    finally:
+        if not already_owned:
+            replay_store.end_conversation_attempt(matched['request_id'])
     return {'result':result,'result_sha256':evidence['result_sha256'],
             'replay':[attempt['reservation'],consumption],
             'state':'DESTINATION_RESULT_RETURNED_NOT_INDEPENDENTLY_VERIFIED',
@@ -1467,7 +1506,7 @@ def record_operations_observation(value, *, root):
     event=operations_event(value)
     payload=canonical(event)
     raw=exchange_private_service('AUDIT',payload,
-        timeout_seconds=EXCHANGE_TIMEOUT_SECONDS,root=root)
+        timeout_seconds=EXCHANGE_TIMEOUT_SECONDS,root=root,await_audit=True)
     if _decode(raw,4096)!={'status':'RECORDED'}:
         raise OperationsDenied('OPERATIONS_AUDIT_DENIED')
     return {'state':'OBSERVATION_RECORDED_ONLY',

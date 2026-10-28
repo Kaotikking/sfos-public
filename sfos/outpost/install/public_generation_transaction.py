@@ -100,7 +100,7 @@ def read_host_time_observation(policy):
     def properties(command):
         try:
             result = subprocess.run(command, capture_output=True, text=True,
-                                    check=True, timeout=10, env={**os.environ, 'LC_ALL':'C'})
+                                    check=True, env={**os.environ, 'LC_ALL':'C'})
             values = {}
             for line in result.stdout.splitlines():
                 key, separator, value = line.partition('=')
@@ -115,7 +115,8 @@ def read_host_time_observation(policy):
     native = properties(['/usr/bin/dpkg-query', '-W', '-f=NativeVersion=${Version}\n', 'systemd-timesyncd'])
     required = {'LinkNTPServers','RuntimeNTPServers','SystemNTPServers',
                 'FallbackNTPServers','ServerName','ServerAddress'}
-    if not required <= set(daemon) or 'NTPSynchronized' not in clock:
+    if (not required <= set(daemon) or 'NTPSynchronized' not in clock
+            or clock['NTPSynchronized'] not in ('yes', 'no')):
         raise TransactionError('PUBLIC_HOST_TIME_READ_DENIED')
     if daemon['LinkNTPServers'] or daemon['RuntimeNTPServers']:
         raise TransactionError('PUBLIC_HOST_TIME_ALTERNATE_SOURCE_DENIED')
@@ -170,13 +171,14 @@ def read_host_time_observation(policy):
             'synchronized':clock['NTPSynchronized'] == 'yes'}
 
 
-def validate_host_time_witness(policy, observation):
+def validate_host_time_witness(policy, observation, *, allow_pending=False):
     host_time_configuration(policy)
-    if not isinstance(observation, dict):
+    if type(allow_pending) is not bool or not isinstance(observation, dict):
         raise TransactionError('PUBLIC_HOST_TIME_WITNESS_DENIED')
     daemon = observation.get('daemon', {})
     if (observation.get('authority') != 'pfSense' or observation.get('server') != policy['server']
-            or observation.get('synchronized') is not True
+            or (observation.get('synchronized') is not True
+                and not (allow_pending and observation.get('synchronized') is False))
             or not isinstance(daemon, dict)
             or type(observation.get('observed_at')) not in (int,float)
             or not math.isfinite(observation['observed_at']) or observation['observed_at'] <= 0
@@ -1187,7 +1189,7 @@ def read_bootstrap_unit(name):
     try:
         result = subprocess.run(['/usr/bin/systemctl', 'show', '--all', '--no-pager',
                                  '--property=' + ','.join(UNIT_PROPERTIES), name],
-                                capture_output=True, text=True, timeout=15, check=True)
+                                capture_output=True, text=True, check=True)
     except (OSError, subprocess.SubprocessError):
         raise TransactionError('PUBLIC_UNIT_READ_DENIED') from None
     value = {}
@@ -1931,13 +1933,37 @@ def read_generation_witness(root, *, expected_generation, boot_id, not_before,
     if before['selectors']['current']['selector'] != expected_generation:
         raise TransactionError('PUBLIC_WITNESS_CURRENT_GENERATION_DENIED')
     path = root/'var/lib/serein-outpost/coordinator/current.json'
+    def require_pending_owner():
+        name='serein-outpost.service'
+        owner=_checked_unit_state(name,read_bootstrap_unit(name))
+        if (owner['LoadState']!='loaded'
+                or (owner['ActiveState'],owner['SubState']) not in {
+                    ('active','running'),('activating','start-pre'),
+                    ('activating','start'),('activating','start-post')}):
+            raise TransactionError('PUBLIC_WITNESS_OWNER_NOT_RUNNING')
     try:
-        nofollow_ancestors(Path(root.anchor),path,allow_missing=False)
+        nofollow_ancestors(Path(root.anchor),path.parent,allow_missing=False)
         parent = path.parent.lstat()
         if (not stat.S_ISDIR(parent.st_mode)
                 or (parent.st_uid,parent.st_gid,stat.S_IMODE(parent.st_mode))!=(service_uid,service_gid,0o750)):
             raise TransactionError('PUBLIC_WITNESS_CUSTODY_DENIED')
-        fd = os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        try:
+            fd = os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK)
+        except FileNotFoundError:
+            # Only an absent final witness under the already-verified parent
+            # is pending. Missing/changed parents or identity are real failures.
+            nofollow_ancestors(Path(root.anchor),path.parent,allow_missing=False)
+            after_parent=path.parent.lstat()
+            identity=lambda item:(item.st_dev,item.st_ino,item.st_mode,item.st_uid,item.st_gid,
+                                  item.st_nlink,item.st_size,item.st_mtime_ns,item.st_ctime_ns)
+            if identity(parent)!=identity(after_parent):
+                raise TransactionError('PUBLIC_WITNESS_CHANGED_DURING_READ')
+            require_pending_owner()
+            if successor_generation_prestate(root)!=before:
+                raise TransactionError('PUBLIC_WITNESS_CURRENT_GENERATION_CHANGED')
+            if _read_target_fact(root,'/proc/sys/kernel/random/boot_id').strip()!=str(boot_id).encode('ascii',errors='replace'):
+                raise TransactionError('PUBLIC_BOOT_DRIFT_DENIED')
+            raise TransactionError('PUBLIC_WITNESS_PENDING')
         with os.fdopen(fd,'rb') as stream:
             opened=os.fstat(stream.fileno())
             if (not stat.S_ISREG(opened.st_mode) or opened.st_nlink!=1
@@ -1960,13 +1986,23 @@ def read_generation_witness(root, *, expected_generation, boot_id, not_before,
                 or upper_bound<not_before):
             raise TransactionError('PUBLIC_WITNESS_EXPECTATION_DENIED')
         value=validate_coordinator_witness(strict_json(raw),boot_id=boot_id,
-                                           observed_at=upper_bound,expected_generation=expected_generation)
-        if value['observed_at']<not_before:
-            raise TransactionError('PUBLIC_WITNESS_PREDATES_PROMOTION')
+                                           observed_at=upper_bound)
+        # A fully valid prior witness may still await the new publication.
+        # Only the exact verified LKG tuple is an admitted predecessor; an
+        # arbitrary generation is invalid, regardless of its timestamp.
+        if value['generation_identity'] != expected_generation:
+            if (value['generation_identity'] != before['selectors']['lkg']['selector']
+                    or value['observed_at'] >= not_before):
+                raise TransactionError('PUBLIC_CURRENT_BOOT_WITNESS_DENIED')
+        pending = value['observed_at'] < not_before
+        if pending:
+            require_pending_owner()
         if successor_generation_prestate(root)!=before:
             raise TransactionError('PUBLIC_WITNESS_CURRENT_GENERATION_CHANGED')
         if _read_target_fact(root,'/proc/sys/kernel/random/boot_id').strip()!=str(boot_id).encode('ascii',errors='replace'):
             raise TransactionError('PUBLIC_BOOT_DRIFT_DENIED')
+        if pending:
+            raise TransactionError('PUBLIC_WITNESS_PENDING')
     except (OSError,OutpostServiceError):
         raise TransactionError('PUBLIC_CURRENT_BOOT_WITNESS_DENIED') from None
     return {'result':'SUPPORTING_CURRENT_BOOT_WITNESS', 'witness':value,
@@ -2034,7 +2070,7 @@ def read_vitals_witness(*, expected_generation, boot_id, not_before, certificate
     def fetch(path,accept):
         # Exact already-installed backend route; not a substitute for public
         # HAProxy readback by the independent SFOS verifier.
-        with socket.create_connection((vitals_edge.BACKEND_ADDRESS,vitals_edge.BACKEND_PORT),timeout=3) as tcp:
+        with socket.create_connection((vitals_edge.BACKEND_ADDRESS,vitals_edge.BACKEND_PORT),timeout=None) as tcp:
             with context.wrap_socket(tcp,server_hostname='serein.sardonyxsapphire.us') as tls:
                 if tls.getpeercert(binary_form=True)!=expected_der:
                     raise TransactionError('PUBLIC_VITALS_TLS_IDENTITY_DENIED')
@@ -2671,7 +2707,7 @@ class _GenerationFileIO:
         if action=='daemon-reload' and name is None:args=[action]
         elif action in {'stop','start'} and name in (*IMAGE_UNITS, *((HOST_TIME_UNIT,) if self.host_time is not None else ())):args=[action,name]
         else:raise TransactionError('PUBLIC_SERVICE_EFFECT_DENIED')
-        try:subprocess.run(['/usr/bin/systemctl',*args],check=True,capture_output=True,timeout=90)
+        try:subprocess.run(['/usr/bin/systemctl',*args],check=True,capture_output=True)
         except (OSError,subprocess.SubprocessError):raise TransactionError('PUBLIC_SERVICE_EFFECT_FAILED') from None
 
     def unit_state(self,name):return read_bootstrap_unit(name)
@@ -2701,16 +2737,34 @@ class _GenerationFileIO:
         return {'boot_id':boot,'utc':utc,'monotonic_before':before,'monotonic_after':after}
 
     def time_witness(self):
-        deadline = time.monotonic() + 30
+        # Only valid, source-bound synchronization-in-progress may wait. A
+        # completion deadline cannot establish whether the observation is true.
+        host_time_configuration(self.host_time)
+        boot = self.clock_observation()['boot_id']
+        unit = _checked_unit_state(HOST_TIME_UNIT, self.unit_state(HOST_TIME_UNIT))
+        if (unit['LoadState'], unit['ActiveState'], unit['SubState']) != ('loaded', 'active', 'running'):
+            raise TransactionError('PUBLIC_HOST_TIME_UNIT_UNAVAILABLE')
+        def boundary():
+            if self.clock_observation()['boot_id'] != boot:
+                raise TransactionError('PUBLIC_HOST_TIME_BOOT_CHANGED')
+            if _checked_unit_state(HOST_TIME_UNIT, self.unit_state(HOST_TIME_UNIT)) != unit:
+                raise TransactionError('PUBLIC_HOST_TIME_UNIT_CHANGED')
         while True:
             try:
-                return validate_host_time_witness(self.host_time, self.time_observation())
+                boundary()
+                observation = validate_host_time_witness(
+                    self.host_time, self.time_observation(), allow_pending=True)
+                boundary()
+                if observation['synchronized'] is True:
+                    return observation
+                if self.first_time_failure is None:
+                    self.first_time_failure = _host_time_failure_record(
+                        TransactionError('PUBLIC_HOST_TIME_SYNC_PENDING'), self.last_time_checks)
             except TransactionError as error:
                 if self.first_time_failure is None:
                     self.first_time_failure = _host_time_failure_record(error, self.last_time_checks)
-                if time.monotonic() >= deadline:
-                    raise
-                time.sleep(1)
+                raise
+            time.sleep(1)
 
 
 def _host_time_failure_record(error, checks):
@@ -2721,7 +2775,9 @@ def _host_time_failure_record(error, checks):
         'PUBLIC_HOST_TIME_READ_DENIED','PUBLIC_HOST_TIME_ALTERNATE_SOURCE_DENIED',
         'PUBLIC_HOST_TIME_SOURCE_UNAVAILABLE','PUBLIC_HOST_TIME_SAMPLE_DENIED',
         'PUBLIC_HOST_TIME_WITNESS_DENIED','PUBLIC_HOST_TIME_DROPIN_CONFLICT',
-        'PUBLIC_HOST_TIME_CORRECTION_BOUND_DENIED'
+        'PUBLIC_HOST_TIME_CORRECTION_BOUND_DENIED','PUBLIC_HOST_TIME_SYNC_PENDING',
+        'PUBLIC_HOST_TIME_UNIT_UNAVAILABLE','PUBLIC_HOST_TIME_BOOT_CHANGED',
+        'PUBLIC_HOST_TIME_UNIT_CHANGED'
     } else 'UNCLASSIFIED_HOST_TIME_FAILURE'}
     row['checks'] = {key:value for key,value in checks.items()
         if key in {'observation_read','synchronized','offset_in_bounds','LinkNTPServers',

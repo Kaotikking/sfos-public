@@ -19,7 +19,7 @@ from datetime import timedelta
 from uuid import NAMESPACE_URL, uuid5
 
 CONTRACT_PATH = Path('/usr/lib/serein/kernel/replay_store.py')
-CONTRACT_SHA256 = 'a3321dd7ed9f4a04ed333663d46f2d77f2dde46964ea63d11d631f3358bb90cb'
+CONTRACT_SHA256 = 'd123352299d438deaa91d306992c88e06c0c093401a1d55adc341cf8431d5a5d'
 
 
 def canonical_request_id(value):
@@ -78,6 +78,7 @@ class PersistentReplayStore:
             raise ValueError('replay input guard denied')
         self._input_guard = input_guard
         self._conversation_context = None
+        self._conversation_reservations = {}
         if conversation_context is not None:
             fields={'source_generation','policy_sha256','plan_sha256','canonical_manifest_digest',
                     'kernel_instance','identity_checkpoint','boot_id'}
@@ -271,7 +272,7 @@ class PersistentReplayStore:
         return chains, summary
 
     def _binding(self, binding, chain_id):
-        if (isinstance(binding,dict) and binding.get('schema') == self.contract.CONVERSATION_BINDING_SCHEMA
+        if (isinstance(binding,dict) and binding.get('schema') in self.contract.CONVERSATION_BINDING_SCHEMAS
                 and self._conversation_context is not None):
             self._inputs_current()
             if any(binding.get(k)!=v for k,v in self._conversation_context.items()):
@@ -280,6 +281,8 @@ class PersistentReplayStore:
                 descriptor=self.descriptor,
                 expected_generation=self._conversation_context['source_generation'],
                 expected_boot_id=self._conversation_context['boot_id'])
+        if isinstance(binding,dict) and binding.get('schema') == self.contract.CONVERSATION_BINDING_V2_SCHEMA:
+            raise ValueError('live installed conversation owner required')
         return self.contract.verify_dispatch_binding(binding, chain_id, descriptor=self.descriptor)
 
     def _bindings(self, chains):
@@ -302,7 +305,7 @@ class PersistentReplayStore:
             _, summary = self._history(current_time=current_time)
             self._stable(); self.connection.execute('COMMIT')
             return summary
-        except Exception:
+        except BaseException:
             if self.connection.in_transaction:
                 self.connection.execute('ROLLBACK')
             raise
@@ -330,7 +333,7 @@ class PersistentReplayStore:
             self._stable(); self.connection.execute('COMMIT')
             return {'chain_id': chain_id, 'receipt_sha256': self.contract.receipt_hash(receipt),
                     'authority_effect': 'NONE'}
-        except Exception:
+        except BaseException:
             if self.connection.in_transaction:
                 self.connection.execute('ROLLBACK')
             raise
@@ -343,6 +346,13 @@ class PersistentReplayStore:
             values = chains.get(chain_id)
             if not values or self.contract.receipt_hash(values[-1]) != expected_hash:
                 raise ValueError('CAS expected hash conflict')
+            if values[-1]['body']['schema'] == self.contract.CONVERSATION_RECEIPT_V2_SCHEMA:
+                if (operation != 'CONSUME'
+                        or self._conversation_reservations.get(chain_id) != expected_hash):
+                    raise ValueError('current conversation attempt owner required')
+                # Consumption is a single call, including failed/uncertain calls.
+                # The signed reservation persists; this capability never resumes.
+                del self._conversation_reservations[chain_id]
             candidate = self.contract.transition(values[-1], expected_hash=expected_hash, operation=operation,
                                    receipt_id=receipt_id, at=at, key=self.key)
             self.contract.verify_lifecycle(values + [candidate], descriptor=self.descriptor, key=self.key,
@@ -368,7 +378,7 @@ class PersistentReplayStore:
             self._history(current_time=current_time)
             self._stable(); self.connection.execute('COMMIT')
             return candidate
-        except Exception:
+        except BaseException:
             if self.connection.in_transaction:
                 self.connection.execute('ROLLBACK')
             raise
@@ -383,12 +393,12 @@ class PersistentReplayStore:
             values = chains.get(chain_id, [])
             self._stable(); self.connection.execute('COMMIT')
             return values
-        except Exception:
+        except BaseException:
             if self.connection.in_transaction:
                 self.connection.execute('ROLLBACK')
             raise
 
-    def reserve_request(self, *, request_id, at, expires_at, current_time, binding=None):
+    def reserve_request(self, *, request_id, at, current_time, expires_at=None, binding=None):
         """Adapt donor atomic two-row reservation, with explicit authority TTL.
 
         Use its deterministic action UUID consistently as the internal chain
@@ -398,20 +408,29 @@ class PersistentReplayStore:
         """
         request_id = canonical_request_id(request_id)
         observed = self.contract.utc(at)
-        expiry = self.contract.utc(expires_at)
         now = self.contract.utc(current_time)
-        if not observed <= now < expiry:
-            raise ValueError('request reservation freshness denied')
+        current_conversation = (isinstance(binding,dict)
+            and binding.get('schema') == self.contract.CONVERSATION_BINDING_V2_SCHEMA)
+        if current_conversation:
+            if expires_at is not None or self._conversation_context is None or not callable(self._input_guard):
+                raise ValueError('live installed conversation owner required')
+            if observed > now:
+                raise ValueError('request reservation chronology denied')
+        else:
+            expiry = self.contract.utc(expires_at)
+            if not observed <= now < expiry:
+                raise ValueError('request reservation freshness denied')
         chain_id = str(uuid5(NAMESPACE_URL, f'{request_id}:action'))
         binding_raw = None
         if binding is not None:
             binding = json.loads(self.contract.canonical_bytes(binding))
             self._binding(binding, chain_id)
-            if binding.get('schema') == self.contract.CONVERSATION_BINDING_SCHEMA:
+            if binding.get('schema') in self.contract.CONVERSATION_BINDING_SCHEMAS:
                 requested = self.contract.utc(binding['observed_at'])
                 # Existing conversation freshness (120s / 5s future skew),
                 # not a CP worker lease. This only bounds replay retention.
-                if requested > now + timedelta(seconds=5) or expiry > requested + timedelta(seconds=120):
+                if (requested > now + timedelta(seconds=5)
+                        or (not current_conversation and expiry > requested + timedelta(seconds=120))):
                     raise ValueError('conversation replay freshness denied')
             envelope = self.contract.signed({'schema':'SereinKernelDispatchBinding/v1',
                 'chain_id':chain_id, 'binding':binding, 'authority_effect':'NONE'}, self.key)
@@ -421,7 +440,8 @@ class PersistentReplayStore:
             run_id=str(uuid5(NAMESPACE_URL, f'{request_id}:run')), action_nonce=chain_id,
             observed_at=(observed-timedelta(microseconds=1)).isoformat().replace('+00:00','Z'),
             expires_at=expires_at, binding_sha256=(hashlib.sha256(binding_raw).hexdigest()
-                                                  if binding_raw is not None else None))
+                                                  if binding_raw is not None else None),
+            conversation_binding=binding if current_conversation else None)
         reserved = self.contract.transition(unused,
             expected_hash=self.contract.receipt_hash(unused), operation='RESERVE',
             receipt_id=str(uuid5(NAMESPACE_URL, f'{request_id}:reserve')), at=at, key=self.key)
@@ -432,8 +452,8 @@ class PersistentReplayStore:
                 raise ValueError('duplicate replay request')
             if binding is not None:
                 existing, _ = self._bindings(chains)
-                if binding.get('schema') != self.contract.CONVERSATION_BINDING_SCHEMA:
-                    active = sum(row.get('schema') != self.contract.CONVERSATION_BINDING_SCHEMA
+                if binding.get('schema') not in self.contract.CONVERSATION_BINDING_SCHEMAS:
+                    active = sum(row.get('schema') not in self.contract.CONVERSATION_BINDING_SCHEMAS
                                  and row['route'] == binding['route'] and len(chains[nonce]) == 2
                                  for nonce,row in existing.items())
                     # Generic route-capacity semantics are unchanged. Ordinary
@@ -447,8 +467,10 @@ class PersistentReplayStore:
             self._insert(chain_id, unused); self._insert(chain_id, reserved)
             self._history(current_time=current_time)
             self._stable(); self.connection.execute('COMMIT')
+            if current_conversation:
+                self._conversation_reservations[chain_id] = self.contract.receipt_hash(reserved)
             return chain_id, reserved
-        except Exception:
+        except BaseException:
             if self.connection.in_transaction:
                 self.connection.execute('ROLLBACK')
             raise
@@ -465,7 +487,7 @@ class PersistentReplayStore:
                 'outcome':None if row[1] is None else json.loads(row[1]), 'receipts':chains[chain_id]}
             self._stable(); self.connection.execute('COMMIT')
             return result
-        except Exception:
+        except BaseException:
             if self.connection.in_transaction:
                 self.connection.execute('ROLLBACK')
             raise
@@ -478,7 +500,17 @@ class PersistentReplayStore:
             receipt_id=str(uuid5(NAMESPACE_URL, f'{request_id}:consume')),
             at=at, current_time=current_time, result_sha256=result_sha256)
 
+    def owns_conversation_attempt(self, request_id):
+        request_id = canonical_request_id(request_id)
+        return str(uuid5(NAMESPACE_URL, f'{request_id}:action')) in self._conversation_reservations
+
+    def end_conversation_attempt(self, request_id):
+        """Retire only process-local ownership; never delete durable evidence."""
+        request_id = canonical_request_id(request_id)
+        self._conversation_reservations.pop(str(uuid5(NAMESPACE_URL, f'{request_id}:action')), None)
+
     def close(self):
+        self._conversation_reservations.clear()
         if self.connection is not None:
             self.connection.close(); self.connection = None
         if self._parent_fd is not None:

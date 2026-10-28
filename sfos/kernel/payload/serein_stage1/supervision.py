@@ -26,7 +26,7 @@ def operations_service_controls():
             ('serein-observation-audit.service','always','2s')):
         result=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
             '--property='+','.join(properties),name],capture_output=True,text=True,
-            timeout=2,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+            check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
             stdin=subprocess.DEVNULL,close_fds=True)
         if len(result.stdout)>16384:raise RuntimeError('operations_service_output_denied')
         row={}

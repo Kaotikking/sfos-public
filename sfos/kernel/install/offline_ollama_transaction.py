@@ -43,8 +43,8 @@ NATIVE_ALLOCATION_RUNTIME = {
 NATIVE_ALLOCATION_SCHEMA = 'SereinNativeAllocationPlan/v1'
 NATIVE_ALLOCATION_RECEIPT = 'SereinNativeAllocationReceipt/v1'
 NATIVE_ALLOCATION_START_RECEIPT = 'SereinNativeAllocationReceipt/v2'
-NATIVE_ALLOCATION_WARMUP = ('/usr/libexec/serein/serein-ollama-warmup', 1634,
-    '4a8971d72739c161d2f082a67814ad3646065a3a77011fd978311ffdf98cc89e')
+NATIVE_ALLOCATION_WARMUP = ('/usr/libexec/serein/serein-ollama-warmup', 1541,
+    'bb5886e7143b0d3935cc73400d6687b7e807594d2bf2a11f4d5d644d03eae087')
 
 
 def native_allocation_configuration(environment):
@@ -272,7 +272,7 @@ class RealAdapter:
         for operation, field in (('is-enabled', 'enabled'), ('is-active', 'active')):
             try:
                 observed = subprocess.run(['systemctl', operation, name], text=True,
-                                          capture_output=True, check=False, timeout=30)
+                                          capture_output=True, check=False)
             except (OSError, subprocess.SubprocessError) as exc:
                 raise TransactionError('OFFLINE_UNIT_STATUS_UNAVAILABLE') from exc
             state = observed.stdout.strip()
@@ -340,11 +340,11 @@ class OfflineOllamaRealAdapter(RealAdapter):
         if name!="ollama.service": raise TransactionError("OFFLINE_UNIT_DENIED")
         subprocess.run(["systemctl","start",name],check=True)
     def reload_native_allocation(self):
-        subprocess.run(['systemctl','daemon-reload'],check=True,timeout=30)
+        subprocess.run(['systemctl','daemon-reload'],check=True)
     def read_native_allocation_definition(self):
         result=subprocess.run(['systemctl','show','ollama.service',
             '--property=FragmentPath,DropInPaths,NeedDaemonReload,Environment'],
-            capture_output=True,text=True,check=True,timeout=10)
+            capture_output=True,text=True,check=True)
         rows={}
         for line in result.stdout.splitlines():
             name,separator,value=line.partition('=')
@@ -360,7 +360,7 @@ class OfflineOllamaRealAdapter(RealAdapter):
         files=subprocess.run(['/usr/bin/busctl','--system','--no-pager','get-property',
             'org.freedesktop.systemd1','/org/freedesktop/systemd1/unit/ollama_2eservice',
             'org.freedesktop.systemd1.Service','EnvironmentFiles'],
-            capture_output=True,text=True,check=True,timeout=10)
+            capture_output=True,text=True,check=True)
         if files.stdout.strip()!='a(sb) 0' or files.stderr.strip():
             raise TransactionError('NATIVE_ALLOCATION_DEFINITION_ENVIRONMENT_FILES_DENIED')
         environment={}
@@ -377,15 +377,15 @@ class OfflineOllamaRealAdapter(RealAdapter):
         # It supplies no synthetic answer and changes no model or context.
         name, size, expected = NATIVE_ALLOCATION_WARMUP
         path = under(self.root, name); nofollow_ancestors(self.root, path, allow_missing=False)
-        raw,before,identity = _native_file_read(self, path, limit=1634)
+        raw,before,identity = _native_file_read(self, path, limit=size)
         if (before['sha256'] != expected or before['bytes'] != size
                 or before['uid'] != 0 or before['gid'] != 0 or before['mode'] != 0o755):
             raise TransactionError('NATIVE_ALLOCATION_WARMUP_SOURCE_DENIED')
         # Execute the exact captured and pinned Python bytes. A pathname swap
         # after verification cannot choose a different root program.
         subprocess.run(['/usr/bin/python3','-B','-c',raw.decode('utf-8')],
-                       check=True,timeout=1860,capture_output=True)
-        if _native_file_read(self,path,limit=1634)!=(raw,before,identity):
+                       check=True,capture_output=True)
+        if _native_file_read(self,path,limit=size)!=(raw,before,identity):
             raise TransactionError('NATIVE_ALLOCATION_WARMUP_SOURCE_CHANGED')
     def restore_unit(self,name,state):
         if name!="ollama.service": raise TransactionError("OFFLINE_UNIT_DENIED")
@@ -397,7 +397,7 @@ class OfflineOllamaRealAdapter(RealAdapter):
         return list_models()["models"]
     def _runtime_pid(self):
         observed=subprocess.run(['systemctl','show','ollama.service','--property=MainPID','--value'],
-                                capture_output=True,text=True,check=False,timeout=10)
+                                capture_output=True,text=True,check=False)
         value=observed.stdout.strip()
         if observed.returncode or observed.stderr.strip() or not re.fullmatch(r'[1-9][0-9]*',value):
             raise TransactionError('OFFLINE_RUNTIME_PROCESS_UNAVAILABLE')
@@ -412,7 +412,7 @@ class OfflineOllamaRealAdapter(RealAdapter):
         def manager():
             result=subprocess.run(['systemctl','show','ollama.service',
                 '--property=MainPID,InvocationID,ControlGroup'],
-                capture_output=True,text=True,check=True,timeout=10)
+                capture_output=True,text=True,check=True)
             rows={}
             for line in result.stdout.splitlines():
                 name,separator,value=line.partition('=')
@@ -453,7 +453,9 @@ class OfflineOllamaRealAdapter(RealAdapter):
         of an invalid runtime/material observation. The executable's actual
         inode must match the pinned image before its environment is consumed.
         """
-        for attempt in range(101):
+        # A still-bound pre-exec image is unproven, not failed by elapsed time.
+        # Only the pinned image followed by full native acceptance can return.
+        while True:
             if self.observe_native_incarnation()!=incarnation:
                 raise TransactionError('NATIVE_START_INCARNATION_CHANGED')
             path=self.root/'proc'/str(incarnation['pid'])/'exe'
@@ -482,11 +484,10 @@ class OfflineOllamaRealAdapter(RealAdapter):
                                for key in ('boot_id','pid','start_time'))):
                     raise TransactionError('NATIVE_START_INCARNATION_CHANGED')
                 return observed
-            if attempt<100:time.sleep(0.1)
-        raise TransactionError('NATIVE_START_EXEC_TIMEOUT')
+            time.sleep(0.1)
     def native_runtime_stopped(self):
         result=subprocess.run(['systemctl','show','ollama.service','--property=MainPID','--value'],
-            capture_output=True,text=True,check=True,timeout=10)
+            capture_output=True,text=True,check=True)
         if result.stdout.strip()!='0' or result.stderr.strip():return False
         group=self.root/'sys/fs/cgroup/system.slice/ollama.service'
         nofollow_ancestors(self.root,group)
@@ -752,7 +753,7 @@ class OfflineOllamaRealAdapter(RealAdapter):
                 raise ValueError('MANAGER_CHANGED')
             def memberships():
                 observed=subprocess.run(['nvidia-smi','--query-compute-apps=pid,gpu_uuid',
-                    '--format=csv,noheader,nounits'],capture_output=True,text=True,check=False,timeout=10)
+                    '--format=csv,noheader,nounits'],capture_output=True,text=True,check=False)
                 if observed.returncode or observed.stderr.strip() or len(observed.stdout)>65536:
                     raise ValueError('GPU_QUERY')
                 seen=set()

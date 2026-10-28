@@ -61,7 +61,7 @@ def download(url: str, destination: Path, maximum: int, *, expected_sha256: str 
         raise RuntimeError("DEBIAN_DOWNLOAD_URL_DENIED")
     request = urllib.request.Request(url, headers={"User-Agent": "Serein-Outpost-Host-Witness/1"})
     opener = urllib.request.build_opener(_RejectRedirect())
-    with opener.open(request, timeout=30) as response, destination.open("wb") as stream:
+    with opener.open(request, timeout=None) as response, destination.open("wb") as stream:
         if response.geturl() != url:
             raise RuntimeError("DEBIAN_DOWNLOAD_REDIRECT_DENIED")
         total = 0

@@ -59,8 +59,8 @@
     ],
     [
       "payload/bin/serein-ollama-warmup",
-      1634,
-      "4a8971d72739c161d2f082a67814ad3646065a3a77011fd978311ffdf98cc89e",
+      1541,
+      "bb5886e7143b0d3935cc73400d6687b7e807594d2bf2a11f4d5d644d03eae087",
       "0755"
     ],
     [
@@ -71,14 +71,14 @@
     ],
     [
       "payload/runtime/persistent_replay_store.py",
-      26786,
-      "430c12d61213824a2178f1b643b65b65a59f2cba9dd6e94375a61fd2362ba8c5",
+      28908,
+      "27d49753da32a60f98acb1c490b4e1d82d6b7490feb1efc0f99ef9af833711ac",
       "0644"
     ],
     [
       "payload/runtime/replay_store.py",
-      28111,
-      "a3321dd7ed9f4a04ed333663d46f2d77f2dde46964ea63d11d631f3358bb90cb",
+      29433,
+      "d123352299d438deaa91d306992c88e06c0c093401a1d55adc341cf8431d5a5d",
       "0644"
     ],
     [
@@ -107,20 +107,20 @@
     ],
     [
       "payload/serein_stage1/authority_contract.py",
-      54108,
-      "d91f0102ef4446a246e91e4486cd6f7434608561ce9923607632ac0a6bc2492d",
+      54167,
+      "9b4acf5613076e52d06b49d6bc9696bdedb236a397fa0d36f9c14ca6cb445d0e",
       "0644"
     ],
     [
       "payload/serein_stage1/companion_provider.py",
-      23692,
-      "c670ed9012f1996159e38c29237e9f6e6bb129dc7026617989bb660e25ecb135",
+      23682,
+      "f5a63233e0ae604cf653980046429ff5aa7dd24b6b0fbfc6dfd6ace5e13eecb9",
       "0644"
     ],
     [
       "payload/serein_stage1/conversation_runtime.py",
-      17197,
-      "6b3c45defc0bd920c88f53856568998a9273840e778dd2f14a8d0b63427557e1",
+      17126,
+      "91d8ef047337e26260be44023db49bf92f38445deadfc3e2eafbecafb6ee3688",
       "0644"
     ],
     [
@@ -143,8 +143,8 @@
     ],
     [
       "payload/serein_stage1/gpu_control.py",
-      4806,
-      "8e522b5b3ab0cd63c0cd37e90b1923215b1c2bc9fa6b5e8c90a9f4ab4a8b4f25",
+      4795,
+      "c0c961f4f4c0f781da0b78630e08c1798ca7e4e4625afb3593c5329951d001ca",
       "0644"
     ],
     [
@@ -161,20 +161,20 @@
     ],
     [
       "payload/serein_stage1/kernel.py",
-      58135,
-      "6c9babc3f1022d12ca3f6fc46c54c42c83fa09e18803e8be84e813ff28ef46a3",
+      63422,
+      "3eee1554de2255adc6bba07d6ac1af1fc352dadc73e26fed56c33d3f27b1325f",
       "0644"
     ],
     [
       "payload/serein_stage1/kernel_branch_api.py",
-      30651,
-      "36aeb52adbfb89445b29aee94909eac380bbd2aefba275f1488cfdb2db72b7dc",
+      34700,
+      "484f511b7702298841c3030cf9e245b8bfdc9da953b03139445bfab70816aebd",
       "0644"
     ],
     [
       "payload/serein_stage1/kernel_operations.py",
-      88284,
-      "f5a6c99bf65981d9f85cc1088e718599a4496aef381261769f99324947eac54d",
+      90464,
+      "5dee1385360b78c1cb1dddff1790c59ead9f3f87eb79f3b153821f2960d448bc",
       "0644"
     ],
     [
@@ -203,8 +203,8 @@
     ],
     [
       "payload/serein_stage1/serein_https_gateway_adapter.py",
-      27792,
-      "c93ba4243f28db0adba2fb05de5ea0fc5f8a0f05087372ca43a1df7361980a02",
+      30572,
+      "5c9493cf92f4dd3c48ae2f1dd7fba054af282eedbc9a03ffb2bdcff907dea3e9",
       "0644"
     ],
     [
@@ -215,8 +215,8 @@
     ],
     [
       "payload/serein_stage1/supervision.py",
-      5341,
-      "dec929f2f46af2a15a24e080d9f23c26c9803a97e8a1fb63d7e30e1af4c80374",
+      5331,
+      "b0a1426bf2b9c854889188367551d3b5e7bcd5d0cc223daf19e2a18098909459",
       "0644"
     ],
     [
@@ -298,8 +298,8 @@
       "0644"
     ]
   ],
-  "payload_digest": "sha256:02e639fe1ccabba58f619cde24fb79e66376a8dd99065f8eebd2c092cd99805c",
-  "install_denominator_digest": "sha256:76d4bdbf603376a7c5d18caa3612f1ce572cec1b17de7e1210245f51884bea58",
+  "payload_digest": "sha256:34a0a1d60020e74d37d7aee38d92a4785021efe162658c39bfae47127cd866a5",
+  "install_denominator_digest": "sha256:530f7e97e0b380a4580b8985f3cd391247047f54d4711e95e2ec26702e29cd1b",
   "generated_secrets": [
     "/var/lib/serein/kernel/authority/replay.key",
     "/var/lib/serein/kernel/authority/domain-identity.pem"
@@ -308,14 +308,14 @@
   "installer_files": [
     [
       "install/kernel_first_install.py",
-      67408,
-      "313690d5e607379acf8b51366a354b8249b0dbe341b397b9ff6a3077ad7ebdae",
+      67397,
+      "d460b1d6cb634c51ecbd439e847d3f5d635029f8b04eb69df1a9090232b6ff42",
       "0755"
     ],
     [
       "install/offline_ollama_transaction.py",
-      120049,
-      "4cae631cb0da3a05c44ebe783c6fe0139a1e6ae9d2f7d7111688132f10202791",
+      120016,
+      "df3185ab04282d4cd6e287bca9a547645624fdfcbf31b8a147205b4c35a521c9",
       "0755"
     ]
   ],
@@ -341,5 +341,5 @@
   ],
   "activation": "OUTPOST_ONLY_AFTER_INACTIVE_PROOF",
   "admission_effect": "NONE",
-  "self_digest": "sha256:44304fc9f24c0343dcc66d91efbddf568a5d174937d9ccacfc07520a69e2bb17"
+  "self_digest": "sha256:e598bb1bf2e78e41e9d8e8f4978577600662bedee5230d53801a4d113c0bdbfb"
 }

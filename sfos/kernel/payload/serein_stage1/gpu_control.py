@@ -45,7 +45,7 @@ def collect(root="/",runner=subprocess.run):
  root=Path(root);boot=(root/"proc/sys/kernel/random/boot_id").read_text().strip()
  host_before=_host_gpu_facts(root);devices=[row[0] for row in host_before[0]];loaded=host_before[1]
  try:
-  proc=runner(("nvidia-smi","--query-gpu=pci.bus_id,uuid,name,driver_version","--format=csv,noheader,nounits"),capture_output=True,text=True,timeout=15,check=False)
+  proc=runner(("nvidia-smi","--query-gpu=pci.bus_id,uuid,name,driver_version","--format=csv,noheader,nounits"),capture_output=True,text=True,check=False)
  except (OSError,subprocess.TimeoutExpired) as error:
   raise GPUControlDenied('GPU_OBSERVATION_UNAVAILABLE') from error
  rows=sorted(line.strip() for line in proc.stdout.splitlines() if line.strip()) if proc.returncode==0 else []

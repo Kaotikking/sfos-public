@@ -48,7 +48,7 @@ def _loopback_open(request, *, timeout):
                                        _RejectRedirect()).open(request, timeout=timeout)
 
 
-def _request_json(endpoint: str, body: bytes | None, *, opener: Callable, timeout=90) -> dict:
+def _request_json(endpoint: str, body: bytes | None, *, opener: Callable, timeout=None) -> dict:
     request = urllib.request.Request(
         endpoint,
         data=body,
@@ -401,7 +401,7 @@ def _infer_observation(utterance: str, *, opener: Callable,
     body = _inference_body(utterance)
     before = _gpu_facts(gpu_reader)
     tags_before = list_models(opener=opener)
-    result = _request_json(ENDPOINT, body, opener=opener, timeout=20)
+    result = _request_json(ENDPOINT, body, opener=opener)
     if not isinstance(result, dict) or result.get("model") != MODEL or result.get("done") is not True:
         raise CompanionUnavailable("companion_response_invalid")
     answer = result.get("response")

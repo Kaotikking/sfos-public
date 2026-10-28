@@ -155,7 +155,7 @@ def apply_runtime_access(root,plan,boundary=lambda:None):
  if Path(root)!=Path('/'):argv.append('--root='+str(root))
  argv.append(str(rule))
  try:
-  subprocess.run(argv,check=True,timeout=15,stdin=subprocess.DEVNULL,
+  subprocess.run(argv,check=True,stdin=subprocess.DEVNULL,
       stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,
       env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
  except (OSError,subprocess.SubprocessError) as exc:

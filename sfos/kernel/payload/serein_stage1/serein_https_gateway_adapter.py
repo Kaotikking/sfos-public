@@ -76,11 +76,16 @@ def gateway_request(payload, *, root=Path('/')):
     """One bounded call to the source-defined HAOS private Gateway, no retry.
 
     The TLS owner supplies this callable, not a caller-controlled URL/socket.
-    Transport retains custody/peer/frame/deadline checks from the existing
-    private exchange. Actual listener/startup/Authority ownership is separate.
+    Transport retains custody/peer/frame checks and bounded connect/send.
+    Only the closed Companion envelope awaits its current response; Kernel
+    independently enforces installed policy and one-use replay. Other actions
+    retain their existing behavior and cannot select this completion mode.
     """
+    request=_decode(payload,MAX_CONVERSATION_REQUEST_BYTES)
+    options=({'await_gateway_conversation':True}
+             if isinstance(request,dict) and request.get('action')=='companion' else {})
     return exchange_private_service('HAOS_GATEWAY', payload,
-                                    timeout_seconds=MAX_AGE_SECONDS, root=root)
+                                    timeout_seconds=MAX_AGE_SECONDS, root=root, **options)
 
 
 def build_tls_context(credentials_directory):
@@ -267,8 +272,8 @@ def validate_conversation_request(payload, supplied_token, *, token, now):
 
 
 def _conversation_answer_envelope(request, internal, response, *, now):
-    # Reuse the private runtime's exact completion window; transport success
-    # does not make malformed or stale evidence a valid public answer.
+    # Validate the exact completed return of the already admitted request.
+    # Consumption delay neither changes its timestamps nor re-admits a request.
     if (not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None
             or not isinstance(response, dict) or not isinstance(response.get('timestamp'), str)
             or not isinstance(response.get('reason'), str) or not response['reason']
@@ -278,8 +283,7 @@ def _conversation_answer_envelope(request, internal, response, *, now):
     observed = datetime.fromisoformat(request['observed_at'].replace('Z', '+00:00'))
     if (completed.tzinfo is None or completed.utcoffset() is None
             or (completed-now).total_seconds() > MAX_FUTURE_SKEW_SECONDS
-            or (observed-completed).total_seconds() > MAX_FUTURE_SKEW_SECONDS
-            or (now-completed).total_seconds() > MAX_AGE_SECONDS):
+            or (observed-completed).total_seconds() > MAX_FUTURE_SKEW_SECONDS):
         raise ValueError('conversation_response_time_invalid')
     if request['requested_operation'] == 'conversation_tools':
         return map_haos_tool_round(request, internal, response, now=now)
@@ -335,7 +339,7 @@ def gateway_round_audit(request, internal, response_raw, answer, *, now):
 
 
 class GatewayHealthHandler(BaseHTTPRequestHandler):
-    """Retain the donor handler identity; no health/admission route is exposed."""
+    """Fixed historical liveness and separately governed Companion interaction."""
     server_version = 'SereinGateway/1'
     sys_version = ''
     # One request per connection: extra/pipelined input cannot cause a second effect.
@@ -424,13 +428,54 @@ class GatewayHealthHandler(BaseHTTPRequestHandler):
         self._write_json(200, answer)
 
     def do_GET(self):
+        if self.path != '/health/live':
+            self._write_json(404, {'status': 'DENIED', 'reason': 'path_not_admitted'})
+            return
+        lengths = self.headers.get_all('Content-Length', [])
+        if (lengths not in ([], ['0']) or any(self.headers.get_all(name) for name in
+                ('Transfer-Encoding', 'Content-Encoding', 'Expect'))):
+            self._write_json(400, {'status': 'DENIED', 'reason': 'health_request_invalid'})
+            return
+        # No caller-supplied identity, path, body, token or action enters Kernel.
+        # This fixed historical request is read-only; POST authentication stays
+        # in its own path and cannot be obtained through this response.
+        request = {'schema': 'SereinStage1Request/v1',
+                   'request_id': 'https-adapter-health',
+                   'authority': 'local-operator', 'action': 'health'}
+        try:
+            value = _decode(self.server.gateway_call(canonical(request)),
+                            MAX_GATEWAY_RESPONSE_BYTES)
+            if (not isinstance(value, dict)
+                    or value.get('schema') != 'SereinStage1Response/v1'
+                    or value.get('request_id') != request['request_id']):
+                raise ValueError('health_response_invalid')
+            if (value.get('status') != 'ANSWERED'
+                    or value.get('result') != {'state': 'READY',
+                                              'scope': 'minimum-gateway-answering-seed'}):
+                self._write_json(503, {'status': 'UNAVAILABLE', 'reason': 'stage2_unavailable'})
+                return
+            if (set(value) != {'schema', 'request_id', 'status', 'reason', 'timestamp', 'result'}
+                    or value['reason'] != 'admitted'
+                    or not isinstance(value['timestamp'], str)):
+                raise ValueError('health_response_invalid')
+            stamp = datetime.fromisoformat(value['timestamp'])
+            if stamp.tzinfo is None or stamp.utcoffset() is None:
+                raise ValueError('health_response_invalid')
+        except Exception:
+            self._write_json(503, {'status': 'UNAVAILABLE', 'reason': 'gateway_unavailable'})
+            return
+        # Kernel's own Audit has acknowledged this exact answer before return.
+        # READY is only minimum-gateway-answering-seed, never Stage-1 admission.
+        self._write_json(200, value)
+
+    def _method_denied(self):
         self._write_json(405, {'status': 'DENIED', 'reason': 'method_not_admitted'})
 
-    do_OPTIONS = do_GET
-    do_PUT = do_GET
-    do_DELETE = do_GET
-    do_PATCH = do_GET
-    do_HEAD = do_GET
+    do_OPTIONS = _method_denied
+    do_PUT = _method_denied
+    do_DELETE = _method_denied
+    do_PATCH = _method_denied
+    do_HEAD = _method_denied
 
     def log_message(self, format, *args):
         # No request/token/body or private failure detail is logged by this edge.

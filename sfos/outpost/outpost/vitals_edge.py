@@ -3,8 +3,8 @@
 This transport process has no Kernel imports or domain-credential startup
 dependency. Its own TLS credentials are supplied by systemd. Vitals GETs go
 only to Outpost presentation, with an explicitly unavailable recovery view if
-that reader cannot answer; the historical voice POST tail goes only to the
-separate private Kernel process. Neither tail calls the other. Edge/Vitals
+that reader cannot answer. The fixed historical health GET and voice POST
+use the separate private Kernel process; neither calls Outpost presentation. Edge/Vitals
 availability is independent of Host admission and Kernel availability.
 """
 from __future__ import annotations
@@ -20,7 +20,9 @@ import socket
 import ssl
 import stat
 import struct
+import threading
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -37,10 +39,11 @@ PRIVATE_KEY = Path("/run/credentials/serein-https-gateway-adapter.service/serein
 STATUS_PATH = "/v1/runtime/status"
 READY_PATH = "/health/ready"
 CONVERSATION_PATH = "/v1/voice/conversation"
+LIVE_PATH = "/health/live"
+LIVE_REQUEST = b"GET /health/live HTTP/1.0\r\nConnection: close\r\n\r\n"
 GATEWAY_SOCKET = Path('/run/serein/kernel/gateway-haos.sock')
 MAX_CONVERSATION_REQUEST_BYTES = 128 * 1024
 MAX_GATEWAY_RESPONSE_BYTES = 64 * 1024
-GATEWAY_RESPONSE_TIMEOUT_SECONDS = 120.0
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
 
@@ -68,20 +71,15 @@ def _gateway_exchange(wire: bytes, *, root=Path('/')) -> tuple[int, bytes]:
     root = Path(root)
     if not root.is_absolute() or '..' in root.parts:
         raise VitalsEdgeError('GATEWAY_ROOT_DENIED')
-    if (type(wire) is not bytes or not wire.startswith(b'POST /v1/voice/conversation HTTP/1.0\r\n')
+    if (type(wire) is not bytes
+            or (wire != LIVE_REQUEST
+                and not wire.startswith(b'POST /v1/voice/conversation HTTP/1.0\r\n'))
             or len(wire) > MAX_CONVERSATION_REQUEST_BYTES + 8192):
         raise VitalsEdgeError('GATEWAY_REQUEST_DENIED')
     group = grp.getgrnam('serein-stage1')
     handles, parents = [], []
-    # Transport ceiling only, not a fresh request lease. Kernel retains the
-    # original observed_at expiry, current gates and one-attempt replay owner.
-    # Keep this edge independent: no Kernel import or admission interpretation.
-    deadline = time.monotonic() + GATEWAY_RESPONSE_TIMEOUT_SECONDS
-    def remaining():
-        value = deadline - time.monotonic()
-        if value <= 0:
-            raise TimeoutError('GATEWAY_DEADLINE')
-        return value
+    # Completion follows the bounded protocol and native transport result.
+    # Kernel alone owns signed execution expiry and replay authority.
     def identity(info):
         return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid, info.st_nlink)
     try:
@@ -112,18 +110,21 @@ def _gateway_exchange(wire: bytes, *, root=Path('/')) -> tuple[int, bytes]:
             if identity(os.stat(parts[-1], dir_fd=fd, follow_symlinks=False)) != identity(before):
                 raise VitalsEdgeError('GATEWAY_SOCKET_CHANGED')
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-            connection.settimeout(remaining())
+            connection.settimeout(None)
             connection.connect(f'/proc/self/fd/{fd}/{parts[-1]}')
             _, uid, gid = struct.unpack('3i', connection.getsockopt(
                 socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize('3i')))
             if (uid, gid) != (0, 0):
                 raise VitalsEdgeError('GATEWAY_LISTENER_IDENTITY_DENIED')
             stable()
-            connection.settimeout(remaining()); connection.sendall(wire)
+            connection.sendall(wire)
+            # Await the actual bounded response/EOF, not an elapsed verdict.
+            # Existing upstream slots keep stalled Gateway work separate from
+            # Vitals capacity. Errors/cancellation still unwind both owners.
+            connection.settimeout(None)
             response = bytearray()
             maximum = MAX_GATEWAY_RESPONSE_BYTES + 8192
             while True:
-                connection.settimeout(remaining())
                 block = connection.recv(min(16384, maximum + 1 - len(response)))
                 if not block:
                     break
@@ -168,7 +169,6 @@ def _presentation(method: str, path: str, accept: str) -> tuple[int, str, list[l
     response = b""
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-            client.settimeout(2.0)
             client.connect(str(PRESENTATION_SOCKET))
             client.sendall(request)
             response = b""
@@ -372,11 +372,39 @@ def edge_response(method: str, path: str, accept: str) -> tuple[int, str, list[t
     return status, content_type, headers + safe_headers, body
 
 
+def _live_answer(body: bytes) -> None:
+    """Validate narrow correlation only; never interpret Kernel admission."""
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError('duplicate')
+            result[key] = value
+        return result
+    if type(body) is not bytes or len(body) > MAX_GATEWAY_RESPONSE_BYTES:
+        raise VitalsEdgeError('GATEWAY_HEALTH_RESPONSE_DENIED')
+    try:
+        value = json.loads(body, object_pairs_hook=unique)
+        if (not isinstance(value, dict)
+                or set(value) != {'schema', 'request_id', 'status', 'reason', 'timestamp', 'result'}
+                or value['schema'] != 'SereinStage1Response/v1'
+                or value['request_id'] != 'https-adapter-health'
+                or value['status'] != 'ANSWERED' or value['reason'] != 'admitted'
+                or value['result'] != {'state': 'READY', 'scope': 'minimum-gateway-answering-seed'}
+                or not isinstance(value['timestamp'], str)):
+            raise ValueError('shape')
+        stamp = datetime.fromisoformat(value['timestamp'])
+        if stamp.tzinfo is None or stamp.utcoffset() is None:
+            raise ValueError('timestamp')
+    except (ValueError, TypeError, UnicodeError, RecursionError) as error:
+        raise VitalsEdgeError('GATEWAY_HEALTH_RESPONSE_DENIED') from error
+
+
 class VitalsHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    # Reuse the Kernel adapter's bounded, per-request TLS handshake road.
-    # A client that never sends ClientHello must not occupy the accept loop.
-    timeout = 2.0
+    # TLS is deferred to one of the bounded request workers, never the accept
+    # loop. Valid handshake/header/body completion has no elapsed verdict.
+    timeout = None
 
     def handle_expect_100(self):
         # BaseHTTPRequestHandler otherwise sends an interim success before
@@ -386,6 +414,21 @@ class VitalsHandler(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self) -> None:  # noqa: N802
+        if self.path == LIVE_PATH:
+            lengths = self.headers.get_all('Content-Length', [])
+            if (lengths not in ([], ['0']) or any(self.headers.get_all(name) for name in
+                    ('Transfer-Encoding', 'Content-Encoding', 'Expect'))):
+                self._gateway_reply(400, b'{"status":"DENIED","reason":"health_request_invalid"}')
+                return
+            try:
+                status, body = self._exchange_gateway(LIVE_REQUEST)
+                if status != 200:
+                    raise VitalsEdgeError('GATEWAY_HEALTH_UNAVAILABLE')
+                _live_answer(body)
+            except (OSError, ValueError, KeyError):
+                status, body = 503, b'{"status":"UNAVAILABLE","reason":"gateway_unavailable"}'
+            self._gateway_reply(status, body)
+            return
         status, content_type, headers, body = edge_response("GET", self.path, self.headers.get("Accept", "application/json"))
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -417,15 +460,9 @@ class VitalsHandler(BaseHTTPRequestHandler):
                            ('Transfer-Encoding', 'Content-Encoding', 'Expect'))):
                 raise ValueError('framing')
             predicate = 'body_read_failed'
-            deadline = time.monotonic() + self.timeout
             body = bytearray()
             length = int(lengths[0])
             while len(body) < length:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    predicate = 'body_deadline'
-                    raise TimeoutError
-                self.connection.settimeout(remaining)
                 part = self.rfile.read1(min(16384, length - len(body)))
                 if not part:
                     predicate = 'body_incomplete'
@@ -444,10 +481,22 @@ class VitalsHandler(BaseHTTPRequestHandler):
             self._gateway_reply(400, b'{"status":"DENIED","reason":"conversation_request_invalid"}')
             return
         try:
-            status, response = _gateway_exchange(wire)
+            status, response = self._exchange_gateway(wire)
         except (OSError, ValueError, KeyError):
             status, response = 503, b'{"status":"UNAVAILABLE","reason":"gateway_unavailable"}'
         self._gateway_reply(status, response)
+
+    def _exchange_gateway(self, wire):
+        # Reserve fewer upstream exchanges than the existing handler capacity.
+        # A stalled Kernel cannot occupy every Vitals handler. Saturation is a
+        # transport-unavailable response, never a readiness/admission verdict.
+        slots = self.server._gateway_slots
+        if not slots.acquire(blocking=False):
+            raise VitalsEdgeError('GATEWAY_CAPACITY_UNAVAILABLE')
+        try:
+            return _gateway_exchange(wire)
+        finally:
+            slots.release()
 
     def _gateway_reply(self, status, body):
         self.close_connection = True
@@ -465,6 +514,10 @@ class VitalsHandler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         self._readonly()
 
+    do_OPTIONS = do_PUT
+    do_PATCH = do_PUT
+    do_HEAD = do_PUT
+
     def _readonly(self) -> None:
         status, content_type, headers, body = edge_response(self.command, self.path, self.headers.get("Accept", "application/json"))
         self.send_response(status)
@@ -480,12 +533,41 @@ class VitalsHandler(BaseHTTPRequestHandler):
         return
 
 
+class VitalsServer(ThreadingHTTPServer):
+    # Reuse presentation's bounded-handler pattern. Slow complete evidence
+    # cannot create unbounded public threads or connections. Saturation closes
+    # only the unaccepted transport; it never grants or denies Serein authority.
+    MAX_CONCURRENT_REQUESTS = 4
+    MAX_CONCURRENT_GATEWAY_REQUESTS = 2
+
+    def __init__(self, *args, **kwargs):
+        self._request_slots = threading.BoundedSemaphore(self.MAX_CONCURRENT_REQUESTS)
+        self._gateway_slots = threading.BoundedSemaphore(self.MAX_CONCURRENT_GATEWAY_REQUESTS)
+        super().__init__(*args, **kwargs)
+
+    def process_request(self, request, client_address):
+        if not self._request_slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._request_slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._request_slots.release()
+
+
 def serve() -> None:
     if not CERTIFICATE.is_file() or CERTIFICATE.is_symlink() or not PRIVATE_KEY.is_file() or PRIVATE_KEY.is_symlink():
         raise SystemExit("VITALS_TLS_MATERIAL_DENIED")
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(certfile=str(CERTIFICATE), keyfile=str(PRIVATE_KEY))
-    server = ThreadingHTTPServer((BACKEND_ADDRESS, BACKEND_PORT), VitalsHandler,
+    server = VitalsServer((BACKEND_ADDRESS, BACKEND_PORT), VitalsHandler,
                                  bind_and_activate=False)
     try:
         server.socket = context.wrap_socket(server.socket, server_side=True,

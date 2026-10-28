@@ -77,8 +77,6 @@ def _validate(value: object, *, now: datetime) -> dict[str, str]:
     if observed.tzinfo is None:
         raise ValueError("conversation_runtime_observed_at_invalid")
     age = (now - observed.astimezone(timezone.utc)).total_seconds()
-    if age > MAX_AGE_SECONDS:
-        raise ValueError("conversation_runtime_request_stale")
     if age < -MAX_FUTURE_SKEW_SECONDS:
         raise ValueError("conversation_runtime_request_future")
     return value
@@ -258,8 +256,7 @@ def call_expected(payload: bytes, *, runtime_call, clock) -> bytes:
             raise ValueError('conversation_runtime_return_time_denied')
         if ((requested-started).total_seconds()>MAX_FUTURE_SKEW_SECONDS
                 or (finished-returned).total_seconds()>MAX_FUTURE_SKEW_SECONDS
-                or (finished-now).total_seconds()>MAX_FUTURE_SKEW_SECONDS
-                or (now-finished).total_seconds()>MAX_AGE_SECONDS):
+                or (finished-now).total_seconds()>MAX_FUTURE_SKEW_SECONDS):
             raise ValueError('conversation_runtime_compute_time_denied')
     if not isinstance(response['completed_at'], str):
         raise ValueError('conversation_runtime_return_time_denied')
@@ -267,9 +264,10 @@ def call_expected(payload: bytes, *, runtime_call, clock) -> bytes:
     observed = datetime.fromisoformat(request['observed_at'].replace('Z','+00:00'))
     if (completed.tzinfo is None or completed.utcoffset() is None
             or (completed-now).total_seconds() > MAX_FUTURE_SKEW_SECONDS
-            or (observed-completed).total_seconds() > MAX_FUTURE_SKEW_SECONDS
-            or (now-completed).total_seconds() > MAX_AGE_SECONDS):
+            or (observed-completed).total_seconds() > MAX_FUTURE_SKEW_SECONDS):
         raise ValueError('conversation_runtime_return_time_denied')
+    # These exact bytes belong to the one validated invocation above. Later
+    # consumption does not rewrite completion or renew its Operations lease.
     return raw
 
 

@@ -111,7 +111,7 @@ def verify_descriptor(descriptor: object, *, key: bytes, expected_store_id: str,
 
 def make_unused(descriptor: dict, *, key: bytes, receipt_id: str, run_id: str,
                 action_nonce: str, observed_at: str, expires_at: str,
-                binding_sha256: str | None = None) -> dict:
+                binding_sha256: str | None = None, conversation_binding=None) -> dict:
     scope = descriptor["body"]
     body = {"schema": "VM4010HttpsReplayStoreReceipt/v1", "receipt_id": receipt_id,
             "store_id": scope["store_id"], "issuer": scope["issuer"],
@@ -125,6 +125,13 @@ def make_unused(descriptor: dict, *, key: bytes, receipt_id: str, run_id: str,
         if not isinstance(binding_sha256, str) or not HEX64.fullmatch(binding_sha256):
             raise ValueError("dispatch binding digest is malformed")
         body.update(schema="SereinKernelDispatchReplayReceipt/v1", binding_sha256=binding_sha256)
+    if conversation_binding is not None:
+        if (expires_at is not None or binding_sha256 is None
+                or not isinstance(conversation_binding, dict)
+                or conversation_binding.get('schema') != CONVERSATION_BINDING_V2_SCHEMA):
+            raise ValueError('conversation receipt binding denied')
+        body['schema'] = CONVERSATION_RECEIPT_V2_SCHEMA
+        del body['expires_at']
     return signed(body, key)
 
 
@@ -169,10 +176,12 @@ def verify_lifecycle(receipts: list[dict], *, descriptor: dict, key: bytes,
     first = _verify_signed(receipts[0], key, "replay receipt")
     schema = first.get("schema")
     binding_hash = first.get("binding_sha256")
-    if schema == "SereinKernelDispatchReplayReceipt/v1":
+    if schema in ("SereinKernelDispatchReplayReceipt/v1", CONVERSATION_RECEIPT_V2_SCHEMA):
         if not isinstance(binding_hash, str) or not HEX64.fullmatch(binding_hash):
             raise ValueError("dispatch binding digest is malformed")
         required = required | {"binding_sha256"}
+        if schema == CONVERSATION_RECEIPT_V2_SCHEMA:
+            required = required - {'expires_at'}
     elif schema != "VM4010HttpsReplayStoreReceipt/v1":
         raise ValueError("replay receipt schema is unknown")
     for index, receipt in enumerate(receipts):
@@ -191,9 +200,13 @@ def verify_lifecycle(receipts: list[dict], *, descriptor: dict, key: bytes,
         if body["receipt_id"] in receipt_ids:
             raise ValueError("replay receipt UUID is duplicated")
         receipt_ids.add(body["receipt_id"])
-        observed, expires = utc(body["observed_at"]), utc(body["expires_at"])
-        if observed > now or expires <= now or observed >= expires or body.get("revoked") is not False:
-            raise ValueError("receipt is stale, future, expired, or revoked")
+        observed = utc(body["observed_at"])
+        if observed > now or body.get("revoked") is not False:
+            raise ValueError("receipt is future or revoked")
+        if schema != CONVERSATION_RECEIPT_V2_SCHEMA:
+            expires = utc(body['expires_at'])
+            if expires <= now or observed >= expires:
+                raise ValueError("receipt is stale, future, expired, or revoked")
         if body.get("revision") != index:
             raise ValueError("receipt revision is non-monotonic")
         if previous is None:
@@ -267,7 +280,7 @@ def verify_stored_history(chains: list[list[dict]], *, descriptor: dict, key: by
         if result["state"] == "CONSUMED":
             consumed += 1
         elif result["state"] == "RESERVED":
-            if utc(head["expires_at"]) <= now:
+            if head['schema'] != CONVERSATION_RECEIPT_V2_SCHEMA and utc(head["expires_at"]) <= now:
                 expired += 1
             else:
                 active += 1
@@ -285,6 +298,9 @@ DISPATCH_BINDING_FIELDS = frozenset({'request_id','conversation_id','route','own
 
 
 CONVERSATION_BINDING_SCHEMA = 'SereinStage1ConversationReplayBinding/v1'
+CONVERSATION_BINDING_V2_SCHEMA = 'SereinStage1ConversationReplayBinding/v2'
+CONVERSATION_BINDING_SCHEMAS = (CONVERSATION_BINDING_SCHEMA, CONVERSATION_BINDING_V2_SCHEMA)
+CONVERSATION_RECEIPT_V2_SCHEMA = 'SereinKernelConversationReplayReceipt/v2'
 CONVERSATION_BINDING_FIELDS = frozenset({'schema','request_id','conversation_id',
     'request_sha256','payload_sha256','caller','requested_operation','route',
     'policy_sha256','plan_sha256','canonical_manifest_digest','boot_id',
@@ -300,7 +316,9 @@ def verify_conversation_binding(binding, chain_id, *, descriptor, expected_gener
     """
     if not isinstance(binding, dict) or set(binding) != CONVERSATION_BINDING_FIELDS:
         raise ValueError('conversation replay fields denied')
-    fixed = {'schema': CONVERSATION_BINDING_SCHEMA, 'caller': 'HAOS',
+    if binding['schema'] not in CONVERSATION_BINDING_SCHEMAS:
+        raise ValueError('conversation replay version denied')
+    fixed = {'caller': 'HAOS',
              'route': '/run/serein/kernel/conversation.sock',
              'authority_effect': 'NONE', 'admission_effect': 'NONE'}
     if any(binding[name] != value for name, value in fixed.items()):
@@ -342,7 +360,7 @@ def verify_conversation_binding(binding, chain_id, *, descriptor, expected_gener
 
 
 def verify_dispatch_binding(binding, chain_id, *, descriptor):
-    if isinstance(binding, dict) and binding.get('schema') == CONVERSATION_BINDING_SCHEMA:
+    if isinstance(binding, dict) and binding.get('schema') in CONVERSATION_BINDING_SCHEMAS:
         return verify_conversation_binding(binding, chain_id, descriptor=descriptor)
     if not isinstance(binding, dict) or set(binding) != DISPATCH_BINDING_FIELDS:
         raise ValueError('dispatch binding fields denied')
@@ -386,7 +404,7 @@ def verify_dispatch_bindings(rows, chains, *, descriptor, key, allow_conversatio
             raise ValueError('dispatch binding integrity denied')
         if (allow_conversation_history
                 and isinstance(body['binding'],dict)
-                and body['binding'].get('schema') == CONVERSATION_BINDING_SCHEMA):
+                and body['binding'].get('schema') in CONVERSATION_BINDING_SCHEMAS):
             # Historical source is authenticated by the existing MAC and
             # receipt anchor below, not asserted as current installation.
             bindings[chain_id] = verify_conversation_binding(body['binding'], chain_id,
@@ -398,7 +416,10 @@ def verify_dispatch_bindings(rows, chains, *, descriptor, key, allow_conversatio
         if (len(values) not in (2,3) or values[0]['body']['run_id'] !=
                 str(uuid5(NAMESPACE_URL, f"{body['binding']['request_id']}:run"))):
             raise ValueError('dispatch binding lifecycle denied')
-        if any(receipt['body'].get('schema') != 'SereinKernelDispatchReplayReceipt/v1'
+        expected_receipt_schema = (CONVERSATION_RECEIPT_V2_SCHEMA
+            if body['binding'].get('schema') == CONVERSATION_BINDING_V2_SCHEMA
+            else 'SereinKernelDispatchReplayReceipt/v1')
+        if any(receipt['body'].get('schema') != expected_receipt_schema
                or receipt['body'].get('binding_sha256') != hashlib.sha256(raw).hexdigest()
                for receipt in values):
             raise ValueError('dispatch binding receipt anchor denied')
@@ -423,7 +444,7 @@ def verify_dispatch_bindings(rows, chains, *, descriptor, key, allow_conversatio
                 raise ValueError('dispatch outcome integrity denied')
             used += len(outcome_raw)
     expected = {chain_id for chain_id, values in chains.items()
-                if values[0]['body']['schema'] == 'SereinKernelDispatchReplayReceipt/v1'}
+                if values[0]['body']['schema'] in ('SereinKernelDispatchReplayReceipt/v1', CONVERSATION_RECEIPT_V2_SCHEMA)}
     if set(bindings) != expected:
         raise ValueError('dispatch binding receipt anchor missing')
     return bindings, used

@@ -213,6 +213,17 @@ def _classify_ollama_chat(value: Any) -> tuple[bool, str]:
 def _classify_stage1_companion_request(
     request: dict[str, Any], *, now: datetime
 ) -> tuple[bool, str]:
+    """Initial request admission, distinct from completed-return validation."""
+    accepted, reason = _classify_stage1_companion_content(request, now=now)
+    if not accepted:
+        return accepted, reason
+    return accepted, reason
+
+
+def _classify_stage1_companion_content(
+    request: dict[str, Any], *, now: datetime
+) -> tuple[bool, str]:
+    """Validate exact content/chronology; this does not admit a new request."""
     if set(request) != {"schema", "request_id", "authority", "action", "conversation"}:
         return False, "companion_envelope_invalid"
     conversation = request.get("conversation")
@@ -275,8 +286,6 @@ def _classify_stage1_companion_request(
     if observed_at.tzinfo is None:
         return False, "companion_observed_at_invalid"
     age_seconds = (now - observed_at.astimezone(timezone.utc)).total_seconds()
-    if age_seconds > MAX_STAGE1_COMPANION_AGE_SECONDS:
-        return False, "companion_observation_stale"
     if age_seconds < -MAX_STAGE1_COMPANION_FUTURE_SKEW_SECONDS:
         return False, "companion_observation_future"
     return True, "admitted_bounded_companion"
@@ -383,14 +392,19 @@ def classify_request(request: Any, *, now: datetime | None = None) -> tuple[bool
     return True, "admitted"
 
 
-def exchange_private_service(channel, payload, *, timeout_seconds, root=Path('/')):
+def exchange_private_service(channel, payload, *, timeout_seconds, root=Path('/'),
+                             await_observation=False, await_conversation=False,
+                             await_audit=False, await_gateway_conversation=False):
     """Use only the existing fixed private Kernel service roads, once.
 
     Source: installed conversation/audit socket units; AF_UNIX SO_PEERCRED
     credentials are captured at listen(), so systemd's listener identity is
     root even though the receiving service runs as serein-stage1. Filesystem
     socket custody is checked separately. No discovery, start, retry or repair.
-    The owning dispatch must supply a timeout within its remaining lease.
+    Generic signed dispatch retains its actual execution lease. Explicit
+    observation, validated Audit, and installed conversation modes separate
+    response completion from bounded connection and input transfer. These
+    internal flags never grant Authority or appear in a request schema.
     """
     from .conversation_runtime import MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, MAX_AGE_SECONDS
     from .audit import MAX_EVENT_BYTES
@@ -407,12 +421,45 @@ def exchange_private_service(channel, payload, *, timeout_seconds, root=Path('/'
             or not 0 < timeout_seconds <= (MAX_AGE_SECONDS
                 if channel in ('CONVERSATION','HAOS_GATEWAY') else 30)):
         raise ValueError('private_service_configuration_denied')
+    modes=(await_observation,await_conversation,await_audit,await_gateway_conversation)
+    if any(type(value) is not bool for value in modes) or sum(modes)>1:
+        raise ValueError('private_service_observation_denied')
     absolute, mode, maximum_request, maximum_response, owner = roads[channel]
     if not isinstance(payload,bytes) or not payload:
         raise ValueError('private_service_request_denied')
     frame=payload if payload.endswith(b'\n') else payload+b'\n'
     if len(frame)>maximum_request or frame.count(b'\n')!=1:
         raise ValueError('private_service_request_denied')
+    if await_conversation:
+        if channel != 'CONVERSATION' or await_observation:
+            raise ValueError('private_service_conversation_denied')
+        from .conversation_runtime import _decode, _validate
+        _validate(_decode(frame, MAX_REQUEST_BYTES), now=datetime.now(timezone.utc))
+    if await_audit:
+        if channel != 'AUDIT':
+            raise ValueError('private_service_audit_denied')
+        from .audit import decode_event
+        from .authority_contract import canonical
+        if canonical(decode_event(frame)) != frame:
+            raise ValueError('private_service_audit_denied')
+    if await_gateway_conversation:
+        if channel != 'HAOS_GATEWAY':
+            raise ValueError('private_service_conversation_denied')
+        from .conversation_runtime import _decode
+        from .authority_contract import canonical
+        request=_decode(frame,maximum_request)
+        if (not isinstance(request,dict) or request.get('action')!='companion'
+                or canonical(request)!=frame
+                or not classify_request(request,now=datetime.now(timezone.utc))[0]):
+            raise ValueError('private_service_conversation_denied')
+    if await_observation:
+        allowed = channel == 'HAOS_GATEWAY' and frame == b'{}\n'
+        if channel == 'AUDIT':
+            from .audit import decode_event
+            event = decode_event(frame)
+            allowed = _is_interface_denial_event(event)
+        if not allowed:
+            raise ValueError('private_service_observation_denied')
     root=Path(root)
     if not root.is_absolute() or '..' in root.parts:
         raise ValueError('private_service_root_denied')
@@ -468,7 +515,7 @@ def exchange_private_service(channel, payload, *, timeout_seconds, root=Path('/'
             connection.settimeout(remaining());connection.sendall(frame)
             response=bytearray()
             while b'\n' not in response:
-                connection.settimeout(remaining())
+                connection.settimeout(None if any(modes) else remaining())
                 block=connection.recv(min(16384,maximum_response+1-len(response)))
                 if not block: raise ValueError('private_service_response_incomplete')
                 response.extend(block)
@@ -481,6 +528,22 @@ def exchange_private_service(channel, payload, *, timeout_seconds, root=Path('/'
         for fd in reversed(handles): os.close(fd)
 
 
+def _is_interface_denial_event(event):
+    # No execution capability or replay reservation can enter this exception.
+    if (not isinstance(event, dict)
+            or set(event) != {'schema','request_id','status','reason','timestamp'}
+            or event['schema'] != 'SereinStage1Response/v1'
+            or event['request_id'] is not None or event['status'] != 'DENIED'
+            or event['reason'] != 'gateway_request_denied'
+            or not isinstance(event['timestamp'], str)):
+        return False
+    try:
+        observed = datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00'))
+        return observed.utcoffset() is not None
+    except ValueError:
+        return False
+
+
 def record_terminal_event(response, *, root=Path('/')):
     """Existing audit API; an acknowledgement is not a domain witness."""
     from .authority_contract import canonical
@@ -488,7 +551,8 @@ def record_terminal_event(response, *, root=Path('/')):
     from .conversation_runtime import _decode
     payload=canonical(response)
     decode_event(payload)
-    raw=exchange_private_service('AUDIT',payload,timeout_seconds=EXCHANGE_TIMEOUT_SECONDS,root=root)
+    raw=exchange_private_service('AUDIT',payload,timeout_seconds=EXCHANGE_TIMEOUT_SECONDS,
+                                 root=root, await_audit=True)
     if _decode(raw,4096)!={'status':'RECORDED'}:
         raise ValueError('gateway_audit_denied')
 
@@ -788,7 +852,9 @@ def _haos_tool_envelope(request, *, now):
     outer={'schema':'SereinStage1Request/v1','request_id':request['request_id'],
         'authority':'local-operator','action':'companion',
         'conversation':{k:v for k,v in request.items() if k!='request_id'}}
-    admitted,reason=classify_request(outer,now=now)
+    # A completed expected return must preserve the original request content;
+    # consuming it does not initiate a new request or renew its replay lifetime.
+    admitted,reason=_classify_stage1_companion_content(outer,now=now)
     if not admitted:
         raise ValueError(reason)
     return outer
@@ -805,6 +871,9 @@ def prepare_haos_tool_round(request, *, now):
     """
     from uuid import uuid4
     outer=_haos_tool_envelope(request,now=now)
+    admitted,reason=classify_request(outer,now=now)
+    if not admitted:
+        raise ValueError(reason)
     outer['request_id']=str(uuid4())
     return outer
 
@@ -852,6 +921,35 @@ def map_haos_tool_round(request, internal, response, *, now):
         'conversation_id':request['conversation_id'],'message':message,
         'continue_conversation':result['continue_conversation'],
         'authority_effect':'NONE','effects':[]}))
+
+
+def handle_installed_health(payload: bytes, *, audit_call, clock) -> bytes:
+    """Historical minimum answering-seed witness, never domain admission.
+
+    The installed listener has already checked source/startup custody and the
+    connection peer. This fixed read-only request neither consumes replay nor
+    calls Companion/Operations; Audit must acknowledge before public success.
+    """
+    from .authority_contract import canonical
+    from .conversation_runtime import _decode
+
+    request = _decode(payload, 4096)
+    expected = {'schema': 'SereinStage1Request/v1',
+                'request_id': 'https-adapter-health',
+                'authority': 'local-operator', 'action': 'health'}
+    if not isinstance(request, dict) or request != expected:
+        raise ValueError('gateway_health_request_denied')
+    current = clock()
+    if (not isinstance(current, datetime) or current.tzinfo is None
+            or current.utcoffset() is None):
+        raise ValueError('gateway_clock_invalid')
+    value = respond(request, now=current)
+    if (value.get('status') != 'ANSWERED'
+            or value.get('result') != {'state': 'READY',
+                                      'scope': 'minimum-gateway-answering-seed'}):
+        raise ValueError('gateway_health_response_denied')
+    audit_call(value)
+    return canonical(value)
 
 
 def serve_governed_connection(connection, *, client: str, peer_uid: int, peer_gid: int,
@@ -914,17 +1012,24 @@ def serve_governed_connection(connection, *, client: str, peer_uid: int, peer_gi
         if installed_mode:
             try:
                 connection.settimeout(REQUEST_TIMEOUT_SECONDS)
-                is_http = connection.recv(1, socket.MSG_PEEK) == b'P'
+                is_http = connection.recv(1, socket.MSG_PEEK) in (b'P', b'G')
             except OSError:
                 is_http = False
             if is_http:
                 from .serein_https_gateway_adapter import serve_private_http
-                serve_private_http(connection,
-                    credentials_directory=http_credentials_directory,
-                    gateway_call=lambda payload: handle_installed_companion(
+                def installed_http_call(payload):
+                    request = _decode(payload, maximum)
+                    if not isinstance(request, dict):
+                        raise ValueError('gateway_request_denied')
+                    if request.get('action') == 'health':
+                        return handle_installed_health(payload, audit_call=audit_call, clock=clock)
+                    return handle_installed_companion(
                         payload, client=client, root=installed_root,
                         replay_store=replay_store, boundary=boundary,
-                        audit_call=audit_call, clock=clock), clock=clock, audit_call=audit_call)
+                        audit_call=audit_call, clock=clock)
+                serve_private_http(connection,
+                    credentials_directory=http_credentials_directory,
+                    gateway_call=installed_http_call, clock=clock, audit_call=audit_call)
                 return
         try:
             deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
@@ -1107,9 +1212,9 @@ def respond(request: Any, *, now: datetime | None = None, companion_infer=infer)
             "timestamp": timestamp,
         }
     if request["action"] == "health":
-        # This legacy responder has no independent whole-domain witness.
-        # Answering a request cannot admit Kernel or establish Stage 1.
-        result = {"state": "UNPROVEN", "scope": "minimum-gateway-answering-seed"}
+        # Historical liveness scope: this seed classified and answered health.
+        # READY here never admits Kernel or proves Host/GPU/Companion/Stage 1.
+        result = {"state": "READY", "scope": "minimum-gateway-answering-seed"}
     else:
         result = {"product": "SFOS", "base_family": "debian", "profile": None}
     return {

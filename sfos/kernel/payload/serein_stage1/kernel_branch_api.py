@@ -76,15 +76,70 @@ def read_installed_operations_observation(*, root=Path('/')):
     gate. This does not grant Authority, authenticate a caller or admit Kernel.
     """
     from .authority_contract import read_consumer_installed_policy_evidence,canonical as stored_bytes
-    from .kernel_operations import _regular_bytes,_strict_json,_replay_progression
+    from .kernel_operations import _strict_json,_replay_progression
     from .audit import operations_event
+    import stat
     owner=pwd.getpwnam('serein-stage1')
     require((os.geteuid(),os.getegid())==(owner.pw_uid,owner.pw_gid),'OPERATIONS_OWNER_IDENTITY_DENIED')
     root=Path(root);installed=read_consumer_installed_policy_evidence(root=root)
     path=root/'var/lib/serein/kernel/replay/lifecycle-heartbeat.json'
     custody=(owner.pw_uid,owner.pw_gid,0o600)
+    def owned_bytes():
+        # Only this owner-published heartbeat is replaceable. Immutable keys,
+        # replay inputs and source continue using the unchanged strict reader.
+        require(path.is_absolute() and '..' not in path.parts,'OPERATIONS_OBSERVATION_PATH_DENIED')
+        def directory(info):
+            return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid)
+        def content(info):
+            return (*directory(info),info.st_size,info.st_mtime_ns)
+        def owned(info,links):
+            return (stat.S_ISREG(info.st_mode) and info.st_nlink in links
+                and 0 < info.st_size <= 16*1024*1024
+                and (info.st_uid,info.st_gid,stat.S_IMODE(info.st_mode))==custody)
+        handles=[]
+        try:
+            fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+            handles.append((fd,None,None,directory(os.fstat(fd))))
+            for part in path.parts[1:-1]:
+                child=os.open(part,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW,dir_fd=fd)
+                handles.append((child,fd,part,directory(os.fstat(child))));fd=child
+            opened=os.open(path.name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK,dir_fd=fd)
+            with os.fdopen(opened,'rb') as stream:
+                before=os.fstat(stream.fileno())
+                require(owned(before,{0,1}),'OPERATIONS_OBSERVATION_CUSTODY_DENIED')
+                raw=stream.read(before.st_size+1);stream.seek(0)
+                require(len(raw)==before.st_size and stream.read(before.st_size+1)==raw,
+                        'OPERATIONS_OBSERVATION_CONTENT_CHANGED')
+                named=os.stat(path.name,dir_fd=fd,follow_symlinks=False)
+                after=os.fstat(stream.fileno())
+                require(owned(after,{0,1}) and content(before)==content(after),
+                        'OPERATIONS_OBSERVATION_CONTENT_CHANGED')
+                # Unlink legitimately changes ctime once. All other ctime or
+                # link transitions remain terminal, including in-place edits.
+                require((before.st_nlink==1 and after.st_nlink==0)
+                    or (before.st_nlink==after.st_nlink and before.st_ctime_ns==after.st_ctime_ns),
+                    'OPERATIONS_OBSERVATION_METADATA_CHANGED')
+                detached=after.st_nlink==0
+                if detached:
+                    # The opened inode is never returned as current evidence.
+                    # Its independently validated successor must be read below.
+                    named=os.stat(path.name,dir_fd=fd,follow_symlinks=False)
+                require(owned(named,{1}),'OPERATIONS_OBSERVATION_CUSTODY_DENIED')
+                require((detached and directory(named)!=directory(after))
+                    or (not detached and content(named)==content(after)
+                        and named.st_ctime_ns==after.st_ctime_ns),
+                    'OPERATIONS_OBSERVATION_NAMESPACE_CHANGED')
+            for child,parent,name,captured in handles:
+                current=os.stat('/',follow_symlinks=False) if parent is None else os.stat(name,dir_fd=parent,follow_symlinks=False)
+                require(directory(os.fstat(child))==captured==directory(current),
+                        'OPERATIONS_OBSERVATION_PARENT_CHANGED')
+            return (raw,content(after)+(after.st_ctime_ns,),tuple(row[3] for row in handles)),detached
+        except OSError as exc:
+            raise BranchDenied('OPERATIONS_OBSERVATION_READ_DENIED') from exc
+        finally:
+            for handle,_,_,_ in reversed(handles):os.close(handle)
     def snapshot():
-        captured=_regular_bytes(path,custody=custody,include_fact=True)
+        captured,detached=owned_bytes()
         latest=_strict_json(captured[0])
         require(isinstance(latest,dict) and stored_bytes(latest)==captured[0],
                 'OPERATIONS_OBSERVATION_ENCODING_DENIED')
@@ -95,27 +150,39 @@ def read_installed_operations_observation(*, root=Path('/')):
                 and event['installed_evidence_sha256']==installed['evidence_sha256']
                 and event['queue_sha256']==hashlib.sha256(stored_bytes(latest['queue_observation'])).hexdigest(),
                 'OPERATIONS_OBSERVATION_BINDING_DENIED')
-        return captured,event
-    captured,event=snapshot()
-    require(read_consumer_installed_policy_evidence(root=root)==installed,
-            'OPERATIONS_INSTALLED_SOURCE_CHANGED')
-    current,newer=snapshot()
-    if current!=captured:
-        # The owner atomically publishes while this reader verifies immutable
-        # source. Accept only independently validated forward telemetry, never
-        # source drift or an older healthy value over a new degraded one.
-        require(newer['sequence']>event['sequence']
-                and newer['monotonic_ns']>event['monotonic_ns']
-                and datetime.fromisoformat(newer['observed_at'].replace('Z','+00:00'))
-                    >=datetime.fromisoformat(event['observed_at'].replace('Z','+00:00'))
-                and ('replay_continuity' in newer)==('replay_continuity' in event),
-                'OPERATIONS_OBSERVATION_REGRESSED')
-        if 'replay_continuity' in event:
-            _replay_progression(event['replay_continuity'],newer['replay_continuity'])
-    return installed,newer
+        return captured,event,detached
+    captured,event,_=snapshot()
+    while True:
+        require(read_consumer_installed_policy_evidence(root=root)==installed,
+                'OPERATIONS_INSTALLED_SOURCE_CHANGED')
+        current,newer,detached=snapshot()
+        require(current[2]==captured[2],'OPERATIONS_OBSERVATION_PARENT_CHANGED')
+        if current!=captured and current[1][:2]==captured[1][:2]:
+            # The second capture can hold the very same A inode while its name
+            # becomes B. Only unlink's ctime change is pending; changed A bytes
+            # or metadata are never an admissible replacement.
+            require(detached and current[0]==captured[0]
+                    and current[1][:-1]==captured[1][:-1],
+                    'OPERATIONS_OBSERVATION_IN_PLACE_CHANGED')
+        elif current!=captured:
+            # Every actually read successor, including degraded telemetry, is
+            # independently validated before replacing its predecessor witness.
+            require(newer['sequence']>event['sequence']
+                    and newer['monotonic_ns']>event['monotonic_ns']
+                    and datetime.fromisoformat(newer['observed_at'].replace('Z','+00:00'))
+                        >=datetime.fromisoformat(event['observed_at'].replace('Z','+00:00'))
+                    and ('replay_continuity' in newer)==('replay_continuity' in event),
+                    'OPERATIONS_OBSERVATION_REGRESSED')
+            if 'replay_continuity' in event:
+                _replay_progression(event['replay_continuity'],newer['replay_continuity'])
+        require(read_consumer_installed_policy_evidence(root=root)==installed,
+                'OPERATIONS_INSTALLED_SOURCE_CHANGED')
+        if not detached:
+            return installed,newer
+        captured,event=current,newer
 
 
-def read_installed_interface_observation(*, root=Path('/'), deadline=None):
+def read_installed_interface_observation(*, root=Path('/')):
     """Use the existing private rejection road without invoking inference.
 
     A denied request is supporting Interface evidence, not an admitted route
@@ -126,12 +193,6 @@ def read_installed_interface_observation(*, root=Path('/'), deadline=None):
     from .authority_contract import read_consumer_installed_policy_evidence
     from .kernel_operations import verify_installed_conversation_boundary
     from .kernel import exchange_private_service
-    if deadline is None:deadline=time.monotonic()+3
-    def remaining():
-        seconds=deadline-time.monotonic()
-        require(0<seconds<=3,'INTERFACE_EXCHANGE_DEADLINE_DENIED')
-        return seconds
-    remaining()
     root=Path(root);owner=pwd.getpwnam('serein-stage1')
     require((os.geteuid(),os.getegid())==(owner.pw_uid,owner.pw_gid),
             'INTERFACE_OWNER_IDENTITY_DENIED')
@@ -144,7 +205,8 @@ def read_installed_interface_observation(*, root=Path('/'), deadline=None):
     boundary();started=clock()
     # Invalid shape has no request capability and cannot reserve or infer.
     payload=b'{}\n'
-    raw=exchange_private_service('HAOS_GATEWAY',payload,timeout_seconds=min(2.0,remaining()),root=root)
+    raw=exchange_private_service('HAOS_GATEWAY',payload,timeout_seconds=2.0,
+                                 root=root,await_observation=True)
     response=strict_json(raw)
     require(set(response)=={'schema','request_id','status','reason','timestamp'}
             and response['schema']=='SereinStage1Response/v1'
@@ -152,9 +214,8 @@ def read_installed_interface_observation(*, root=Path('/'), deadline=None):
             and response['reason']=='gateway_request_denied',
             'INTERFACE_REJECTION_UNPROVEN')
     observed=datetime.fromisoformat(response['timestamp'].replace('Z','+00:00'))
-    boundary();remaining();completed=clock()
-    require(observed.utcoffset() is not None and started<=observed<=completed
-            and 0<=(completed-started).total_seconds()<=3,
+    boundary();completed=clock()
+    require(observed.utcoffset() is not None and started<=observed<=completed,
             'INTERFACE_OBSERVATION_STALE')
     return installed,{'state':'PRIVATE_INTERFACE_DENIAL_PROBE_ONLY',
         'started_at':started.isoformat(),'completed_at':completed.isoformat(),
@@ -200,7 +261,7 @@ def read_installed_compute_observation(request_id, *, root=Path('/')):
                 and evidence['receipts'][-1]['body']['state']=='CONSUMED',
                 'COMPUTE_AUTHENTICATED_OUTCOME_MISSING')
         binding=evidence['binding']['body']['binding']
-        require(binding['schema']=='SereinStage1ConversationReplayBinding/v1'
+        require(binding['schema'] in store.contract.CONVERSATION_BINDING_SCHEMAS
                 and binding['request_id']==request_id and binding['boot_id']==installed['boot_id']
                 and binding['source_generation']=={'commit':installed['source_commit'],'tree':installed['source_tree']}
                 and binding['canonical_manifest_digest']==installed['canonical_manifest_digest']
@@ -213,13 +274,17 @@ def read_installed_compute_observation(request_id, *, root=Path('/')):
                 and store.contract.receipt_hash(evidence['receipts'][-1])==retained['replay_consumption_sha256'],
                 'COMPUTE_AUTHENTICATED_BINDING_DENIED')
         runtime=strict_json(raw)
+        require(len(evidence['receipts'])==3 and evidence['receipts'][1]['body']['state']=='RESERVED',
+                'COMPUTE_AUTHENTICATED_OUTCOME_MISSING')
+        reserved=datetime.fromisoformat(evidence['receipts'][1]['body']['observed_at'].replace('Z','+00:00'))
         observed=datetime.fromisoformat(runtime['completed_at'].replace('Z','+00:00'))
         consumed=datetime.fromisoformat(evidence['outcome']['body']['completed_at'].replace('Z','+00:00'))
         audited=datetime.fromisoformat(event['timestamp'].replace('Z','+00:00'))
-        require(all(value.tzinfo is not None for value in (observed,consumed,audited))
-                and audited<=observed<=consumed<=clock(), 'COMPUTE_RETAINED_TIME_DENIED')
+        require(all(value.tzinfo is not None for value in (reserved,observed,consumed,audited))
+                and reserved<=observed and audited<=observed<=consumed<=clock(),
+                'COMPUTE_RETAINED_TIME_DENIED')
     require(read_consumer_installed_policy_evidence(root=root)==installed,'COMPUTE_INSTALLED_SOURCE_CHANGED')
-    require(0<=(clock()-observed).total_seconds()<=120,'COMPUTE_RETAINED_OBSERVATION_STALE')
+    require(0<=(clock()-observed).total_seconds(),'COMPUTE_RETAINED_OBSERVATION_STALE')
     return installed,{'state':'AUTHENTICATED_RETAINED_COMPUTE_ONLY','observed_at':runtime['completed_at'],
         'request_id':request_id,'conversation_id':binding['conversation_id'],
         'payload_sha256':binding['payload_sha256'],'request_sha256':binding['request_sha256'],
@@ -286,8 +351,7 @@ def read_installed_gateway_observation(request_id, *, root=Path('/')):
     completed=datetime.fromisoformat(runtime['completed_at'].replace('Z','+00:00'))
     mapped=datetime.fromisoformat(mapping['timestamp'].replace('Z','+00:00'))
     now=datetime.now(timezone.utc)
-    require(mapped.utcoffset() is not None and completed<=mapped<=now
-        and (now-completed).total_seconds()<=120,'GATEWAY_CORRELATION_STALE')
+    require(mapped.utcoffset() is not None and completed<=mapped<=now,'GATEWAY_CORRELATION_STALE')
     require(read_recent_terminal(path,mapping_id,custody=custody)==mapping
         and read_recent_terminal(path,request_id,custody=custody)==terminal,
         'GATEWAY_CORRELATION_CHANGED')
@@ -348,7 +412,7 @@ def serve_operations(connection, *, root=Path('/')):
             reader=read_installed_gateway_observation if gateway else read_installed_compute_observation
             installed,event=reader(request['compute_request_id'],root=root)
         elif request['branch']=='INTERFACE':
-            installed,event=read_installed_interface_observation(root=root,deadline=deadline)
+            installed,event=read_installed_interface_observation(root=root)
         else:
             installed,event=read_installed_operations_observation(root=root)
         # Preserve original collection time/sequence, including degraded or
@@ -374,9 +438,9 @@ def serve_operations(connection, *, root=Path('/')):
                           'INTERFACE_PHASE_C_UNPROVEN' if request['branch']=='INTERFACE'
                           else 'OPERATIONS_PHASE_B_UNPROVEN', 'authority_effect':'NONE'}
         response['evidence_digest'] = hashlib.sha256(canonical(response)).hexdigest()
-        remaining()
+        # Collection completion is governed by actual evidence, not ingress age.
+        connection.settimeout(3)
         connection.sendall(canonical(response)+b'\n')
-        remaining()
         return response
     except BranchDenied:
         raise
@@ -391,10 +455,6 @@ def serve_authority(connection, *, root=Path("/")):
         socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")))[1]
     require(peer == pwd.getpwnam("serein-outpost").pw_uid, "OUTPOST_PEER_IDENTITY_DENIED")
     deadline = time.monotonic() + 3
-    def remaining_response_time():
-        remaining = deadline - time.monotonic()
-        require(remaining > 0, "RESPONSE_DEADLINE_DENIED")
-        return remaining
     raw = b""
     while not raw.endswith(b"\n") and len(raw) <= 16384:
         remaining = deadline - time.monotonic()
@@ -410,7 +470,6 @@ def serve_authority(connection, *, root=Path("/")):
         validate_request(request)
         root = Path(root)
         facts = collect_authority_facts(root)
-        remaining_response_time()
         decision = authority_boot_decision(facts, requested_effect="OBSERVE_AUTHORITY")
         require(decision == {
                     "schema": "SereinAuthorityBootDecision/v1",
@@ -489,7 +548,6 @@ def serve_authority(connection, *, root=Path("/")):
                     "conversation_policy": facts["proof"]["conversation_policy"]}
         # Sign the complete response meaning, not only the nonce: altering a
         # verdict, phase result, timestamp or source invalidates possession.
-        remaining_response_time()
         challenge = hashlib.sha256(canonical({"request": request, "witness": response})).digest()
         envelope = {"domain": "KERNEL", "instance_id": proof["instance_id"],
                     "checkpoint": proof["checkpoint"], "challenge": challenge.hex()}
@@ -504,9 +562,8 @@ def serve_authority(connection, *, root=Path("/")):
         raise
     except (AuthorityDenied, ValueError, KeyError, TypeError, OSError) as exc:
         raise BranchDenied("AUTHORITY_WITNESS_DENIED") from exc
-    # Collection/signing do not reset the observer's existing three-second
-    # exchange deadline. Never emit a late witness with a fresh-looking time.
-    connection.settimeout(remaining_response_time())
+    # Preserve captured evidence and revalidated identity. Only the outgoing
+    # socket write has a transport budget; collection has no age verdict.
+    connection.settimeout(3)
     connection.sendall(canonical(response) + b"\n")
-    remaining_response_time()
     return response

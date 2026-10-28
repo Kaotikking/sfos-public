@@ -48,7 +48,7 @@ def _api(path: str) -> dict:
     )
     try:
         opener = urllib.request.build_opener(_RejectRedirect())
-        with opener.open(request, timeout=15) as response:
+        with opener.open(request, timeout=None) as response:
             if response.geturl() != request.full_url:
                 raise PublicTreeHostError("PUBLIC_GIT_REDIRECT_DENIED")
             if response.status != 200:
@@ -341,7 +341,7 @@ def _installed_packages() -> dict[str, str]:
     try:
         result = subprocess.run(
             ["dpkg-query", "-W", "-f=${binary:Package}=${Version}\\n"],
-            text=True, capture_output=True, check=True, timeout=15,
+            text=True, capture_output=True, check=True,
         )
     except Exception as exc:
         raise PublicTreeHostError("HOST_PACKAGE_OBSERVATION_DENIED") from exc
@@ -356,7 +356,7 @@ def _installed_packages() -> dict[str, str]:
 
 def _gpu() -> dict[str, Any]:
     try:
-        result = subprocess.run(["nvidia-smi", "-L"], text=True, capture_output=True, check=True, timeout=15)
+        result = subprocess.run(["nvidia-smi", "-L"], text=True, capture_output=True, check=True)
     except Exception:
         return {"pci_present": False, "driver_loaded": False, "device_count": 0, "driver_packages": {}, "status": "FAIL"}
     count = len([line for line in result.stdout.splitlines() if line.strip()])

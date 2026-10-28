@@ -348,7 +348,7 @@ def match_installed_stage1_conversation(payload, *, authenticated_caller, root, 
         observed=requested.astimezone(timezone.utc).isoformat().replace('+00:00','Z')
         # This records actual installed-policy scope, never a generic signed
         # dispatch contract or worker lease. Operations still owns reservation.
-        replay_binding={'schema':'SereinStage1ConversationReplayBinding/v1',
+        replay_binding={'schema':'SereinStage1ConversationReplayBinding/v2',
             'request_id':request_id,'conversation_id':conversation['conversation_id'],
             'request_sha256':hashlib.sha256(canonical(request)).hexdigest(),
             'payload_sha256':hashlib.sha256(canonical(runtime)).hexdigest(),
@@ -361,9 +361,10 @@ def match_installed_stage1_conversation(payload, *, authenticated_caller, root, 
             'kernel_instance':policy['native_identity']['instance_id'],
             'identity_checkpoint':policy['native_identity']['checkpoint'],
             'observed_at':observed,'authority_effect':'NONE','admission_effect':'NONE'}
-        from .conversation_runtime import MAX_AGE_SECONDS
-        replay_expires=(requested+timedelta(seconds=MAX_AGE_SECONDS)).astimezone(
-            timezone.utc).isoformat().replace('+00:00','Z')
+        # Installed, read-only conversation scope is not a minted dispatch
+        # lease. Current policy/boot/source and one-use live attempt ownership
+        # are checked by Operations; historical v1 expiry remains immutable.
+        replay_expires=None
         return {'request_id':request_id,'conversation_id':conversation['conversation_id'],
             'request_sha256':hashlib.sha256(canonical(request)).hexdigest(),
             'runtime_request':runtime,'runtime_request_sha256':hashlib.sha256(canonical(runtime)).hexdigest(),

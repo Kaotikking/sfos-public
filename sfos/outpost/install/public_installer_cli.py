@@ -139,7 +139,7 @@ def fetch_exact(url: str) -> tuple[bytes, str]:
     opener = urllib.request.build_opener(_NoRedirect(), urllib.request.HTTPSHandler(context=ssl.create_default_context()))
     request = urllib.request.Request(url, headers={"Accept": "application/octet-stream", "User-Agent": "sfos-public-installer/1"})
     try:
-        with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
+        with opener.open(request, timeout=None) as response:
             final = response.geturl()
             if final != url:
                 raise TransactionError("PUBLIC_REDIRECT_DENIED")
@@ -420,7 +420,6 @@ def recorded_prepared_generation(plan_path, expected_plan_sha256, evidence,
             def accept(selector,not_before):
                 from .public_generation_transaction import read_vitals_witness
                 import time
-                deadline=time.monotonic()+30
                 while True:
                     invariants()
                     try:
@@ -432,8 +431,9 @@ def recorded_prepared_generation(plan_path, expected_plan_sha256, evidence,
                         if retirement is not None:
                             verify_retirement(full=True)
                         return result
-                    except TransactionError:
-                        if time.monotonic()>=deadline:raise
+                    except TransactionError as error:
+                        if str(error) != 'PUBLIC_WITNESS_PENDING':
+                            raise
                         time.sleep(0.5)
             io=(_GenerationFileIO(Path('/'),str(Path(receipt['path']).parent),host_time=fields['host_time'])
                 if 'host_time' in fields else _GenerationFileIO(Path('/'),str(Path(receipt['path']).parent)))
@@ -600,7 +600,6 @@ def restore_install_request(arguments):
                 raise TransactionError('PUBLIC_RETAINED_CHANGED')
             transaction.reread_prestate_receipt(Path('/'), receipt, body, public)
         def accept(selector, not_before):
-            deadline = time.monotonic() + 30
             while True:
                 invariants()
                 try:
@@ -612,8 +611,8 @@ def restore_install_request(arguments):
                         certificate_row=next(row for row in fields['immutable_rows']
                             if row['target'] == '/etc/serein/tls/serein-backend-cert.pem'))
                     return result
-                except TransactionError:
-                    if time.monotonic() >= deadline:
+                except TransactionError as error:
+                    if str(error) != 'PUBLIC_WITNESS_PENDING':
                         raise
                     time.sleep(0.5)
         io = transaction._GenerationFileIO(Path('/'), str(Path(receipt['path']).parent))

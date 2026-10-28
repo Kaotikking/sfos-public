@@ -177,10 +177,10 @@ def verify_sources(source_path: Path, keyring: Path = KEYRING) -> list[dict[str,
 
 def _run(argv: Sequence[str], *, input: bytes | None = None) -> subprocess.CompletedProcess[str]:
     if input is None:
-        return subprocess.run(list(argv), check=False, text=True, capture_output=True, timeout=30)
+        return subprocess.run(list(argv), check=False, text=True, capture_output=True)
     # Signed material must reach gpgv byte-for-byte, without text encoding or
     # newline translation. Only the command's status/diagnostic output is text.
-    result = subprocess.run(list(argv), check=False, capture_output=True, timeout=30, input=input)
+    result = subprocess.run(list(argv), check=False, capture_output=True, input=input)
     return subprocess.CompletedProcess(result.args, result.returncode,
                                        result.stdout.decode("utf-8", errors="replace"),
                                        result.stderr.decode("utf-8", errors="replace"))

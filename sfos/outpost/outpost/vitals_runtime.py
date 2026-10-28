@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import hashlib
-import math
 import os
 import re
 import stat
@@ -128,7 +127,12 @@ def _running_generation():
 
 
 def validate_kernel_vitals_projection(value, *, generation_identity, boot_id, observed_at):
-    """Check bounded supporting/candidate evidence; neither grants admission."""
+    """Validate a recorded observation, never current runtime health or admission.
+
+    The original observation time remains evidence. As in aggregate_vitals,
+    no producer TTL is specified: elapsed age does not invalidate the record.
+    Boot, source custody, generation and Host bindings remain separate checks.
+    """
     projection = validate_producer(value)
     _validate_generation_identity(generation_identity)
     details = projection["payload"]
@@ -148,7 +152,7 @@ def validate_kernel_vitals_projection(value, *, generation_identity, boot_id, ob
              and projection["perspective"] == "serein"
              and projection["claim"] in {"STAGE1_SUPPORTING_EVIDENCE_AGGREGATED", "STAGE1_READY_CANDIDATE"}
              and projection["boot_id"] == boot_id
-             and 0 <= observed_at - projection["observed_at"] <= 30
+             and 0 <= projection["observed_at"] <= observed_at
              and isinstance(details, dict) and set(details) == allowed)
     if valid:
         valid = all(details[key] == expected for key, expected in constants.items())
@@ -173,10 +177,11 @@ class VitalsRuntimeStore:
             raise VitalsRuntimeError("VITALS_TARGET_IDENTITY_DENIED")
         self.expected_subject = expected_subject
         self.expected_outpost_identity = expected_outpost_identity
-        # One full-history acquisition at a time in this shared presentation
-        # store. Other page callers receive truthful unavailable evidence;
-        # they never wait for it or reuse a prior positive Host verdict.
-        self.host = HostVitalityStore(host_root, max_readers=1)
+        # Two bounded, independent current-byte readers let the public page
+        # and Kernel's Host request progress together. Each request owns its
+        # result; overload remains truthful unavailable evidence, never a
+        # previous positive verdict. Match the Host reader's admitted capacity.
+        self.host = HostVitalityStore(host_root, max_readers=2)
         self.host_attempts = HostCollectionAttempts(host_root)
         self.producer_root = Path(producer_root)
         self.coordinator_path = self.producer_root.parent / "coordinator/current.json"
@@ -187,20 +192,17 @@ class VitalsRuntimeStore:
         # Only the presentation server enables cold-producer deferral after its
         # startup validation attempt. Other readers retain synchronous proof.
         self.defer_cold_chronology = False
-        self._presentation_acquisition = threading.Lock()
+        self._presentation_acquisition = threading.BoundedSemaphore(2)
 
-    def snapshot_for_presentation(self, *, current_boot_id: str, timeout: float):
-        """Bound observer waiting, never verification or an install lifetime.
+    def snapshot_for_presentation(self, *, current_boot_id: str):
+        """Read one complete request-owned snapshot without a time verdict.
 
-        A request owns its result. Late results are discarded, not offered to
-        subsequent callers. One worker may finish the complete synchronous
-        reader; its ownership remains held until that reader actually exits.
+        Capacity is bounded, but elapsed time never admits or rejects evidence.
+        Each accepted caller completes its own integrity/custody read and holds
+        its permit until that read exits. No prior caller's result is reused.
         """
         if not isinstance(current_boot_id, str) or not BOOT.fullmatch(current_boot_id):
             raise VitalsRuntimeError("VITALS_HOST_IDENTITY_DENIED")
-        if type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout < 0:
-            raise VitalsRuntimeError("VITALS_READ_BUDGET_DENIED")
-        deadline = time.monotonic() + timeout
 
         def unavailable():
             now = time.time()
@@ -209,38 +211,14 @@ class VitalsRuntimeStore:
                 current_boot_id, now)] for perspective in PERSPECTIVES},
                 current_boot_id=current_boot_id, generated_at=now)
 
-        # Concurrent observers share acquisition, never evidence. Waiting uses
-        # this request's existing deadline; it does not extend its read budget.
-        remaining = deadline - time.monotonic()
-        if remaining <= 0 or not self._presentation_acquisition.acquire(timeout=remaining):
+        if not self._presentation_acquisition.acquire(blocking=False):
             return unavailable()
-        if time.monotonic() >= deadline:
-            self._presentation_acquisition.release()
-            return unavailable()
-        completed = threading.Event()
-        result = []
-        finished = []
-
-        def acquire():
-            try:
-                result.append(self.snapshot(current_boot_id=current_boot_id))
-            except (OSError, ValueError, TypeError):
-                pass  # No partial evidence or prior positive result is reused.
-            finally:
-                finished.append(time.monotonic())
-                self._presentation_acquisition.release()
-                completed.set()
-
         try:
-            worker = threading.Thread(target=acquire, name="outpost-presentation-read", daemon=True)
-            worker.start()
-        except Exception:
+            return self.snapshot(current_boot_id=current_boot_id)
+        except (OSError, ValueError, TypeError):
+            return unavailable()
+        finally:
             self._presentation_acquisition.release()
-            return unavailable()
-        if (not completed.wait(max(0.0, deadline - time.monotonic())) or not result
-                or finished[0] > deadline):
-            return unavailable()
-        return result[0]
 
     def chronology_needs_validation(self):
         # This is not a verdict. A prefix/rejection only selects the normal
@@ -335,7 +313,7 @@ class VitalsRuntimeStore:
     def snapshot(self, *, current_boot_id: str | None = None) -> dict[str, Any]:
         # Independent current-byte reads may overlap; their validation cannot
         # be skipped or replaced with an earlier request's result. Presentation
-        # still owns one bounded acquisition and discards the whole late result.
+        # owns each bounded acquisition and discards the whole late result.
         with ExitStack() as readers:
             producers = None
             attempt_reader = None

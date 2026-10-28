@@ -26,19 +26,14 @@ DOMAIN_STATE_PATH = Path("/var/lib/serein-outpost/domains/state.json")
 RECOVERY_PATH = Path("/var/lib/serein-outpost/recovery/current.json")
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 MAX_REQUEST_BYTES = 4096
-REQUEST_TIMEOUT_SECONDS = 2.0  # Same bounded local exchange as the existing edge.
 
 
 class PresentationHandler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
         try:
-            deadline = time.monotonic() + REQUEST_TIMEOUT_SECONDS
+            self.connection.settimeout(None)
             raw = b""
             while not raw.endswith(b"\n") and len(raw) <= MAX_REQUEST_BYTES:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("PRESENTATION_REQUEST_TIMEOUT")
-                self.connection.settimeout(remaining)
                 block = self.connection.recv(MAX_REQUEST_BYTES + 1 - len(raw))
                 if not block:
                     break
@@ -48,13 +43,12 @@ class PresentationHandler(socketserver.StreamRequestHandler):
                     or not isinstance(request, dict) or set(request) != {"method", "path", "accept"}
                     or not all(isinstance(value, str) for value in request.values())):
                 raise ValueError("REQUEST_DENIED")
+            # The frame is complete. Evidence verification has no time limit;
+            # bounded request/read slots remain held until its work completes.
+            self.connection.settimeout(None)
             result = present(self.server.host_vitality_store,
                              request["method"], request["path"], request["accept"],
-                             BOOT_ID_PATH.read_text(encoding="ascii").strip(),
-                             # Reserve response encoding/flush time inside the
-                             # existing exchange deadline. Slow evidence means
-                             # a readable unavailable witness, never old success.
-                             snapshot_timeout=max(0.0, deadline - time.monotonic() - 0.25))
+                             BOOT_ID_PATH.read_text(encoding="ascii").strip())
             response = {"status":result.status, "content_type":result.content_type,
                         "headers":list(result.headers),
                         "body_base64":base64.b64encode(result.body).decode("ascii")}

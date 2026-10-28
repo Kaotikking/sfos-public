@@ -45,6 +45,9 @@ OTHER_KERNEL_UNITS=('serein-observation-audit.service','serein-observation-audit
 OPERATIONS_SERVICES=('serein-kernel-operations-heartbeat.service','serein-observation-audit.service')
 OPERATIONS_ENDPOINT=('serein-kernel-operations-api.service','serein-kernel-operations-api.socket')
 HAOS_GATEWAY_ENDPOINT=('serein-kernel-client-gateway@haos.service','serein-kernel-client-gateway-haos.socket')
+# Exact installed Stage-1 owners; read-only incarnation evidence, never activation.
+STAGE1_CURRENT_SERVICES=(AUTHORITY_UNITS[:1]+OPERATIONS_SERVICES+OPERATIONS_ENDPOINT[:1]
+                         +('serein-conversation-runtime.service',)+HAOS_GATEWAY_ENDPOINT[:1])
 SUCCESSOR_FAILURE_UNITS=(AUTHORITY_UNITS[0],)+OPERATIONS_SERVICES+OPERATIONS_ENDPOINT+RESIDENCY_UNITS+HAOS_GATEWAY_ENDPOINT
 OPERATIONS_UNITS=('serein-kernel-operations-api.socket','serein-kernel-operations-api.service',
                   'serein-kernel-operations-heartbeat.service',
@@ -406,7 +409,7 @@ def read_retirement_dependencies():
   try:
    reply=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
     '--property='+','.join(('Id','LoadState')+properties),'--',name],capture_output=True,text=True,
-    timeout=15,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+    check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
     stdin=subprocess.DEVNULL,close_fds=True)
   except (OSError,subprocess.SubprocessError) as exc:
    raise RunnerDenied('KERNEL_RETIREMENT_DEPENDENCY_READ_DENIED') from exc
@@ -2389,7 +2392,7 @@ def prepare_authority_observation(plan,receipt,request,*,root=Path('/'),source=S
 
 def consume_authority_observation(plan,receipt,request,raw,*,root=Path('/'),source=SOURCE,
                                   host_path=HOST_STATE,verify_path=VERIFY_KEY,
-                                  source_receipt_path=SOURCE_RECEIPT):
+                                  source_receipt_path=SOURCE_RECEIPT,owner):
  """Readback half of the installer/observer handoff; never start or sign.
 
  The caller must obtain raw from trusted Outpost observer execution. This
@@ -2400,24 +2403,28 @@ def consume_authority_observation(plan,receipt,request,raw,*,root=Path('/'),sour
  from datetime import datetime,timezone
  from outpost.kernel_direct_witness import validate_authority_observation
  plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt));request=strict_json(canonical(request))
+ deny(not isinstance(owner,_KernelLifecycleOwnership),'KERNEL_OBSERVER_OWNER_REQUIRED')
+ deny(owner.expected_observation(raw)!=[request],'KERNEL_OBSERVER_ACQUISITION_DENIED')
  arguments=dict(root=root,source=source,host_path=host_path,verify_path=verify_path,
                 source_receipt_path=source_receipt_path)
  envelope=prepare_authority_observation(plan,receipt,request,**arguments)
+ deny(owner.expected_observation(raw)!=[request],'KERNEL_OBSERVER_ACQUISITION_DENIED')
  result=validate_authority_observation(raw,**envelope,boot_id=plan['current_boot_id'],
      observed_at=datetime.now(timezone.utc),anchor=regular(verify_path),
-     host_machine_id=plan['host_identity']['machine_id'])
+     host_machine_id=plan['host_identity']['machine_id'], acquisition_verifier=owner.acquisition_verifier(raw))
  deny(prepare_authority_observation(plan,receipt,request,**arguments)!=envelope,
       'KERNEL_OBSERVATION_PRESTATE_CHANGED')
- # Source/file revalidation may outlast the subject's freshness window.
- # Returning the initially valid result after that delay would renew evidence.
+ deny(owner.expected_observation(raw)!=[request],'KERNEL_OBSERVER_ACQUISITION_DENIED')
+ # Recheck exact owner-bound original bytes after source validation.
+ # Completion time does not renew evidence or grant request execution.
  return validate_authority_observation(raw,**envelope,boot_id=plan['current_boot_id'],
      observed_at=datetime.now(timezone.utc),anchor=regular(verify_path),
-     host_machine_id=plan['host_identity']['machine_id'])
+     host_machine_id=plan['host_identity']['machine_id'], acquisition_verifier=owner.acquisition_verifier(raw))
 
 
 def prepare_operations_observation(plan,receipt,authority_observation,*,root=Path('/'),source=SOURCE,
                                   host_path=HOST_STATE,verify_path=VERIFY_KEY,
-                                  source_receipt_path=SOURCE_RECEIPT):
+                                  source_receipt_path=SOURCE_RECEIPT,owner):
  """Bind public observer input to installed files, not Operations self-report.
 
  Reuse the existing signed-plan/file/Host/identity handoff. The caller owns
@@ -2439,7 +2446,10 @@ def prepare_operations_observation(plan,receipt,authority_observation,*,root=Pat
  # This handoff already performs the complete before/after installed-source
  # verification. Nesting the Authority consumer would repeat it three times
  # and can consume the signed predecessor's entire freshness window.
- envelope=prepare_authority_observation(plan,receipt,prior['request'],**arguments)
+ deny(not isinstance(owner,_KernelLifecycleOwnership),'KERNEL_OBSERVER_OWNER_REQUIRED')
+ authority_requests=owner.expected_observation(authority_observation)
+ deny(len(authority_requests)!=1,'KERNEL_AUTHORITY_PREDECESSOR_DENIED')
+ envelope=prepare_authority_observation(plan,receipt,authority_requests[0],**arguments)
  # The shared handoff verifies the exact signed public evidence in the
  # install receipt. Re-read to bind the digest to those same verified bytes.
  deny(regular(path,expected_custody=(0,0,0o644))!=before,
@@ -2448,15 +2458,16 @@ def prepare_operations_observation(plan,receipt,authority_observation,*,root=Pat
  # Never let the subsequent Operations observation renew signed Authority.
  observed=validate_authority_observation(authority_observation,**envelope,boot_id=plan['current_boot_id'],
      observed_at=datetime.now(timezone.utc),anchor=regular(verify_path),
-     host_machine_id=plan['host_identity']['machine_id'])
+     host_machine_id=plan['host_identity']['machine_id'], acquisition_verifier=owner.acquisition_verifier(authority_observation))
  deny(observed['result']!='AUTHORITY_PHASE_A_OBSERVED','KERNEL_AUTHORITY_PREDECESSOR_DENIED')
  return {'source':envelope['source'],'identity':envelope['identity'],
-         'installed_evidence_sha256':sha(before),'authority_observation':observed}
+         'installed_evidence_sha256':sha(before),'authority_observation':observed,
+         'authority_request':envelope['request'],'authority_observation_sha256':sha(authority_observation)}
 
 
 def consume_operations_observation(plan,receipt,authority_observation,raw,*,root=Path('/'),source=SOURCE,
                                   host_path=HOST_STATE,verify_path=VERIFY_KEY,
-                                  source_receipt_path=SOURCE_RECEIPT):
+                                  source_receipt_path=SOURCE_RECEIPT,owner):
  """Consume only the existing trusted observer's output, not uploaded proof.
 
  Recheck the installed closure and signed Authority predecessor on both sides.
@@ -2468,7 +2479,7 @@ def consume_operations_observation(plan,receipt,authority_observation,raw,*,root
  plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt))
  arguments=dict(root=root,source=source,host_path=host_path,verify_path=verify_path,
                 source_receipt_path=source_receipt_path)
- envelope=prepare_operations_observation(plan,receipt,authority_observation,**arguments)
+ envelope=prepare_operations_observation(plan,receipt,authority_observation,**arguments,owner=owner)
  deny(not isinstance(raw,bytes) or not 0<len(raw)<=65536,'KERNEL_OPERATIONS_OUTPUT_DENIED')
  value=strict_json(raw)
  required={'result','subject_evidence','evidence_authentication','phase_b','admission',
@@ -2476,7 +2487,10 @@ def consume_operations_observation(plan,receipt,authority_observation,raw,*,root
            'subject_bytes_sha256'}
  deny(not isinstance(value,dict) or set(value)!=required or canonical(value)!=raw,
       'KERNEL_OPERATIONS_OUTPUT_DENIED')
- request=value['request']
+ requests=owner.expected_observation(raw)
+ deny(len(requests)!=1,'KERNEL_OBSERVER_EXPECTATION_DENIED')
+ request=requests[0]
+ deny(value['request']!=request,'KERNEL_OBSERVER_ACQUISITION_DENIED')
  deny(not isinstance(request,dict) or request.get('previous_evidence_digest')
       !=envelope['authority_observation']['observation_digest'],
       'KERNEL_OPERATIONS_PREDECESSOR_DENIED')
@@ -2485,30 +2499,30 @@ def consume_operations_observation(plan,receipt,authority_observation,raw,*,root
   try:stamp=datetime.fromisoformat(value['observed_at'].replace('Z','+00:00'))
   except (ValueError,TypeError,AttributeError) as exc:
    raise RunnerDenied('KERNEL_OPERATIONS_CLOCK_DENIED') from exc
-  deny(stamp.utcoffset() is None or not 0<=(now-stamp).total_seconds()<=30,
+  deny(stamp.utcoffset() is None or not 0<=(now-stamp).total_seconds(),
        'KERNEL_OPERATIONS_STALE')
   subject=canonical(value['subject_evidence'])
   for clock in (stamp,now):
    compared=compare_operations_response(subject,request=request,source=envelope['source'],
        boot_id=plan['current_boot_id'],installed_evidence_sha256=envelope['installed_evidence_sha256'],
-       observed_at=clock)
+       observed_at=clock, acquisition_verifier=owner.acquisition_verifier(raw))
   expected={**compared,'evidence_authentication':'ROOT_CREATED_PRIVATE_LISTENER',
             'native_identity_possession':'NOT_ESTABLISHED_BY_OPERATIONS','request':request,
             'observed_at':value['observed_at'],'subject_bytes_sha256':sha(subject)}
   deny(value!=expected,'KERNEL_OPERATIONS_OUTPUT_DENIED')
   return value
  validate()
- deny(prepare_operations_observation(plan,receipt,authority_observation,**arguments)!=envelope,
+ deny(prepare_operations_observation(plan,receipt,authority_observation,**arguments,owner=owner)!=envelope,
       'KERNEL_OBSERVATION_PRESTATE_CHANGED')
  return validate()
 
 
-def prepare_interface_observation(plan,receipt,authority_observation,operations):
+def prepare_interface_observation(plan,receipt,authority_observation,operations,*,owner):
  """Same trusted handoff, bound to the original complete Operations window."""
  from datetime import datetime,timezone
  boot=current_boot();controls=operations.get('service_controls')
  deny(read_operations_service_controls()!=controls,'KERNEL_OPERATIONS_PROCESS_CHANGED')
- envelope=prepare_operations_observation(plan,receipt,authority_observation)
+ envelope=prepare_operations_observation(plan,receipt,authority_observation,owner=owner)
  # The shared handoff already brackets the complete source/installed closure.
  # Reuse its exact envelope for the original Operations samples instead of
  # repeating the same source scan inside validate_operations_lifecycle.
@@ -2516,14 +2530,14 @@ def prepare_interface_observation(plan,receipt,authority_observation,operations)
       'KERNEL_OPERATIONS_PROCESS_CHANGED')
  anchor=regular(VERIFY_KEY);now=datetime.now(timezone.utc)
  verified=_compare_operations_lifecycle(plan,authority_observation,
-     operations.get('observations'),controls,envelope=envelope,boot=boot,anchor=anchor,now=now)
+     operations.get('observations'),controls,envelope=envelope,boot=boot,anchor=anchor,now=now,owner=owner)
  deny(verified!=operations or verified['source']!=envelope['source']
       or verified['installed_evidence_sha256']!=envelope['installed_evidence_sha256'],
       'KERNEL_INTERFACE_OPERATIONS_PREDECESSOR_DENIED')
  return {**envelope,'interface_predecessor':sha(canonical(operations))}
 
 
-def _compare_interface_observation(plan,envelope,raw):
+def _compare_interface_observation(plan,envelope,raw,*,owner):
  """Compare the original Interface sample after source preparation finishes."""
  from datetime import datetime,timezone
  from outpost.kernel_direct_witness import compare_interface_response
@@ -2532,18 +2546,21 @@ def _compare_interface_observation(plan,envelope,raw):
  required={'result','subject_evidence','evidence_authentication','phase_c','admission',
            'stage1','authority_effect','native_identity_possession','request','observed_at','subject_bytes_sha256'}
  deny(set(value)!=required or canonical(value)!=raw,'KERNEL_INTERFACE_OUTPUT_DENIED')
- request=value['request']
+ requests=owner.expected_observation(raw)
+ deny(len(requests)!=1,'KERNEL_OBSERVER_EXPECTATION_DENIED')
+ request=requests[0]
+ deny(value['request']!=request,'KERNEL_OBSERVER_ACQUISITION_DENIED')
  deny(not isinstance(request,dict) or request.get('previous_evidence_digest')!=envelope['interface_predecessor'],
       'KERNEL_INTERFACE_PREDECESSOR_DENIED')
  def validate():
   now=datetime.now(timezone.utc)
   try:stamp=datetime.fromisoformat(value['observed_at'].replace('Z','+00:00'))
   except (ValueError,TypeError,AttributeError) as exc:raise RunnerDenied('KERNEL_INTERFACE_CLOCK_DENIED') from exc
-  deny(stamp.utcoffset() is None or not 0<=(now-stamp).total_seconds()<=30,'KERNEL_INTERFACE_STALE')
+  deny(stamp.utcoffset() is None or not 0<=(now-stamp).total_seconds(),'KERNEL_INTERFACE_STALE')
   subject=canonical(value['subject_evidence'])
   for clock in (stamp,now):
    compared=compare_interface_response(subject,request=request,source=envelope['source'],
-       boot_id=plan['current_boot_id'],installed_evidence_sha256=envelope['installed_evidence_sha256'],observed_at=clock)
+       boot_id=plan['current_boot_id'],installed_evidence_sha256=envelope['installed_evidence_sha256'],observed_at=clock, acquisition_verifier=owner.acquisition_verifier(raw))
   expected={**compared,'evidence_authentication':'ROOT_CREATED_PRIVATE_LISTENER',
             'native_identity_possession':'NOT_ESTABLISHED_BY_INTERFACE','request':request,
             'observed_at':value['observed_at'],'subject_bytes_sha256':sha(subject)}
@@ -2552,17 +2569,17 @@ def _compare_interface_observation(plan,envelope,raw):
  return validate()
 
 
-def consume_interface_observation(plan,receipt,authority_observation,operations,raw):
+def consume_interface_observation(plan,receipt,authority_observation,operations,raw,*,owner):
  """Independent negative Interface witness, not Phase-C admission."""
- envelope=prepare_interface_observation(plan,receipt,authority_observation,operations)
- _compare_interface_observation(plan,envelope,raw)
- deny(prepare_interface_observation(plan,receipt,authority_observation,operations)!=envelope,
+ envelope=prepare_interface_observation(plan,receipt,authority_observation,operations,owner=owner)
+ _compare_interface_observation(plan,envelope,raw,owner=owner)
+ deny(prepare_interface_observation(plan,receipt,authority_observation,operations,owner=owner)!=envelope,
       'KERNEL_OBSERVATION_PRESTATE_CHANGED')
- return _compare_interface_observation(plan,envelope,raw)
+ return _compare_interface_observation(plan,envelope,raw,owner=owner)
 
 
-def observe_installed_interface(plan,receipt,authority_observation,operations):
- return _observe_installed_branch(plan,receipt,(authority_observation,operations),branch='INTERFACE')
+def observe_installed_interface(plan,receipt,authority_observation,operations,*,owner):
+ return _observe_installed_branch(plan,receipt,(authority_observation,operations),branch='INTERFACE',owner=owner)
 
 
 def _compute_expectation(expectation):
@@ -2595,15 +2612,15 @@ def _compute_model(expectation):
  return expectation
 
 
-def prepare_compute_observation(plan,receipt,authority_observation,operations,interface,expectation):
+def prepare_compute_observation(plan,receipt,authority_observation,operations,interface,expectation,*,owner):
  """Same owner handoff after A/O/I; expectations belong to the enclosing probe.
 
  The complete owner must bind the request/model/provider recipe before its
  single conversation. Neither this reader nor its evidence performs inference.
  """
  expectation=_compute_expectation(expectation)
- envelope=prepare_interface_observation(plan,receipt,authority_observation,operations)
- verified=_compare_interface_observation(plan,envelope,canonical(interface))
+ envelope=prepare_interface_observation(plan,receipt,authority_observation,operations,owner=owner)
+ verified=_compare_interface_observation(plan,envelope,canonical(interface),owner=owner)
  deny(verified!=interface,'KERNEL_COMPUTE_INTERFACE_PREDECESSOR_DENIED')
  return {**envelope,'interface_predecessor':sha(canonical(interface)),'compute_expectation':expectation}
 
@@ -2644,14 +2661,17 @@ def _bind_compute_model(plan,source,expectation=None):
  return expectation
 
 
-def consume_compute_observation(plan,receipt,authority_observation,operations,interface,expectation,raw):
+def consume_compute_observation(plan,receipt,authority_observation,operations,interface,expectation,raw,*,owner):
  from datetime import datetime,timezone
  from outpost.kernel_direct_witness import compare_retained_compute_response
- envelope=prepare_compute_observation(plan,receipt,authority_observation,operations,interface,expectation)
+ envelope=prepare_compute_observation(plan,receipt,authority_observation,operations,interface,expectation,owner=owner)
+ deny(len(owner.expected_observation(raw))!=1,'KERNEL_OBSERVER_EXPECTATION_DENIED')
  deny(not isinstance(raw,bytes) or not 0<len(raw)<=65536,'KERNEL_COMPUTE_OUTPUT_DENIED')
  value=strict_json(raw)
  deny(not isinstance(value,dict) or canonical(value)!=raw,'KERNEL_COMPUTE_OUTPUT_DENIED')
- request=value.get('request')
+ requests=owner.expected_observation(raw)
+ request=requests[-1]
+ deny(value.get('request')!=request,'KERNEL_OBSERVER_ACQUISITION_DENIED')
  deny(not isinstance(request,dict) or request.get('previous_evidence_digest')!=envelope['interface_predecessor'],
       'KERNEL_COMPUTE_PREDECESSOR_DENIED')
  def validate():
@@ -2664,18 +2684,18 @@ def consume_compute_observation(plan,receipt,authority_observation,operations,in
   # result never renews those prerequisites; compare their original bytes
   # after the last potentially blocking input read, without another scan.
   original_operations=_compare_operations_lifecycle(plan,authority_observation,
-      operations['observations'],controls,envelope=envelope,boot=boot,anchor=anchor,now=now)
+      operations['observations'],controls,envelope=envelope,boot=boot,anchor=anchor,now=now,owner=owner)
   deny(original_operations!=operations,'KERNEL_COMPUTE_OPERATIONS_PREDECESSOR_DENIED')
   original_interface=_compare_interface_observation(plan,
-      {**envelope,'interface_predecessor':sha(canonical(operations))},canonical(interface))
+      {**envelope,'interface_predecessor':sha(canonical(operations))},canonical(interface),owner=owner)
   deny(original_interface!=interface,'KERNEL_COMPUTE_INTERFACE_PREDECESSOR_DENIED')
   try:stamp=datetime.fromisoformat(value['observed_at'].replace('Z','+00:00'))
   except (ValueError,TypeError,KeyError,AttributeError) as exc:raise RunnerDenied('KERNEL_COMPUTE_CLOCK_DENIED') from exc
-  deny(stamp.utcoffset() is None or not 0<=(now-stamp).total_seconds()<=30,'KERNEL_COMPUTE_STALE')
+  deny(stamp.utcoffset() is None or not 0<=(now-stamp).total_seconds(),'KERNEL_COMPUTE_STALE')
   subject=canonical(value['subject_evidence'])
   compared=compare_retained_compute_response(subject,query=request,source=envelope['source'],
       installed_evidence_sha256=envelope['installed_evidence_sha256'],boot_id=plan['current_boot_id'],
-      observed_at=now,host_state=host,**envelope['compute_expectation'])
+      observed_at=now,host_state=host,**envelope['compute_expectation'], acquisition_verifier=owner.acquisition_verifier(raw))
   expected={**compared,'evidence_authentication':'ROOT_CREATED_PRIVATE_LISTENER',
       'native_identity_possession':'NOT_ESTABLISHED_BY_OPERATIONS','request':request,
       'observed_at':value['observed_at'],'subject_bytes_sha256':sha(subject)}
@@ -2689,11 +2709,11 @@ def consume_compute_observation(plan,receipt,authority_observation,operations,in
  return validate()
 
 
-def observe_installed_compute(plan,receipt,authority_observation,operations,interface,expectation):
- return _observe_installed_branch(plan,receipt,(authority_observation,operations,interface,expectation),branch='COMPUTE')
+def observe_installed_compute(plan,receipt,authority_observation,operations,interface,expectation,*,owner):
+ return _observe_installed_branch(plan,receipt,(authority_observation,operations,interface,expectation),branch='COMPUTE',owner=owner)
 
 
-def prepare_gateway_observation(plan,receipt,authority_observation,operations,interface,expectation):
+def prepare_gateway_observation(plan,receipt,authority_observation,operations,interface,expectation,*,owner):
  """Same private observer, with metadata from the governed HAOS API proxy.
 
  No new signer or caller PASS. Native acquisition authentication is a separate
@@ -2720,26 +2740,32 @@ def prepare_gateway_observation(plan,receipt,authority_observation,operations,in
       or expectation['haos_event']['rounds']!=len(prior)+1,
       'GATEWAY_EXPECTATION_DENIED')
  deny(len(canonical(expectation))>16384,'GATEWAY_EXPECTATION_BOUND_DENIED')
- envelope=prepare_interface_observation(plan,receipt,authority_observation,operations)
- verified=_compare_interface_observation(plan,envelope,canonical(interface))
+ envelope=prepare_interface_observation(plan,receipt,authority_observation,operations,owner=owner)
+ verified=_compare_interface_observation(plan,envelope,canonical(interface),owner=owner)
  deny(verified!=interface,'KERNEL_COMPUTE_INTERFACE_PREDECESSOR_DENIED')
  return {**envelope,'interface_predecessor':sha(canonical(interface)),
          'gateway_expectation':{**expectation,**_bind_compute_model(plan,SOURCE)}}
 
 
-def consume_gateway_observation(plan,receipt,authority_observation,operations,interface,expectation,raw):
+def consume_gateway_observation(plan,receipt,authority_observation,operations,interface,expectation,raw,*,owner):
  from datetime import datetime,timezone
  from outpost.kernel_direct_witness import compare_gateway_correlation_response
- envelope=prepare_gateway_observation(plan,receipt,authority_observation,operations,interface,expectation)
+ envelope=prepare_gateway_observation(plan,receipt,authority_observation,operations,interface,expectation,owner=owner)
  deny(not isinstance(raw,bytes) or not 0<len(raw)<=65536,'GATEWAY_OUTPUT_DENIED')
  value=strict_json(raw)
  deny(not isinstance(value,dict) or canonical(value)!=raw,'GATEWAY_OUTPUT_DENIED')
  expected_gateway=envelope['gateway_expectation']
- request=value.get('request')
+ requests=owner.expected_observation(raw)
+ request=requests[-1]
+ deny(value.get('request')!=request,'KERNEL_OBSERVER_ACQUISITION_DENIED')
  deny(not isinstance(request,dict) or request.get('previous_evidence_digest')!=envelope['interface_predecessor']
       or request.get('compute_request_id')!=expected_gateway['compute_request_id'],
       'GATEWAY_PREDECESSOR_DENIED')
  prior_rounds=value.get('prior_rounds',[])
+ deny(not isinstance(prior_rounds,list)
+      or any(not isinstance(row,dict) for row in prior_rounds)
+      or [row.get('query') for row in prior_rounds]!=requests[:-1],
+      'KERNEL_OBSERVER_ACQUISITION_DENIED')
  prior_ids=expected_gateway.get('prior_compute_request_ids',[])
  deny(not isinstance(prior_rounds,list) or len(prior_rounds)!=len(prior_ids)
       or any(not isinstance(row,dict) or set(row)!={'response','query'}
@@ -2754,23 +2780,23 @@ def consume_gateway_observation(plan,receipt,authority_observation,operations,in
       'KERNEL_OPERATIONS_PROCESS_CHANGED')
  now=datetime.now(timezone.utc)
  deny(_compare_operations_lifecycle(plan,authority_observation,operations['observations'],
-      controls,envelope=envelope,boot=boot,anchor=anchor,now=now)!=operations,
+      controls,envelope=envelope,boot=boot,anchor=anchor,now=now,owner=owner)!=operations,
       'KERNEL_COMPUTE_OPERATIONS_PREDECESSOR_DENIED')
  deny(_compare_interface_observation(plan,
-      {**envelope,'interface_predecessor':sha(canonical(operations))},canonical(interface))!=interface,
+      {**envelope,'interface_predecessor':sha(canonical(operations))},canonical(interface),owner=owner)!=interface,
       'KERNEL_COMPUTE_INTERFACE_PREDECESSOR_DENIED')
  # Timestamp sampled after prerequisite reads. No returned timestamp renews
  # the actual native conversation or the earlier Authority/O/I evidence.
  now=datetime.now(timezone.utc)
  try:stamp=datetime.fromisoformat(value['observed_at'].replace('Z','+00:00'))
  except (ValueError,TypeError,KeyError,AttributeError) as exc:raise RunnerDenied('GATEWAY_CLOCK_DENIED') from exc
- deny(stamp.utcoffset() is None or not 0<=(now-stamp).total_seconds()<=30,'GATEWAY_STALE')
+ deny(stamp.utcoffset() is None or not 0<=(now-stamp).total_seconds(),'GATEWAY_STALE')
  subject=canonical(value['subject_evidence'])
  compared=compare_gateway_correlation_response(subject,query=request,source=envelope['source'],
      installed_evidence_sha256=envelope['installed_evidence_sha256'],boot_id=boot,observed_at=now,
      prior_rounds=prior_rounds,
      **{k:v for k,v in envelope['gateway_expectation'].items()
-        if k not in {'compute_request_id','prior_compute_request_ids'}})
+        if k not in {'compute_request_id','prior_compute_request_ids'}}, acquisition_verifier=owner.acquisition_verifier(raw))
  expected={**compared,'evidence_authentication':'ROOT_CREATED_PRIVATE_LISTENER',
      'haos_evidence_authentication':'SEPARATE_REQUIRED',
      'native_identity_possession':'NOT_ESTABLISHED_BY_OPERATIONS','request':request,
@@ -2779,10 +2805,10 @@ def consume_gateway_observation(plan,receipt,authority_observation,operations,in
  return value
 
 
-def observe_installed_gateway(plan,receipt,authority_observation,operations,interface,expectation):
+def observe_installed_gateway(plan,receipt,authority_observation,operations,interface,expectation,*,owner):
  """Read-only existing Outpost identity/launcher road, never a domain effect."""
  return _observe_installed_branch(plan,receipt,
-     (authority_observation,operations,interface,expectation),branch='GATEWAY')
+     (authority_observation,operations,interface,expectation),branch='GATEWAY',owner=owner)
 
 
 def read_authority_unit_prestate(*,cleanup=False):
@@ -3001,7 +3027,7 @@ def _failed_construction(root,source,receipt_path,expected,*,retained_lock=None)
    loaded=tuple(name for name in names if before[name]['LoadState']=='loaded')
    if loaded:
     subprocess.run(['/usr/bin/systemctl','--no-ask-password','--job-mode=replace','stop',*loaded],
-        check=True,timeout=90,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+        check=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
    stopped.update(names);units_boundary()
   def inactive_boundary():
@@ -3016,7 +3042,7 @@ def _failed_construction(root,source,receipt_path,expected,*,retained_lock=None)
   deny(result.get('status')!='ROLLBACK_COMPLETE' or result.get('foreign_targets_preserved'),
        'KERNEL_RECOVERY_COMPENSATION_UNPROVEN')
   material_boundary()
-  subprocess.run(['/usr/bin/systemctl','--no-ask-password','daemon-reload'],check=True,timeout=90,
+  subprocess.run(['/usr/bin/systemctl','--no-ask-password','daemon-reload'],check=True,
       stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
       close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
   material_boundary()
@@ -3049,7 +3075,7 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,r
       or type(residency_schedule) is not bool or (residency_schedule and names!=RESIDENCY_UNITS)
       or (service_controls and (retirement_controls or retirement_prestate))
       or (service_controls and allow_transitional) or
-      (names not in (OPERATIONS_SERVICES,OPERATIONS_ENDPOINT[:1]) if service_controls else names not in (AUTHORITY_UNITS,OTHER_KERNEL_UNITS,RESIDENCY_UNITS)),
+      (names not in (OPERATIONS_SERVICES,OPERATIONS_ENDPOINT[:1],STAGE1_CURRENT_SERVICES) if service_controls else names not in (AUTHORITY_UNITS,OTHER_KERNEL_UNITS,RESIDENCY_UNITS)),
       'KERNEL_UNIT_SET_DENIED')
  properties=('Id','LoadState','ActiveState','SubState','UnitFileState',
              'FragmentPath','DropInPaths','NeedDaemonReload')
@@ -3067,7 +3093,7 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,r
   try:
    result=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
        '--property='+','.join(selected_properties),name],capture_output=True,text=True,
-       timeout=15,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+       check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
        stdin=subprocess.DEVNULL,close_fds=True)
   except (OSError,subprocess.SubprocessError) as exc:
    raise RunnerDenied('KERNEL_AUTHORITY_UNIT_READ_DENIED') from exc
@@ -3087,7 +3113,7 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,r
    try:
     detailed=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
         '--property='+','.join(selected_properties+('LoadError',)),name],
-        capture_output=True,text=True,timeout=15,check=True,
+        capture_output=True,text=True,check=True,
         env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},stdin=subprocess.DEVNULL,close_fds=True)
    except (OSError,subprocess.SubprocessError) as exc:
     raise RunnerDenied('KERNEL_AUTHORITY_UNIT_READ_DENIED') from exc
@@ -3146,7 +3172,8 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,r
         or (value['InvocationID']!='' and not re.fullmatch(r'[0-9a-f]{32}',value['InvocationID'])),
         'KERNEL_OPERATIONS_CONTROL_SHAPE_DENIED')
    if value['LoadState']=='loaded':
-    deny(value['User']!='serein-stage1' or value['Group']!='serein-stage1'
+    expected_account='root' if name==AUTHORITY_UNITS[0] else 'serein-stage1'
+    deny(value['User']!=expected_account or value['Group']!=expected_account
          or not value['Restart'] or not value['RestartUSec'] or not value['Result']
          or not value['KillMode'],'KERNEL_OPERATIONS_CONTROL_IDENTITY_DENIED')
     if value['ActiveState']=='active':
@@ -3156,7 +3183,7 @@ def _read_kernel_units(names,*,service_controls=False,allow_transitional=False,r
  return captured
 
 
-def observe_installed_authority(plan,receipt,request):
+def observe_installed_authority(plan,receipt,request,*,owner):
  """Execute the existing read-only observer, never start its Kernel subject.
 
  Called only by the governed root installer after the complete-domain owner
@@ -3164,7 +3191,7 @@ def observe_installed_authority(plan,receipt,request):
  sign, admit, change a selector, or create a service. Public inputs and bounded
  public output cross the existing root-installer / Outpost-observer boundary.
  """
- return _observe_installed_branch(plan,receipt,request,branch='AUTHORITY')
+ return _observe_installed_branch(plan,receipt,request,branch='AUTHORITY',owner=owner)
 
 
 class _KernelLifecycleOwnership:
@@ -3175,6 +3202,83 @@ class _KernelLifecycleOwnership:
  """
  def __init__(self):
   self.cleanups=[];self.checks=[];self.closed=False;self.failure=None
+  # Private acquisition expectations belong to this execution, never to an
+  # uploaded receipt or the public witness. Keep exact child bytes bound to
+  # the independently created challenges through all later comparisons.
+  self.observations={};self.observation_requests=set();self.observation_nonces=set()
+  self.pending_observations=set()
+ def reserve_observation(self,requests):
+  deny(self.closed or not isinstance(requests,list) or not requests,
+       'KERNEL_OBSERVER_EXPECTATION_DENIED')
+  deny(any(not isinstance(item,dict) for item in requests),
+       'KERNEL_OBSERVER_EXPECTATION_DENIED')
+  requests=strict_json(canonical({'requests':requests}))['requests']
+  ids=[item.get('request_id') for item in requests]
+  nonces=[item.get('nonce') for item in requests]
+  deny(any(not isinstance(value,str) or not value for value in ids+nonces)
+       or len(set(ids))!=len(ids) or len(set(nonces))!=len(nonces)
+       or bool(set(ids)&self.observation_requests)
+       or bool(set(nonces)&self.observation_nonces),'KERNEL_OBSERVER_EXPECTATION_DENIED')
+  self.observation_requests.update(ids);self.observation_nonces.update(nonces)
+  self.pending_observations.add(canonical({'requests':requests}))
+  return requests
+ def retain_observation(self,raw,requests):
+  deny(self.closed or type(raw) is not bytes or not raw or len(raw)>65536
+       or not isinstance(requests,list) or not requests
+       or any(not isinstance(item,dict) for item in requests),
+       'KERNEL_OBSERVER_EXPECTATION_DENIED')
+  reserved=canonical({'requests':requests})
+  deny(reserved not in self.pending_observations,'KERNEL_OBSERVER_EXPECTATION_DENIED')
+  digest=sha(raw)
+  deny(digest in self.observations,'KERNEL_OBSERVER_REPLAY_DENIED')
+  self.pending_observations.remove(reserved)
+  self.observations[digest]=reserved
+ def acquisition_verifier(self,raw):
+  """Bind nested validation to this open owner's original exact acquisition."""
+  deny(type(raw) is not bytes or not 0<len(raw)<=65536,
+       'KERNEL_OBSERVER_ACQUISITION_DENIED')
+  original=raw
+  requests=self.expected_observation(original)
+  expected=canonical({'requests':requests})
+  value=strict_json(original)
+  deny(not isinstance(value,dict) or not isinstance(value.get('subject_evidence'),dict)
+       or value.get('request')!=requests[-1],
+       'KERNEL_OBSERVER_ACQUISITION_DENIED')
+  prior=value.get('prior_rounds',[])
+  deny(not isinstance(prior,list)
+       or any(not isinstance(row,dict) or set(row)!={'query','response'} for row in prior)
+       or [row['query'] for row in prior]!=requests[:-1],
+       'KERNEL_OBSERVER_ACQUISITION_DENIED')
+  pairs=[(original,canonical(requests[-1])),
+         (canonical(value['subject_evidence']),canonical(requests[-1]))]
+  pairs.extend((canonical(row['response']),canonical(query))
+               for row,query in zip(prior,requests[:-1]))
+  pairs.append((canonical({'response':value['subject_evidence'],'prior_rounds':prior}),
+                canonical(requests[-1])))
+  pairs=tuple(pairs)
+  def verify(candidate,request):
+   deny(canonical({'requests':self.expected_observation(original)})!=expected,
+        'KERNEL_OBSERVER_ACQUISITION_DENIED')
+   return isinstance(candidate,bytes) and (candidate,canonical(request)) in pairs
+  return verify
+
+ def expected_observation(self,raw):
+  deny(self.closed or type(raw) is not bytes or sha(raw) not in self.observations,
+       'KERNEL_OBSERVER_ACQUISITION_DENIED')
+  return strict_json(self.observations[sha(raw)])['requests']
+ def __enter__(self):
+  deny(self.closed,'KERNEL_LIFECYCLE_OWNER_CLOSED')
+  return self
+ def __exit__(self,kind,value,traceback):
+  if kind is not None:
+   self.abort()
+   return
+  try:self.verify()
+  except BaseException as original:
+   try:self.abort()
+   except BaseException as cleanup:raise original from cleanup
+   raise
+  self.commit()
  def retain(self,cleanup,verify=None):
   deny(self.closed,'KERNEL_LIFECYCLE_OWNER_CLOSED')
   self.cleanups.append(cleanup)
@@ -3186,6 +3290,8 @@ class _KernelLifecycleOwnership:
   if self.failure is not None:raise self.failure
   if self.closed:return
   self.closed=True
+  self.observations.clear();self.pending_observations.clear()
+  self.observation_requests.clear();self.observation_nonces.clear()
   while self.cleanups:
    cleanup=self.cleanups.pop()
    try:cleanup()
@@ -3196,6 +3302,8 @@ class _KernelLifecycleOwnership:
  def commit(self):
   deny(self.closed,'KERNEL_LIFECYCLE_OWNER_CLOSED')
   self.cleanups.clear();self.closed=True
+  self.observations.clear();self.pending_observations.clear()
+  self.observation_requests.clear();self.observation_nonces.clear()
 
 
 @contextmanager
@@ -3234,7 +3342,7 @@ def _authority_lifecycle(plan,receipt,request,*,boundary,owner=None):
   try:
    subprocess.run(['/usr/bin/systemctl','--no-ask-password','--job-mode=fail'
        if action=='start' else '--job-mode=replace',action,*names],
-       check=True,timeout=90,stdin=subprocess.DEVNULL,
+       check=True,stdin=subprocess.DEVNULL,
        stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,close_fds=True,
        env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
   except (OSError,subprocess.SubprocessError) as exc:
@@ -3272,7 +3380,7 @@ def _authority_lifecycle(plan,receipt,request,*,boundary,owner=None):
        or not _unit_active(AUTHORITY_UNITS[1],after[AUTHORITY_UNITS[1]]),
           'KERNEL_AUTHORITY_LIFECYCLE_START_UNPROVEN')
   boundary()
-  observation=observe_installed_authority(plan,receipt,request)
+  observation=observe_installed_authority(plan,receipt,request,owner=owner)
   if observation.get('result')!='AUTHORITY_PHASE_A_OBSERVED':
    rejected=RunnerDenied('KERNEL_AUTHORITY_PHASE_A_UNPROVEN')
    rejected.observation=observation
@@ -3287,7 +3395,7 @@ def _authority_lifecycle(plan,receipt,request,*,boundary,owner=None):
   deny(regular(VERIFY_KEY)!=anchor,'KERNEL_CANONICAL_ANCHOR_CHANGED')
   validate_authority_observation(canonical(observation),**envelope,boot_id=boot,
       observed_at=datetime.now(timezone.utc),anchor=anchor,
-      host_machine_id=plan['host_identity']['machine_id'])
+      host_machine_id=plan['host_identity']['machine_id'], acquisition_verifier=owner.acquisition_verifier(canonical(observation)))
   yield observation
   verify_owned()
  except BaseException:
@@ -3312,7 +3420,7 @@ def _operations_lifecycle(plan,receipt,authority_observation,*,boundary,owner=No
  boot=current_boot()
  deny(os.geteuid()!=0 or boot!=plan.get('current_boot_id'),
       'KERNEL_OPERATIONS_LIFECYCLE_TARGET_DENIED')
- boundary();prerequisite=prepare_operations_observation(plan,receipt,authority_observation)
+ boundary();prerequisite=prepare_operations_observation(plan,receipt,authority_observation,owner=owner)
  authority=read_authority_unit_prestate();before=read_other_kernel_unit_prestate()
  deny(set(authority)!=set(AUTHORITY_UNITS) or set(before)!=set(OTHER_KERNEL_UNITS),
       'KERNEL_UNIT_SET_DENIED')
@@ -3351,7 +3459,7 @@ def _operations_lifecycle(plan,receipt,authority_observation,*,boundary,owner=No
   try:
    subprocess.run(['/usr/bin/systemctl','--no-ask-password',
        '--job-mode=fail' if action=='start' else '--job-mode=replace',action,*names],
-       check=True,timeout=90,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+       check=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
        stderr=subprocess.DEVNULL,close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
   except (OSError,subprocess.SubprocessError) as exc:
    raise RunnerDenied('KERNEL_OPERATIONS_LIFECYCLE_COMMAND_FAILED') from exc
@@ -3381,10 +3489,10 @@ def _operations_lifecycle(plan,receipt,authority_observation,*,boundary,owner=No
   challenge={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':'AUTHORITY',
       'request_id':'kernel-authority-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
       'previous_evidence_digest':'GENESIS'}
-  fresh_authority=observe_installed_authority(plan,receipt,challenge)
+  fresh_authority=observe_installed_authority(plan,receipt,challenge,owner=owner)
   deny(fresh_authority.get('result')!='AUTHORITY_PHASE_A_OBSERVED',
        'KERNEL_OPERATIONS_AUTHORITY_UNPROVEN')
-  observation=observe_operations_lifecycle(plan,receipt,canonical(fresh_authority),boundary=phase_boundary)
+  observation=observe_operations_lifecycle(plan,receipt,canonical(fresh_authority),boundary=phase_boundary,owner=owner)
   if observation.get('result')!='OPERATIONS_MINIMUM_OBSERVED':
    rejected=RunnerDenied('KERNEL_OPERATIONS_MINIMUM_UNPROVEN')
    rejected.observation=observation
@@ -3402,16 +3510,16 @@ def _operations_lifecycle(plan,receipt,authority_observation,*,boundary,owner=No
   raise
 
 
-def observe_installed_operations(plan,receipt,authority_observation):
+def observe_installed_operations(plan,receipt,authority_observation,*,owner):
  """Same fixed unprivileged observer, chained to its signed Authority readback.
 
  No unit lifecycle effect and no new privileged startup path. The owning
  complete-domain installer must provide the prior trusted observer output.
  """
- return _observe_installed_branch(plan,receipt,authority_observation,branch='OPERATIONS')
+ return _observe_installed_branch(plan,receipt,authority_observation,branch='OPERATIONS',owner=owner)
 
 
-def observe_operations_lifecycle(plan,receipt,authority_observation,*,boundary=None):
+def observe_operations_lifecycle(plan,receipt,authority_observation,*,boundary=None,owner):
  """Read the minimum Operations window inside the whole-domain owner.
 
  No service action, branch admission, recovery execution or source upload.
@@ -3420,6 +3528,7 @@ def observe_operations_lifecycle(plan,receipt,authority_observation,*,boundary=N
  closure remain mandatory. A service restart during this window invalidates
  it instead of silently joining evidence from two process generations.
  """
+ import time
  from datetime import datetime,timezone
  from outpost.kernel_direct_witness import compare_operations_response,validate_authority_observation
  plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt))
@@ -3435,16 +3544,57 @@ def observe_operations_lifecycle(plan,receipt,authority_observation,*,boundary=N
   # capability. Restart policy availability is not proof of a restart.
   expected=('on-failure','1s') if name==OPERATIONS_SERVICES[0] else ('always','2s')
   deny((row['Restart'],row['RestartUSec'])!=expected,'KERNEL_OPERATIONS_CONTROLS_UNAVAILABLE')
- observations=[]
- for _ in range(2):
-  observations.append(observe_installed_operations(plan,receipt,authority_observation))
+ prior=None;healthy=None
+ while True:
+  if boundary is not None:boundary()
   deny(current_boot()!=boot or read_operations_service_controls()!=controls,
        'KERNEL_OPERATIONS_PROCESS_CHANGED')
- return validate_operations_lifecycle(plan,receipt,authority_observation,
-     observations,controls,boundary=boundary)
+  observed=observe_installed_operations(plan,receipt,authority_observation,owner=owner)
+  # Reconcile every acquired value before treating telemetry as pending. This
+  # existing consumer binds exact owner requests/raw bytes, installed source,
+  # signed predecessor and schema; invalid evidence is never retried.
+  observed=consume_operations_observation(plan,receipt,authority_observation,
+      canonical(observed),owner=owner)
+  if boundary is not None:boundary()
+  deny(current_boot()!=boot or read_operations_service_controls()!=controls,
+       'KERNEL_OPERATIONS_PROCESS_CHANGED')
+  sample=observed['subject_evidence']['facts']['observation']
+  deny('replay_continuity' not in sample,'KERNEL_OPERATIONS_CONTINUITY_UNAVAILABLE')
+  deny(any(sample['monotonic_ns']<=1000*int(row['ExecMainStartTimestampMonotonic'])
+           for row in controls.values()),'KERNEL_OPERATIONS_PREVIOUS_PROCESS_SAMPLE')
+  if prior is not None:
+   if canonical(sample)==canonical(prior):
+    # Yield only; unchanged valid telemetry grants no progress or acceptance.
+    time.sleep(0.05)
+    continue
+   deny(sample['sequence']<=prior['sequence'] or sample['monotonic_ns']<=prior['monotonic_ns']
+        or datetime.fromisoformat(sample['observed_at'].replace('Z','+00:00'))
+           <=datetime.fromisoformat(prior['observed_at'].replace('Z','+00:00')),
+        'KERNEL_OPERATIONS_WINDOW_NOT_ADVANCING')
+   deny(any(sample['replay_continuity'][key]<prior['replay_continuity'][key]
+            for key in ('chains','receipts','consumed_chains')),
+        'KERNEL_OPERATIONS_REPLAY_HISTORY_REGRESSED')
+  prior=sample
+  startup=(sample['sequence']==1 and sample['cadence_state']=='UNPROVEN' and sample['bpm']==0
+           and sample['event']=='BOOT_BOUND_START')
+  degraded=(sample['cadence_state']=='DEGRADED'
+            and sample['event'] in {'HEARTBEAT','MISSED_HEARTBEAT'})
+  deny(sample['sequence']<=1 and not startup,'KERNEL_OPERATIONS_STARTUP_DENIED')
+  if startup or degraded:
+   healthy=None
+   continue
+  deny(sample['cadence_state']!='OBSERVED' or sample['event']!='HEARTBEAT',
+       'KERNEL_OPERATIONS_HEARTBEAT_FLOOR_UNPROVEN')
+  if healthy is not None:
+   first=healthy['subject_evidence']['facts']['observation']
+   count=sample['sequence']-first['sequence'];elapsed=sample['monotonic_ns']-first['monotonic_ns']
+   if elapsed<=count*1_000_000_000:
+    return validate_operations_lifecycle(plan,receipt,authority_observation,
+        [healthy,observed],controls,boundary=boundary,owner=owner)
+  healthy=observed
 
 
-def validate_operations_lifecycle(plan,receipt,authority_observation,observations,controls,*,boundary=None):
+def validate_operations_lifecycle(plan,receipt,authority_observation,observations,controls,*,boundary=None,owner):
  """Revalidate original signed samples before the next internal constituent.
 
  No renewed timestamps or uploaded admission labels. The same independent
@@ -3469,17 +3619,17 @@ def validate_operations_lifecycle(plan,receipt,authority_observation,observation
   deny((row['Restart'],row['RestartUSec'])!=expected,'KERNEL_OPERATIONS_CONTROLS_UNAVAILABLE')
  # The second source scan cannot renew the first sample's freshness. Recheck
  # both against the same final source-bound expectation and original clock.
- envelope=prepare_operations_observation(plan,receipt,authority_observation)
+ envelope=prepare_operations_observation(plan,receipt,authority_observation,owner=owner)
  if boundary is not None:boundary()
  deny(current_boot()!=boot or read_operations_service_controls()!=controls,
       'KERNEL_OPERATIONS_PROCESS_CHANGED')
  anchor=regular(VERIFY_KEY)
  now=datetime.now(timezone.utc)
  return _compare_operations_lifecycle(plan,authority_observation,observations,controls,
-      envelope=envelope,boot=boot,anchor=anchor,now=now)
+      envelope=envelope,boot=boot,anchor=anchor,now=now,owner=owner)
 
 
-def _compare_operations_lifecycle(plan,authority_observation,observations,controls,*,envelope,boot,anchor,now):
+def _compare_operations_lifecycle(plan,authority_observation,observations,controls,*,envelope,boot,anchor,now,owner):
  """Recheck original samples at a final clock without repeating source IO.
 
  The owning caller must already have validated the source envelope and current
@@ -3500,15 +3650,21 @@ def _compare_operations_lifecycle(plan,authority_observation,observations,contro
        'KERNEL_OPERATIONS_CONTROLS_UNAVAILABLE')
   expected=('on-failure','1s') if name==OPERATIONS_SERVICES[0] else ('always','2s')
   deny((row['Restart'],row['RestartUSec'])!=expected,'KERNEL_OPERATIONS_CONTROLS_UNAVAILABLE')
+ authority_requests=owner.expected_observation(authority_observation)
+ deny(len(authority_requests)!=1 or authority_requests[0]!=envelope['authority_request'],
+      'KERNEL_OBSERVER_ACQUISITION_DENIED')
  predecessor=validate_authority_observation(authority_observation,source=envelope['source'],
-     identity=envelope['identity'],request=envelope['authority_observation']['request'],boot_id=boot,
-     observed_at=now,anchor=anchor,host_machine_id=plan['host_identity']['machine_id'])
+     identity=envelope['identity'],request=envelope['authority_request'],boot_id=boot,
+     observed_at=now,anchor=anchor,host_machine_id=plan['host_identity']['machine_id'], acquisition_verifier=owner.acquisition_verifier(authority_observation))
  deny(predecessor!=envelope['authority_observation'],'KERNEL_OPERATIONS_PREDECESSOR_DENIED')
  samples=[]
  for observed in observations:
+  expected_requests=owner.expected_observation(canonical(observed))
+  deny(len(expected_requests)!=1 or observed.get('request')!=expected_requests[0],
+       'KERNEL_OBSERVER_ACQUISITION_DENIED')
   compared=compare_operations_response(canonical(observed['subject_evidence']),
-      request=observed['request'],source=envelope['source'],boot_id=boot,
-      installed_evidence_sha256=envelope['installed_evidence_sha256'],observed_at=now)
+      request=expected_requests[0],source=envelope['source'],boot_id=boot,
+      installed_evidence_sha256=envelope['installed_evidence_sha256'],observed_at=now, acquisition_verifier=owner.acquisition_verifier(canonical(observed)))
   deny(observed['request']['previous_evidence_digest']!=envelope['authority_observation']['observation_digest']
        or compared['subject_evidence']!=observed['subject_evidence'],
        'KERNEL_OPERATIONS_PREDECESSOR_DENIED')
@@ -3557,7 +3713,7 @@ def _interface_lifecycle(plan,receipt,authority_observation,operations,*,boundar
       'KERNEL_INTERFACE_LIFECYCLE_TARGET_DENIED')
  boundary()
  verified=validate_operations_lifecycle(plan,receipt,authority_observation,
-     operations.get('observations'),operations.get('service_controls'),boundary=boundary)
+     operations.get('observations'),operations.get('service_controls'),boundary=boundary,owner=owner)
  deny(verified!=operations,'KERNEL_INTERFACE_OPERATIONS_PREDECESSOR_DENIED')
  authority=read_authority_unit_prestate();before=read_other_kernel_unit_prestate()
  deny(set(authority)!=set(AUTHORITY_UNITS) or set(before)!=set(OTHER_KERNEL_UNITS),
@@ -3601,7 +3757,7 @@ def _interface_lifecycle(plan,receipt,authority_observation,operations,*,boundar
   try:
    subprocess.run(['/usr/bin/systemctl','--no-ask-password',
        '--job-mode=fail' if action=='start' else '--job-mode=replace',action,*names],
-       check=True,timeout=90,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+       check=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
        stderr=subprocess.DEVNULL,close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
   except (OSError,subprocess.SubprocessError) as exc:
    raise RunnerDenied('KERNEL_INTERFACE_LIFECYCLE_COMMAND_FAILED') from exc
@@ -3641,11 +3797,11 @@ def _interface_lifecycle(plan,receipt,authority_observation,operations,*,boundar
   challenge={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':'AUTHORITY',
       'request_id':'kernel-authority-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
       'previous_evidence_digest':'GENESIS'}
-  fresh_authority=observe_installed_authority(plan,receipt,challenge)
+  fresh_authority=observe_installed_authority(plan,receipt,challenge,owner=owner)
   deny(fresh_authority.get('result')!='AUTHORITY_PHASE_A_OBSERVED',
        'KERNEL_INTERFACE_AUTHORITY_UNPROVEN')
   fresh_operations=observe_operations_lifecycle(plan,receipt,canonical(fresh_authority),
-      boundary=current_boundary)
+      boundary=current_boundary,owner=owner)
   deny(fresh_operations.get('result')!='OPERATIONS_MINIMUM_OBSERVED',
        'KERNEL_INTERFACE_OPERATIONS_UNPROVEN')
   deny(any(fresh_operations.get(key)!=operations.get(key) for key in
@@ -3653,12 +3809,12 @@ def _interface_lifecycle(plan,receipt,authority_observation,operations,*,boundar
       'KERNEL_INTERFACE_PREREQUISITE_IDENTITY_CHANGED')
   authority_observation=canonical(fresh_authority);operations=fresh_operations
   current_boundary()
-  observed=observe_installed_interface(plan,receipt,authority_observation,operations)
+  observed=observe_installed_interface(plan,receipt,authority_observation,operations,owner=owner)
   deny(observed.get('result')!='PRIVATE_INTERFACE_DENIAL_CORRELATED',
        'KERNEL_INTERFACE_DENIAL_UNPROVEN')
   # The new observations must still be fresh after Interface verification.
   verified=validate_operations_lifecycle(plan,receipt,authority_observation,
-      operations['observations'],operations['service_controls'],boundary=current_boundary)
+      operations['observations'],operations['service_controls'],boundary=current_boundary,owner=owner)
   deny(verified!=operations,'KERNEL_INTERFACE_OPERATIONS_PREDECESSOR_DENIED')
   next_constituent=True
   yield {'result':'PRIVATE_INTERFACE_STARTED_NOT_VERIFIED','boot_id':boot,
@@ -3694,9 +3850,9 @@ def _offline_companion_lifecycle(plan,receipt,authority_observation,operations,
       'KERNEL_OFFLINE_LIFECYCLE_TARGET_DENIED')
  boundary()
  validated=validate_operations_lifecycle(plan,receipt,authority_observation,
-     operations.get('observations'),operations.get('service_controls'),boundary=boundary)
+     operations.get('observations'),operations.get('service_controls'),boundary=boundary,owner=owner)
  deny(validated!=operations,'KERNEL_OFFLINE_OPERATIONS_PREDECESSOR_DENIED')
- observed=observe_installed_interface(plan,receipt,authority_observation,operations)
+ observed=observe_installed_interface(plan,receipt,authority_observation,operations,owner=owner)
  deny(observed.get('result')!='PRIVATE_INTERFACE_DENIAL_CORRELATED',
       'KERNEL_OFFLINE_INTERFACE_PREDECESSOR_DENIED')
  # Reclassify the exact current runtime prestate, never sign stale preparation
@@ -3730,14 +3886,14 @@ def _offline_companion_lifecycle(plan,receipt,authority_observation,operations,
   challenge={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':'AUTHORITY',
       'request_id':'kernel-authority-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
       'previous_evidence_digest':'GENESIS'}
-  authority=observe_installed_authority(plan,receipt,challenge)
+  authority=observe_installed_authority(plan,receipt,challenge,owner=owner)
   deny(authority.get('result')!='AUTHORITY_PHASE_A_OBSERVED',
        'KERNEL_OFFLINE_AUTHORITY_UNPROVEN')
   authority_raw=canonical(authority)
-  observed_operations=observe_operations_lifecycle(plan,receipt,authority_raw,boundary=current_boundary)
+  observed_operations=observe_operations_lifecycle(plan,receipt,authority_raw,boundary=current_boundary,owner=owner)
   deny(observed_operations.get('result')!='OPERATIONS_MINIMUM_OBSERVED',
        'KERNEL_OFFLINE_OPERATIONS_UNPROVEN')
-  interface=observe_installed_interface(plan,receipt,authority_raw,observed_operations)
+  interface=observe_installed_interface(plan,receipt,authority_raw,observed_operations,owner=owner)
   deny(interface.get('result')!='PRIVATE_INTERFACE_DENIAL_CORRELATED',
        'KERNEL_OFFLINE_INTERFACE_PREDECESSOR_DENIED')
   return authority,observed_operations
@@ -3842,120 +3998,146 @@ def _observer_failure_code(raw):
   if code in _OBSERVER_FAILURE_CODES:return code
  return 'UNKNOWN_CHILD_FAILURE'
 
-def _observe_installed_branch(plan,receipt,prior,*,branch):
- import selectors,subprocess,time
+def _observe_installed_branch(plan,receipt,prior,*,branch,owner):
+ import selectors,subprocess,secrets
  from .generation_launcher import read_selector
  deny(os.geteuid()!=0,'KERNEL_OBSERVER_CALLER_DENIED')
  deny(branch not in {'AUTHORITY','OPERATIONS','INTERFACE','COMPUTE','GATEWAY'},'KERNEL_OBSERVER_BRANCH_DENIED')
+ deny(not isinstance(owner,_KernelLifecycleOwnership),'KERNEL_OBSERVER_OWNER_REQUIRED')
  plan=strict_json(canonical(plan));receipt=strict_json(canonical(receipt))
  if branch=='AUTHORITY':
   prior=strict_json(canonical(prior))
   envelope=prepare_authority_observation(plan,receipt,prior)
  elif branch=='INTERFACE':
-  envelope=prepare_interface_observation(plan,receipt,*prior)
+  envelope=prepare_interface_observation(plan,receipt,*prior,owner=owner)
  elif branch=='COMPUTE':
-  envelope=prepare_compute_observation(plan,receipt,*prior)
+  envelope=prepare_compute_observation(plan,receipt,*prior,owner=owner)
  elif branch=='GATEWAY':
-  envelope=prepare_gateway_observation(plan,receipt,*prior)
+  envelope=prepare_gateway_observation(plan,receipt,*prior,owner=owner)
  else:
-  envelope=prepare_operations_observation(plan,receipt,prior)
- encoded=canonical(envelope)
- deny(len(encoded)>65536,'KERNEL_OBSERVER_INPUT_BOUND_DENIED')
- selector_path=Path('/var/lib/serein-outpost/generation-state/current.json')
- generations=Path('/usr/share/serein/outpost-generations')
- launcher=Path('/usr/libexec/serein/outpost-generation-launcher')
- selector,generation=read_selector(selector_path,generations)
- deny(Path(__file__).absolute()!=generation/'install/kernel_first_install_runner.py',
-      'KERNEL_OBSERVER_CALLER_GENERATION_DENIED')
- launcher_bytes=regular(launcher,expected_custody=(0,0,0o755))
- deny(launcher_bytes!=regular(generation/'install/generation_launcher.py'),
-      'KERNEL_OBSERVER_LAUNCHER_DENIED')
- # Require the selected immutable generation to contain the actual callee.
- regular(generation/'outpost/kernel_direct_witness.py')
- account=identity('serein-outpost')
- deny(account['uid']<=0 or account['gid']<=0 or account['primary_gid']!=account['gid']
-      or plan.get('outpost_identity')!=account,'KERNEL_OBSERVER_ACCOUNT_DENIED')
- def boundary():
-  deny(read_selector(selector_path,generations)!=(selector,generation)
-       or regular(launcher,expected_custody=(0,0,0o755))!=launcher_bytes
-       or identity('serein-outpost')!=account,'KERNEL_OBSERVER_GENERATION_CHANGED')
- boundary()
- # CPython performs setgroups/setregid/setreuid before exec; no preexec_fn,
- # shell, inherited secret environment, inherited descriptors or root observer.
- deadline=time.monotonic()+10.0
- raw=bytearray()
- diagnostic=bytearray()
- process=None
+  envelope=prepare_operations_observation(plan,receipt,prior,owner=owner)
+ requests=None;raw=None;pending_key=None;pending_existed=True
+ captured_digest=None;existed=True
  try:
-  process=subprocess.Popen([str(launcher),'outpost/kernel_direct_witness.py',
-      '-' if branch in {'COMPUTE','GATEWAY'} else encoded.decode('utf-8')],
-      stdin=subprocess.PIPE if branch in {'COMPUTE','GATEWAY'} else subprocess.DEVNULL,
-      stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-      cwd='/',env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','PYTHONDONTWRITEBYTECODE':'1'},
-      shell=False,close_fds=True,user=account['uid'],group=account['gid'],extra_groups=(),umask=0o077)
-  with selectors.DefaultSelector() as pending:
-   os.set_blocking(process.stdout.fileno(),False)
-   pending.register(process.stdout,selectors.EVENT_READ)
-   os.set_blocking(process.stderr.fileno(),False)
-   pending.register(process.stderr,selectors.EVENT_READ)
-   sent=0
-   if process.stdin is not None:
-    os.set_blocking(process.stdin.fileno(),False)
-    pending.register(process.stdin,selectors.EVENT_WRITE)
-   while pending.get_map():
-    remaining=deadline-time.monotonic()
-    deny(remaining<=0,'KERNEL_OBSERVER_DEADLINE_DENIED')
-    for key,_ in pending.select(remaining):
-     if key.fileobj is process.stdin:
-      sent+=os.write(key.fd,encoded[sent:sent+4096])
-      if sent==len(encoded):
-       pending.unregister(key.fileobj);process.stdin.close()
-      continue
-     is_error=key.fileobj is process.stderr
-     target=diagnostic if is_error else raw
-     limit=8192 if is_error else 65536
-     chunk=os.read(key.fd,min(4096,limit+1-len(target)))
-     if not chunk:pending.unregister(key.fileobj)
-     else:
-      target.extend(chunk)
-      deny(len(target)>limit,'KERNEL_OBSERVER_DIAGNOSTIC_BOUND_DENIED'
-           if is_error else 'KERNEL_OBSERVER_OUTPUT_BOUND_DENIED')
-  remaining=deadline-time.monotonic()
-  deny(remaining<=0,'KERNEL_OBSERVER_DEADLINE_DENIED')
-  returncode=process.wait(timeout=remaining)
-  if returncode!=0:
-   # Retain only an explicitly enumerated reason. Tracebacks, paths, payloads
-   # and arbitrary exception text never leave this bounded private buffer.
-   reason=_observer_failure_code(bytes(diagnostic))
-   raise RunnerDenied('KERNEL_OBSERVER_EXECUTION_DENIED:'+reason)
-  deny(bool(diagnostic),'KERNEL_OBSERVER_UNEXPECTED_DIAGNOSTIC')
- except subprocess.TimeoutExpired as exc:
-  raise RunnerDenied('KERNEL_OBSERVER_DEADLINE_DENIED') from exc
- except OSError as exc:
-  raise RunnerDenied('KERNEL_OBSERVER_EXECUTION_DENIED') from exc
- finally:
-  if process is not None:
-   if process.poll() is None:process.kill()
-   try:process.wait(timeout=1.0)
-   except subprocess.TimeoutExpired as exc:
-    raise RunnerDenied('KERNEL_OBSERVER_REAP_PENDING') from exc
-   finally:
-    if process.stdin is not None:process.stdin.close()
-    if process.stdout is not None:process.stdout.close()
-    if process.stderr is not None:process.stderr.close()
- raw=bytes(raw)
- deny(not raw or not raw.endswith(b'\n'),'KERNEL_OBSERVER_OUTPUT_DENIED')
- value=strict_json(raw)
- deny(not isinstance(value,dict) or canonical(value)!=raw,'KERNEL_OBSERVER_OUTPUT_DENIED')
- boundary()
- if branch=='AUTHORITY':result=consume_authority_observation(plan,receipt,prior,raw)
- elif branch=='INTERFACE':result=consume_interface_observation(plan,receipt,*prior,raw)
- elif branch=='COMPUTE':result=consume_compute_observation(plan,receipt,*prior,raw)
- elif branch=='GATEWAY':result=consume_gateway_observation(plan,receipt,*prior,raw)
- else:result=consume_operations_observation(plan,receipt,prior,raw)
- boundary()
- deny(time.monotonic()>=deadline,'KERNEL_OBSERVER_DEADLINE_DENIED')
- return result
+  if branch=='AUTHORITY':
+   requests=[prior]
+  else:
+   query={'schema':'SEREIN/KernelBranchWitnessRequest/v1',
+       'branch':'INTERFACE' if branch=='INTERFACE' else 'OPERATIONS',
+       'request_id':'kernel-operations-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
+       'previous_evidence_digest':envelope.get('interface_predecessor',
+           envelope['authority_observation']['observation_digest'])}
+   if branch=='COMPUTE':query['compute_request_id']=envelope['compute_expectation']['request']['request_id']
+   if branch=='GATEWAY':
+    query.update(compute_request_id=envelope['gateway_expectation']['compute_request_id'],
+                 gateway_correlation=True)
+   prior_ids=envelope['gateway_expectation'].get('prior_compute_request_ids',[]) if branch=='GATEWAY' else []
+   requests=[{**query,
+       'request_id':'kernel-operations-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
+       'compute_request_id':value} for value in prior_ids]+[query]
+  pending_key=canonical({'requests':requests})
+  pending_existed=pending_key in owner.pending_observations
+  requests=owner.reserve_observation(requests)
+  if branch!='AUTHORITY':envelope={**envelope,'requests':requests}
+  encoded=canonical(envelope)
+  deny(len(encoded)>65536,'KERNEL_OBSERVER_INPUT_BOUND_DENIED')
+  selector_path=Path('/var/lib/serein-outpost/generation-state/current.json')
+  generations=Path('/usr/share/serein/outpost-generations')
+  launcher=Path('/usr/libexec/serein/outpost-generation-launcher')
+  selector,generation=read_selector(selector_path,generations)
+  deny(Path(__file__).absolute()!=generation/'install/kernel_first_install_runner.py',
+       'KERNEL_OBSERVER_CALLER_GENERATION_DENIED')
+  launcher_bytes=regular(launcher,expected_custody=(0,0,0o755))
+  deny(launcher_bytes!=regular(generation/'install/generation_launcher.py'),
+       'KERNEL_OBSERVER_LAUNCHER_DENIED')
+  # Require the selected immutable generation to contain the actual callee.
+  regular(generation/'outpost/kernel_direct_witness.py')
+  account=identity('serein-outpost')
+  deny(account['uid']<=0 or account['gid']<=0 or account['primary_gid']!=account['gid']
+       or plan.get('outpost_identity')!=account,'KERNEL_OBSERVER_ACCOUNT_DENIED')
+  def boundary():
+   deny(read_selector(selector_path,generations)!=(selector,generation)
+        or regular(launcher,expected_custody=(0,0,0o755))!=launcher_bytes
+        or identity('serein-outpost')!=account,'KERNEL_OBSERVER_GENERATION_CHANGED')
+  boundary()
+  # CPython performs setgroups/setregid/setreuid before exec; no preexec_fn,
+  # shell, inherited secret environment, inherited descriptors or root observer.
+  # Wait for actual framed output and terminal exit. Elapsed time has no
+  # authority to terminate this observer or manufacture a failed observation.
+  raw=bytearray()
+  diagnostic=bytearray()
+  process=None
+  try:
+   process=subprocess.Popen([str(launcher),'outpost/kernel_direct_witness.py',
+       '-' if branch in {'COMPUTE','GATEWAY'} else encoded.decode('utf-8')],
+       stdin=subprocess.PIPE if branch in {'COMPUTE','GATEWAY'} else subprocess.DEVNULL,
+       stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+       cwd='/',env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8','PYTHONDONTWRITEBYTECODE':'1'},
+       shell=False,close_fds=True,user=account['uid'],group=account['gid'],extra_groups=(),umask=0o077)
+   with selectors.DefaultSelector() as pending:
+    os.set_blocking(process.stdout.fileno(),False)
+    pending.register(process.stdout,selectors.EVENT_READ)
+    os.set_blocking(process.stderr.fileno(),False)
+    pending.register(process.stderr,selectors.EVENT_READ)
+    sent=0
+    if process.stdin is not None:
+     os.set_blocking(process.stdin.fileno(),False)
+     pending.register(process.stdin,selectors.EVENT_WRITE)
+    while pending.get_map():
+     for key,_ in pending.select():
+      if key.fileobj is process.stdin:
+       sent+=os.write(key.fd,encoded[sent:sent+4096])
+       if sent==len(encoded):
+        pending.unregister(key.fileobj);process.stdin.close()
+       continue
+      is_error=key.fileobj is process.stderr
+      target=diagnostic if is_error else raw
+      limit=8192 if is_error else 65536
+      chunk=os.read(key.fd,min(4096,limit+1-len(target)))
+      if not chunk:pending.unregister(key.fileobj)
+      else:
+       target.extend(chunk)
+       deny(len(target)>limit,'KERNEL_OBSERVER_DIAGNOSTIC_BOUND_DENIED'
+            if is_error else 'KERNEL_OBSERVER_OUTPUT_BOUND_DENIED')
+   returncode=process.wait()
+   if returncode!=0:
+    # Retain only an explicitly enumerated reason. Tracebacks, paths, payloads
+    # and arbitrary exception text never leave this bounded private buffer.
+    reason=_observer_failure_code(bytes(diagnostic))
+    raise RunnerDenied('KERNEL_OBSERVER_EXECUTION_DENIED:'+reason)
+   deny(bool(diagnostic),'KERNEL_OBSERVER_UNEXPECTED_DIAGNOSTIC')
+  except OSError as exc:
+   raise RunnerDenied('KERNEL_OBSERVER_EXECUTION_DENIED') from exc
+  finally:
+   if process is not None:
+    if process.poll() is None:process.kill()
+    try:process.wait()
+    finally:
+     if process.stdin is not None:process.stdin.close()
+     if process.stdout is not None:process.stdout.close()
+     if process.stderr is not None:process.stderr.close()
+  raw=bytes(raw)
+  deny(not raw or not raw.endswith(b'\n'),'KERNEL_OBSERVER_OUTPUT_DENIED')
+  value=strict_json(raw)
+  deny(not isinstance(value,dict) or canonical(value)!=raw,'KERNEL_OBSERVER_OUTPUT_DENIED')
+  boundary()
+  # Bind the original stdout bytes, not reconstructed or re-timestamped JSON.
+  # The expected requests were independently reserved before the child ran.
+  captured_digest=sha(raw)
+  existed=captured_digest in owner.observations
+  owner.retain_observation(raw,requests)
+  if branch=='AUTHORITY':result=consume_authority_observation(plan,receipt,prior,raw,owner=owner)
+  elif branch=='INTERFACE':result=consume_interface_observation(plan,receipt,*prior,raw,owner=owner)
+  elif branch=='COMPUTE':result=consume_compute_observation(plan,receipt,*prior,raw,owner=owner)
+  elif branch=='GATEWAY':result=consume_gateway_observation(plan,receipt,*prior,raw,owner=owner)
+  else:result=consume_operations_observation(plan,receipt,prior,raw,owner=owner)
+  boundary()
+  return result
+ except BaseException:
+  if pending_key is not None and not pending_existed:
+   owner.pending_observations.discard(pending_key)
+  if captured_digest is not None and not existed:owner.observations.pop(captured_digest,None)
+  raise
 
 
 def prepare_kernel_request(bundle_adapter=None,*,root=Path('/'),source=SOURCE,request_path=REQUEST,
@@ -4205,7 +4387,7 @@ def _companion_residency_lifecycle(plan,*,boundary,owner):
   try:
    subprocess.run(['/usr/bin/systemctl','--no-ask-password',
        '--job-mode=fail' if action=='start' else '--job-mode=replace',action,*units],
-       check=True,timeout=90,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
+       check=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
        stderr=subprocess.DEVNULL,close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
   except (OSError,subprocess.SubprocessError) as exc:
    raise RunnerDenied('KERNEL_RESIDENCY_COMMAND_FAILED') from exc
@@ -4357,14 +4539,14 @@ def _complete_kernel_lifecycle(plan,receipt,request,preparation,expectation,*,bo
   challenge={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':'AUTHORITY',
       'request_id':'kernel-authority-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
       'previous_evidence_digest':'GENESIS'}
-  authority=observe_installed_authority(plan,receipt,challenge)
+  authority=observe_installed_authority(plan,receipt,challenge,owner=owner)
   deny(authority.get('result')!='AUTHORITY_PHASE_A_OBSERVED','KERNEL_COMPUTE_AUTHORITY_UNPROVEN')
-  operations=observe_operations_lifecycle(plan,receipt,canonical(authority),boundary=observation_boundary)
+  operations=observe_operations_lifecycle(plan,receipt,canonical(authority),boundary=observation_boundary,owner=owner)
   deny(operations.get('result')!='OPERATIONS_MINIMUM_OBSERVED','KERNEL_COMPUTE_OPERATIONS_UNPROVEN')
-  interface=observe_installed_interface(plan,receipt,canonical(authority),operations)
+  interface=observe_installed_interface(plan,receipt,canonical(authority),operations,owner=owner)
   deny(interface.get('result')!='PRIVATE_INTERFACE_DENIAL_CORRELATED','KERNEL_COMPUTE_INTERFACE_UNPROVEN')
   observation_boundary()
-  result=observe_installed_compute(plan,receipt,canonical(authority),operations,interface,fresh_expectation)
+  result=observe_installed_compute(plan,receipt,canonical(authority),operations,interface,fresh_expectation,owner=owner)
   deny(result.get('result')!='MEASURED_COMPUTE_CORRELATED',
        'KERNEL_COMPUTE_UNPROVEN')
   observation_boundary()
@@ -4413,7 +4595,7 @@ def _complete_kernel_lifecycle(plan,receipt,request,preparation,expectation,*,bo
           consumers=interface['_runtime_consumers'],runtime_disposition=runtime_disposition,
           owner=owner) as runtime:
        authority=runtime['authority'];operations=runtime['operations']
-       interface=observe_installed_interface(plan,receipt,canonical(authority),operations)
+       interface=observe_installed_interface(plan,receipt,canonical(authority),operations,owner=owner)
        observations=resident_observation(authority,operations,interface)
   # All constituent exit guards have now passed, but their cleanup remains
   # armed. Publish only within this whole-domain ownership, not after return.
@@ -4510,7 +4692,7 @@ def _read_failed_operations_endpoint(rows):
   try:
    result=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
        '--property=Id,ActiveState,SubState,Result',socket],capture_output=True,text=True,
-       timeout=15,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+       check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
        stdin=subprocess.DEVNULL,close_fds=True)
   except (OSError,subprocess.SubprocessError) as exc:
    raise RunnerDenied('KERNEL_SUCCESSOR_ENDPOINT_FAILURE_DENIED') from exc
@@ -4543,7 +4725,7 @@ def _read_failed_authority_endpoint(rows):
  try:
   result=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
       '--property='+','.join(properties),service],capture_output=True,text=True,
-      timeout=15,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+      check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
       stdin=subprocess.DEVNULL,close_fds=True)
  except (OSError,subprocess.SubprocessError) as exc:
   raise RunnerDenied('KERNEL_SUCCESSOR_AUTHORITY_FAILURE_DENIED') from exc
@@ -4566,7 +4748,7 @@ def _read_failed_authority_endpoint(rows):
   journal=subprocess.run(['/usr/bin/journalctl','--no-pager','-b','-o','short-monotonic',
       '_SYSTEMD_INVOCATION_ID='+value['InvocationID'],'+',
       'OBJECT_SYSTEMD_INVOCATION_ID='+value['InvocationID']],capture_output=True,text=True,
-      timeout=15,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+      check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
       stdin=subprocess.DEVNULL,close_fds=True)
  except (OSError,subprocess.SubprocessError) as exc:
   raise RunnerDenied('KERNEL_SUCCESSOR_AUTHORITY_FAILURE_EVIDENCE_DENIED') from exc
@@ -4596,7 +4778,7 @@ def _read_failed_haos_gateway_endpoint(rows):
   try:
    response=subprocess.run(['/usr/bin/systemctl','show','--all','--no-pager',
        '--property='+','.join(properties),name],capture_output=True,text=True,
-       timeout=15,check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
+       check=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},
        stdin=subprocess.DEVNULL,close_fds=True)
   except (OSError,subprocess.SubprocessError) as exc:
    raise RunnerDenied('KERNEL_SUCCESSOR_GATEWAY_FAILURE_DENIED') from exc
@@ -4626,7 +4808,7 @@ def _read_failed_haos_gateway_endpoint(rows):
  try:
   journal=subprocess.run(['/usr/bin/journalctl','--no-pager','-b','-o','short-monotonic',
       '_SYSTEMD_INVOCATION_ID='+invocation,'+','OBJECT_SYSTEMD_INVOCATION_ID='+invocation],
-      capture_output=True,text=True,timeout=15,check=True,
+      capture_output=True,text=True,check=True,
       env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'},stdin=subprocess.DEVNULL,close_fds=True)
  except (OSError,subprocess.SubprocessError) as exc:
   raise RunnerDenied('KERNEL_SUCCESSOR_GATEWAY_FAILURE_EVIDENCE_DENIED') from exc
@@ -4682,7 +4864,7 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
   if action=='stop':attempted=True
   try:subprocess.run(['/usr/bin/systemctl','--no-ask-password',
       '--job-mode=replace' if action=='stop' else '--job-mode=fail',action,*units],
-      check=True,timeout=90,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
+      check=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,
       close_fds=True,env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
   except subprocess.CalledProcessError as exc:
    if action!='start':raise RunnerDenied('KERNEL_SUCCESSOR_QUIESCE_COMMAND_FAILED') from exc
@@ -4691,13 +4873,20 @@ def _quiesce_installed_kernel(prestate,*,guard,verify_predecessor,verify_restore
    # This is compensation evidence only; construction still fails below.
    import time
    restart_errors.append(exc)
-   deadline=time.monotonic()+10.0
    while True:
     guard();current=read(cleanup=True);definitions(current)
     settled=all(_unit_active(name,row) or (row['ActiveState'],row['SubState'])==('inactive','dead')
                 for name,row in current.items())
     if settled and all(_unit_active(name,current[name]) for name in units):break
-    if time.monotonic()>=deadline:
+    # Only a native transition is pending. Elapsed time cannot establish
+    # either restoration or failure, and never authorizes another start.
+    transitional={'activating','deactivating','reloading'}
+    pending=(any(row['ActiveState'] in transitional for row in current.values())
+        and all(_unit_active(name,current[name]) or current[name]['ActiveState'] in transitional
+                for name in units)
+        and all(_unit_active(name,row) or (row['ActiveState'],row['SubState'])==('inactive','dead')
+                or row['ActiveState'] in transitional for name,row in current.items()))
+    if not pending:
      raise RunnerDenied('KERNEL_SUCCESSOR_PREDECESSOR_RESTART_UNPROVEN') from exc
     time.sleep(0.1)
   except (OSError,subprocess.SubprocessError) as exc:raise RunnerDenied('KERNEL_SUCCESSOR_QUIESCE_COMMAND_FAILED') from exc
@@ -6390,7 +6579,7 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
    try:
     subprocess.run(['/usr/bin/systemctl','--no-ask-password','daemon-reload'],
         check=True,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,timeout=90,close_fds=True,
+        stderr=subprocess.DEVNULL,close_fds=True,
         env={'PATH':'/usr/bin:/bin','LANG':'C.UTF-8'})
    except (OSError,subprocess.SubprocessError) as exc:
     raise RunnerDenied('KERNEL_UNIT_REFRESH_FAILED') from exc
@@ -6568,7 +6757,10 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
   except WitnessPublicationUncertain:
    publication['completed']=True
    raise
-  except Exception as exc:
+  except BaseException as exc:
+   # Cancellation after inactive placement still belongs to this complete
+   # transaction. Restore its exact prestate before outer predecessor checks;
+   # successful compensation re-raises the original interruption below.
    if publication['completed']:
     raise WitnessPublicationUncertain('KERNEL_WITNESS_PUBLICATION_UNCERTAIN') from exc
    # An inner cleanup exception must not hide unresolved runtime mutation.
@@ -6655,21 +6847,18 @@ def run(root=Path("/"),source=SOURCE,request_path=REQUEST,host_path=HOST_STATE,s
      raise RunnerDenied('KERNEL_UNIT_COMPENSATION_UNPROVEN') from cleanup_error
    raise
   return witness
-def _read_compute_handoff(stream,*,timeout=10.0):
- """Existing observer's absolute-deadline input pattern, in this owner.
+def _read_compute_handoff(stream):
+ """Consume one bounded complete handoff from its owning descriptor.
 
- A byte cap alone cannot bound a root transaction waiting for pipe EOF.
- Preserve the borrowed descriptor's blocking mode; never close its owner.
+ Completion is EOF plus valid framed content, never elapsed time. Preserve
+ the borrowed descriptor's blocking mode and never close its owner.
  """
- import select,time
+ import select
  fd=stream.fileno();blocking=os.get_blocking(fd);raw=bytearray()
- deadline=time.monotonic()+timeout
  try:
   os.set_blocking(fd,False)
   while True:
-   remaining=deadline-time.monotonic()
-   deny(remaining<=0 or not select.select([fd],[],[],remaining)[0],
-        'KERNEL_COMPUTE_HANDOFF_TIMEOUT')
+   select.select([fd],[],[])
    try:chunk=os.read(fd,min(4096,65537-len(raw)))
    except BlockingIOError:continue
    if not chunk:break
@@ -6699,7 +6888,7 @@ def _native_observer_generation():
 
 
 def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,*,
-                           read_public_request=None,read_public_response=None,gateway_expectation=None):
+                           read_public_request=None,read_public_response=None,gateway_expectation=None,owner):
  """Read existing native subjects only; construction and admission stay separate."""
  import secrets,time
  from datetime import datetime,timezone
@@ -6745,30 +6934,62 @@ def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,*
  anchor=regular(VERIFY_KEY)
  host=current_host_gate(HOST_STATE,boot)
  if not gateway:expectation=_bind_compute_model(plan,SOURCE,expectation)
+ # The native read-only proof must remain tied to the same running owners,
+ # including across later blocking Host/source reads and Vitals publication.
+ controls=_read_kernel_units(STAGE1_CURRENT_SERVICES,service_controls=True)
+ deny(any(row['LoadState']!='loaded' or row['ActiveState']!='active'
+          or row['SubState']!='running' or row['NeedDaemonReload']!='no'
+          or row['Result']!='success' for row in controls.values()),
+      'KERNEL_OBSERVER_CURRENT_OWNER_DENIED')
+ socket_names={name for name in AUTHORITY_UNITS+OPERATIONS_UNITS+INTERFACE_UNITS
+               if name.endswith('.socket')}
+ units={**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()}
+ sockets={name:units[name] for name in socket_names}
+ deny(any(row['LoadState']!='loaded' or row['NeedDaemonReload']!='no'
+          or not _unit_active(name,row) for name,row in sockets.items()),
+      'KERNEL_OBSERVER_CURRENT_OWNER_DENIED')
  challenge={'schema':'SEREIN/KernelBranchWitnessRequest/v1','branch':'AUTHORITY',
      'request_id':'kernel-authority-'+secrets.token_hex(16),'nonce':secrets.token_hex(32),
      'previous_evidence_digest':'GENESIS'}
- authority=observe_installed_authority(plan,receipt,challenge)
+ authority=observe_installed_authority(plan,receipt,challenge,owner=owner)
  deny(authority.get('result')!='AUTHORITY_PHASE_A_OBSERVED','KERNEL_COMPUTE_AUTHORITY_UNPROVEN')
  authority_raw=canonical(authority)
- operations=observe_operations_lifecycle(plan,receipt,authority_raw,boundary=boundary)
+ operations=observe_operations_lifecycle(plan,receipt,authority_raw,boundary=boundary,owner=owner)
  deny(operations.get('result')!='OPERATIONS_MINIMUM_OBSERVED','KERNEL_COMPUTE_OPERATIONS_UNPROVEN')
- interface=observe_installed_interface(plan,receipt,authority_raw,operations)
+ interface=observe_installed_interface(plan,receipt,authority_raw,operations,owner=owner)
  deny(interface.get('result')!='PRIVATE_INTERFACE_DENIAL_CORRELATED','KERNEL_COMPUTE_INTERFACE_UNPROVEN')
  if gateway:
-  compute=observe_installed_gateway(plan,receipt,authority_raw,operations,interface,gateway_expectation)
+  compute=observe_installed_gateway(plan,receipt,authority_raw,operations,interface,gateway_expectation,owner=owner)
   deny(compute.get('result')!='NATIVE_HAOS_KERNEL_ANSWER_CORRELATED','GATEWAY_UNPROVEN')
  else:
-  compute=observe_installed_compute(plan,receipt,authority_raw,operations,interface,expectation)
+  compute=observe_installed_compute(plan,receipt,authority_raw,operations,interface,expectation,owner=owner)
   deny(compute.get('result')!='MEASURED_COMPUTE_CORRELATED','KERNEL_COMPUTE_UNPROVEN')
  preparation={'offline_preparation':None,'preserved_runtime':preserved_runtime}
  gpu=_observe_owned_gpu(plan,compute,preparation,signed_runtime_plan=None,boundary=boundary)
  # The original observations must survive the final source/installed-closure
  # comparison. This does not create a conversation or renew any timestamp.
- envelope=(prepare_gateway_observation(plan,receipt,authority_raw,operations,interface,gateway_expectation)
-           if gateway else prepare_compute_observation(plan,receipt,authority_raw,operations,interface,expectation))
+ envelope=(prepare_gateway_observation(plan,receipt,authority_raw,operations,interface,gateway_expectation,owner=owner)
+           if gateway else prepare_compute_observation(plan,receipt,authority_raw,operations,interface,expectation,owner=owner))
  deny(_observe_owned_gpu(plan,compute,preparation,signed_runtime_plan=None,boundary=boundary)!=gpu,
       'KERNEL_GPU_INVENTORY_CHANGED')
+ samples=[authority,*operations['observations'],interface,compute]
+ def verify_retained():
+  boundary()
+  for sample in samples:owner.expected_observation(canonical(sample))
+  current_envelope=(prepare_gateway_observation(plan,receipt,authority_raw,operations,interface,gateway_expectation,owner=owner)
+                    if gateway else prepare_compute_observation(plan,receipt,authority_raw,operations,interface,expectation,owner=owner))
+  deny(current_envelope!=envelope,'KERNEL_OBSERVATION_PRESTATE_CHANGED')
+  deny(_observe_owned_gpu(plan,compute,preparation,signed_runtime_plan=None,boundary=boundary)!=gpu,
+       'KERNEL_GPU_INVENTORY_CHANGED')
+  # Compare incarnation facts after the potentially blocking verification.
+  deny(_read_kernel_units(STAGE1_CURRENT_SERVICES,service_controls=True)!=controls,
+       'KERNEL_OBSERVER_CURRENT_OWNER_CHANGED')
+  current_units={**read_authority_unit_prestate(),**read_other_kernel_unit_prestate()}
+  deny({name:current_units[name] for name in socket_names}!=sockets
+       or regular(VERIFY_KEY)!=anchor,'KERNEL_OBSERVATION_PRESTATE_CHANGED')
+  boundary()
+ # This observer owns no service mutation: abort releases no service or state.
+ owner.retain(lambda:None,verify_retained)
  fresh=current_host_gate(HOST_STATE,boot)
  facts=lambda state:canonical({k:v for k,v in state['latest'].items()
                               if k not in {'observed_at','evidence_digest'}})
@@ -6790,18 +7011,23 @@ def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,*
  boundary()
  # Sample time AFTER all blocking reads. Original clocks expire together.
  samples=[authority,*operations['observations'],interface,compute]
+ for sample in samples:owner.expected_observation(canonical(sample))
+ compute_requests=owner.expected_observation(canonical(compute))
+ deny(compute.get('request')!=compute_requests[-1]
+      or (gateway and [row.get('query') for row in compute.get('prior_rounds',[])]!=compute_requests[:-1]),
+      'KERNEL_OBSERVER_ACQUISITION_DENIED')
  try:stamps=[datetime.fromisoformat(item['observed_at'].replace('Z','+00:00')) for item in samples]
  except (ValueError,TypeError,KeyError,AttributeError) as exc:
   raise RunnerDenied('KERNEL_OBSERVER_CLOCK_DENIED') from exc
  deny(any(stamp.utcoffset() is None for stamp in stamps),'KERNEL_OBSERVER_CLOCK_DENIED')
  now=time.time();oldest=min(stamp.timestamp() for stamp in stamps)
- deny(any(not 0<=now-stamp.timestamp()<=30 for stamp in stamps),'KERNEL_OBSERVER_STALE')
+ deny(any(not 0<=now-stamp.timestamp() for stamp in stamps),'KERNEL_OBSERVER_STALE')
  clock=datetime.fromtimestamp(now,timezone.utc)
  deny(_compare_operations_lifecycle(plan,authority_raw,operations['observations'],
-      operations['service_controls'],envelope=envelope,boot=boot,anchor=anchor,now=clock)!=operations,
+      operations['service_controls'],envelope=envelope,boot=boot,anchor=anchor,now=clock,owner=owner)!=operations,
       'KERNEL_COMPUTE_OPERATIONS_PREDECESSOR_DENIED')
  deny(_compare_interface_observation(plan,{**envelope,'interface_predecessor':sha(canonical(operations))},
-      canonical(interface))!=interface,'KERNEL_COMPUTE_INTERFACE_PREDECESSOR_DENIED')
+      canonical(interface),owner=owner)!=interface,'KERNEL_COMPUTE_INTERFACE_PREDECESSOR_DENIED')
  if gateway:
   prior_rounds=compute.get('prior_rounds',[])
   expected_gateway=envelope['gateway_expectation']
@@ -6814,21 +7040,22 @@ def _read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,*
        or any(row['query'].get('previous_evidence_digest')!=envelope['interface_predecessor']
               for row in prior_rounds),'GATEWAY_PREDECESSOR_DENIED')
   compared=compare_gateway_correlation_response(canonical(compute['subject_evidence']),
-      query=compute['request'],source=envelope['source'],boot_id=boot,observed_at=clock,
+      query=compute_requests[-1],source=envelope['source'],boot_id=boot,observed_at=clock,
       installed_evidence_sha256=envelope['installed_evidence_sha256'],
       prior_rounds=prior_rounds,
       **{k:v for k,v in envelope['gateway_expectation'].items()
-         if k not in {'compute_request_id','prior_compute_request_ids'}})
+         if k not in {'compute_request_id','prior_compute_request_ids'}}, acquisition_verifier=owner.acquisition_verifier(canonical(compute)))
  else:
   compared=compare_retained_compute_response(canonical(compute['subject_evidence']),
-      query=compute['request'],source=envelope['source'],
+      query=compute_requests[-1],source=envelope['source'],
       installed_evidence_sha256=envelope['installed_evidence_sha256'],boot_id=boot,
-      observed_at=clock,host_state=fresh,**expectation)
+      observed_at=clock,host_state=fresh,**expectation, acquisition_verifier=owner.acquisition_verifier(canonical(compute)))
  expected={**compared,'evidence_authentication':'ROOT_CREATED_PRIVATE_LISTENER',
       **({'haos_evidence_authentication':'SEPARATE_REQUIRED'} if gateway else {}),
       'native_identity_possession':'NOT_ESTABLISHED_BY_OPERATIONS','request':compute['request'],
       'observed_at':compute['observed_at'],'subject_bytes_sha256':sha(canonical(compute['subject_evidence']))}
  deny(expected!=compute,'KERNEL_COMPUTE_OUTPUT_DENIED')
+ owner.verify()
  return {'result':'STAGE1_SUPPORTING_EVIDENCE_AGGREGATED','boot_id':boot,
      'observed_at':oldest,'source':operations['source'],
      'installed_evidence_sha256':operations['installed_evidence_sha256'],
@@ -6882,10 +7109,10 @@ def observe_installed_stage1(plan,receipt,expectation,*,preserved_runtime,
  deny((stage1_evidence is None)!=(evidence_verifier is None)
       or (stage1_evidence is not None and gateway_expectation is None),
       'STAGE1_EXTERNAL_EVIDENCE_REQUIRED')
- with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')), _host_attempt_reader_scope():
+ with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')), _host_attempt_reader_scope(), _KernelLifecycleOwnership() as owner:
   observation=_read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,
       read_public_request=read_public_request,read_public_response=read_public_response,
-      **({'gateway_expectation':gateway_expectation} if gateway_expectation is not None else {}))
+      **({'gateway_expectation':gateway_expectation} if gateway_expectation is not None else {}),owner=owner)
   if stage1_evidence is None:return observation
   result=_stage1_candidate(observation,plan,stage1_evidence,evidence_verifier)
   deny(_native_observer_generation()!=selected or current_boot()!=observation['boot_id']
@@ -6990,10 +7217,10 @@ def publish_installed_stage1_vitals(plan,receipt,expectation,*,preserved_runtime
  deny((stage1_evidence is None)!=(evidence_verifier is None)
       or (stage1_evidence is not None and gateway_expectation is None),
       'STAGE1_EXTERNAL_EVIDENCE_REQUIRED')
- with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')), _host_attempt_reader_scope():
+ with public_generation_lock(Path('/'),sha(canonical(plan)),plan.get('current_boot_id')), _host_attempt_reader_scope(), _KernelLifecycleOwnership() as owner:
   observation=_read_installed_stage1(plan,receipt,expectation,preserved_runtime,selected,
       read_public_request=read_public_request,read_public_response=read_public_response,
-      **({'gateway_expectation':gateway_expectation} if gateway_expectation is not None else {}))
+      **({'gateway_expectation':gateway_expectation} if gateway_expectation is not None else {}),owner=owner)
   release=plan.get('release_digest')
   deny(not isinstance(release,str) or not re.fullmatch('sha256:[0-9a-f]{64}',release),
        'KERNEL_OBSERVATION_PLAN_DENIED')
@@ -7007,10 +7234,11 @@ def publish_installed_stage1_vitals(plan,receipt,expectation,*,preserved_runtime
         'KERNEL_OBSERVER_GENERATION_CHANGED')
    deny(host['projection_digest']!=projection['payload']['host_projection_digest'],
         'KERNEL_OBSERVATION_PRESTATE_CHANGED')
-   deny(not 0<=time.time()-projection['observed_at']<=30,'KERNEL_OBSERVER_STALE')
+   deny(time.time()<projection['observed_at'],'KERNEL_OBSERVER_CLOCK_DENIED')
    if stage1_evidence is not None:
     deny(_stage1_candidate(observation,plan,stage1_evidence,evidence_verifier)!=candidate,
          'STAGE1_EXTERNAL_EVIDENCE_CHANGED')
+   owner.verify()
   boundary()
   _write_native_vitals(Path('/var/lib/serein-outpost/domains/state.json'),projection,boundary=boundary)
   return projection

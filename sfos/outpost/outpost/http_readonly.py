@@ -48,7 +48,9 @@ def _kernel_observation_summary(snapshot):
   heading="Stage 1 candidate witness" if candidate else "Kernel supporting observation"
   state=("<p>Stage 1: READY_CANDIDATE. Admission: UNADMITTED. Independent validation is REQUIRED; this witness is not admission.</p>"
          if candidate else "<p>Stage 1: NOT_READY. Admission: UNADMITTED. Supporting evidence is not independent acceptance.</p>")
-  articles.append("<article aria-label='"+heading+"'><h3>"+heading+"</h3>"+state+evidence+"</article>")
+  recorded=("<p>Recorded observation: "+_status(_when(observation.get("observed_at")))+". "
+            "This is recorded evidence, not a current runtime-health check or Stage 1 acceptance.</p>")
+  articles.append("<article aria-label='"+heading+"'><h3>"+heading+"</h3>"+recorded+state+evidence+"</article>")
  return "".join(articles)
 
 def _recovery_summary(snapshot):
@@ -63,7 +65,7 @@ def _recovery_summary(snapshot):
    "<p>Last seen: "+_status(_when(value.get("last_observed_at")))+". Returned: "+_status(_when(value.get("first_post_boot_at")))+". Observed: "+_status(_when(value.get("observed_at")))+".</p>"
    "<p>Previous boot: "+_status(value.get("previous_boot_id"))+". New boot: "+_status(value.get("new_boot_id"))+".</p>"
    "<p>Intent match: "+_status(value.get("intent_match"))+". Intent: "+_status(value.get("intent_id"))+". Evidence age: "+_status(source.get("freshness"))+".</p>"
-   "<p>Failed to return: "+_status(", ".join(str(item) for item in failed) if failed else "NONE REPORTED — complete recovery is not implied")+".</p>"
+   "<p>Failed to return: "+_status(", ".join(str(item) for item in failed) if failed else "NONE REPORTED â€” complete recovery is not implied")+".</p>"
    "<p>Recommended path: "+_status(value.get("recommended_action"))+". Observation only; no repair is authorized.</p></article>")
  return "".join(rows)
 
@@ -80,7 +82,7 @@ def _collection_attempt_summary(snapshot):
   historical=payload.get("last_successful_observation")
   if isinstance(historical,dict):
    old=historical.get("latest",{})
-   rows.append("<h3>Last successful observation — HISTORICAL ONLY</h3>"
+   rows.append("<h3>Last successful observation â€” HISTORICAL ONLY</h3>"
     "<p>This retained observation is not current Host verification and does not pass the current gate.</p>"
     "<p>Historical classification: "+_status(historical.get("classification"))+". Observed: "+_status(_when(old.get("observed_at")))+".</p>"
     "<p>Historical boot: "+_status(historical.get("current_boot_id"))+". Projection digest: "+_status(historical.get("projection_digest"))+".</p>"
@@ -94,7 +96,7 @@ def _domain_registry_summary(snapshot):
  for source in snapshot.get("sections",{}).get("domains",{}).get("perspectives",[]):
   payload=source.get("payload",{})
   if source.get("producer")!="OUTPOST_DOMAIN_COORDINATOR" or "registry" not in payload:continue
-  rows.append("<h3>Canonical domain order — held, not admitted</h3>"
+  rows.append("<h3>Canonical domain order â€” held, not admitted</h3>"
    "<p>Outpost owns installation and verification. This record permits no downstream activation.</p><ol>")
   for seed in payload["registry"]["seeds"]:
    rows.append("<li>"+_status(seed["domain"])+": "+_status(seed["status"])+"; "+_status(seed["admission"])+".</li>")
@@ -109,7 +111,7 @@ def _domain_registry_summary(snapshot):
      rows.append(" Supporting observation only: "+_status(observation.get("claim"))+" at "+_status(observation.get("payload",{}).get("step"))+". Observed elapsed seconds: "+_status(domain.get("observation_elapsed"))+". Evidence: "+_status(observation.get("evidence_ref"))+".")
     if domain.get("historical_observation"):
      rows.append(" Prior-boot observation: HISTORICAL ONLY; not current verification.")
-    rows.append(" Downstream hold: "+_status(", ".join(domain.get("downstream_hold",[])) or "NONE — Cloud is last")+".</li>")
+    rows.append(" Downstream hold: "+_status(", ".join(domain.get("downstream_hold",[])) or "NONE â€” Cloud is last")+".</li>")
    rows.append("</ol>")
  return "".join(rows)
 
@@ -155,32 +157,31 @@ def _outpost_operator_page(snapshot):
   "<p>Conflicting Host evidence: "+("PRESENT" if conflicting_host else "NONE OBSERVED")+"</p></section>"
   "<section id='rescue'><h2>Rescue Chat</h2>"
   "<h3>1. STATE</h3><p>"+_status(classification)+"</p>"
-  "<h3>2. PERSPECTIVES</h3><p>The Host field inside the Outpost observation is "+_status(host.get("status"))+". Outpost classifies the projection as "+_status(classification)+". "+("CONFLICT — DO NOT ACT." if conflicting_host else "No disagreement between current Host observations is evidenced. Missing or degraded evidence is not agreement or admission.")+"</p>"
+  "<h3>2. PERSPECTIVES</h3><p>The Host field inside the Outpost observation is "+_status(host.get("status"))+". Outpost classifies the projection as "+_status(classification)+". "+("CONFLICT â€” DO NOT ACT." if conflicting_host else "No disagreement between current Host observations is evidenced. Missing or degraded evidence is not agreement or admission.")+"</p>"
   "<h3>3. SAFE PATH</h3><p>"+html.escape(recovery)+"</p>"
   "<h3>4. DECISION</h3><p>OPERATOR_REQUIRED only for a separately prepared consequential action; none is requested by this page.</p>"
   "<h3>5. STOP/WAKE</h3><p>Stop on UNKNOWN, STALE, REVOKED, or CONFLICT. Wake on fresh attributable evidence through the governed owning road.</p>"
   "<p>Recommendation is not authorization. This page cannot execute recovery.</p></section>"
-  "<section id='resume'><h2>Resume</h2>"+_recovery_summary(snapshot)+_producer_evidence(snapshot,("recovery",),"<p>Last-known-good reference: UNKNOWN — no source supplied in this Outpost dataset. Recovery execution: NOT AUTHORIZED.</p>")+"</section>"
-  "<section id='domains'><h2>Domains</h2>"+_domain_registry_summary(snapshot)+_producer_evidence(snapshot,("domains",),"<p>Domain admission: UNKNOWN — no domain producer supplied in this Host-gate dataset.</p>")+"</section>"
+  "<section id='resume'><h2>Resume</h2>"+_recovery_summary(snapshot)+_producer_evidence(snapshot,("recovery",),"<p>Last-known-good reference: UNKNOWN â€” no source supplied in this Outpost dataset. Recovery execution: NOT AUTHORIZED.</p>")+"</section>"
+  "<section id='domains'><h2>Domains</h2>"+_domain_registry_summary(snapshot)+_producer_evidence(snapshot,("domains",),"<p>Domain admission: UNKNOWN â€” no domain producer supplied in this Host-gate dataset.</p>")+"</section>"
   "<section id='hardware'><h2>Hardware/Frame</h2><p>GPU witness: "+_status(gpu.get("status"))+"; devices: "+_status(gpu.get("device_count"))+".</p></section>"
-  "<section id='sereinnet'><h2>SereinNet</h2>"+_kernel_observation_summary(snapshot)+_producer_evidence(snapshot,("serein",),"<p>Kernel and Gateway admission: UNKNOWN — no SereinNet producer supplied in this Host-gate dataset.</p>")+"</section>"
-  "<section id='memory'><h2>Memory/Knowledge</h2><p>State: UNKNOWN — no Memory or Knowledge producer supplied in this Host-gate dataset.</p></section>"
-  "<section id='evidence'><h2>Evidence/Logs</h2>"+_producer_evidence(snapshot,("outpost",),"<p>Black-box event chronology: UNKNOWN — no event-log producer supplied in this Host-gate dataset.</p>",{"OUTPOST_VITALITY_CHRONOLOGY"})+"<p>Projection digest: "+_status(snapshot.get("projection_digest"))+"</p>"
+  "<section id='sereinnet'><h2>SereinNet</h2>"+_kernel_observation_summary(snapshot)+_producer_evidence(snapshot,("serein",),"<p>Kernel and Gateway admission: UNKNOWN â€” no SereinNet producer supplied in this Host-gate dataset.</p>")+"</section>"
+  "<section id='memory'><h2>Memory/Knowledge</h2><p>State: UNKNOWN â€” no Memory or Knowledge producer supplied in this Host-gate dataset.</p></section>"
+  "<section id='evidence'><h2>Evidence/Logs</h2>"+_producer_evidence(snapshot,("outpost",),"<p>Black-box event chronology: UNKNOWN â€” no event-log producer supplied in this Host-gate dataset.</p>",{"OUTPOST_VITALITY_CHRONOLOGY"})+"<p>Projection digest: "+_status(snapshot.get("projection_digest"))+"</p>"
   "<p>Observed at: "+_status(_when(latest.get("observed_at")))+"; monotonic sample sequence: "+_status(snapshot.get("sample_count"))+".</p>"
   "<details><summary>Deep evidence</summary><pre id='vitality'>"+html.escape(json_body(snapshot).decode().strip())+"</pre></details>"
-  "</section><section id='controls'><h2>Operator controls</h2><h3>Budget</h3>"+_producer_evidence(snapshot,("budget",),"<p>Starting credit: UNKNOWN. Attributable spend: UNKNOWN. Estimated remaining: UNKNOWN. Unreconciled usage: UNKNOWN. Budget state: UNKNOWN — no budget producer supplied.</p>")+"<p>No mutation controls are exposed. Consequential actions require their governed owning path and explicit authority.</p></section>"
+  "</section><section id='controls'><h2>Operator controls</h2><h3>Budget</h3>"+_producer_evidence(snapshot,("budget",),"<p>Starting credit: UNKNOWN. Attributable spend: UNKNOWN. Estimated remaining: UNKNOWN. Unreconciled usage: UNKNOWN. Budget state: UNKNOWN â€” no budget producer supplied.</p>")+"<p>No mutation controls are exposed. Consequential actions require their governed owning path and explicit authority.</p></section>"
   "</main><footer><a href='#home'>Serein Vitals Home</a></footer>"
  )
 def html_body(snapshot):
  projection=snapshot.get("projection_digest",digest(snapshot))
  return ("<!doctype html><html lang='en'><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'><title>Serein Vitals</title></head><body><p id='projection-digest'>"+html.escape(projection)+"</p>"+_outpost_operator_page(snapshot)+"</body></html>").encode()
-def present(store:HostVitalityStore,method:str,path:str,accept:str,current_boot_id:str,*,snapshot_timeout=None)->ReadOnlyPresentation:
+def present(store:HostVitalityStore,method:str,path:str,accept:str,current_boot_id:str)->ReadOnlyPresentation:
  if method!="GET":return ReadOnlyPresentation(405,"application/json",canonical({"error":"READ_ONLY"}),SAFE_HEADERS)
  if path!="/v1/runtime/status":return ReadOnlyPresentation(404,"application/json",canonical({"error":"NOT_FOUND"}),SAFE_HEADERS)
  try:
   if isinstance(store,VitalsRuntimeStore):
-   snapshot=(store.snapshot(current_boot_id=current_boot_id) if snapshot_timeout is None else
-             store.snapshot_for_presentation(current_boot_id=current_boot_id,timeout=snapshot_timeout))
+   snapshot=store.snapshot_for_presentation(current_boot_id=current_boot_id)
   else:snapshot=store.snapshot()
  except (HostVitalityError,OSError,ValueError):return ReadOnlyPresentation(503,"application/json",canonical({"error":"VITALITY_UNAVAILABLE"}),SAFE_HEADERS)
  if snapshot.get("status")=="NO_OBSERVATION":return ReadOnlyPresentation(503,"application/json",canonical({"error":"VITALITY_UNAVAILABLE"}),SAFE_HEADERS)
